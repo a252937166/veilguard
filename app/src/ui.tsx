@@ -58,3 +58,31 @@ export function DecisionLabel({ value }: { value: number }) {
   const cls = value === 1 ? 'ok' : value === 2 ? 'warn' : 'bad';
   return <span className={`pill ${cls}`}>{DECISION_LABEL[value] ?? value}</span>;
 }
+
+/**
+ * Dead-end helper: when the connected wallet holds no on-chain role for a view,
+ * explain why (role-gating is the point) and offer a one-click path into the
+ * matching demo account instead of leaving the user stuck.
+ */
+export function NoRole({
+  title, body, demo,
+}: {
+  title: string;
+  body: string;
+  demo?: 'delegate' | 'auditor';
+}) {
+  const { account, startDemo, openRolePicker } = useApp();
+  return (
+    <div className="norole">
+      <h3>{title}</h3>
+      <p className="muted" style={{ fontSize: 13.5, maxWidth: 640 }}>{body}</p>
+      {account && <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>Connected: <span className="mono">{account.slice(0, 6)}…{account.slice(-4)}</span> — this wallet holds no such role, by design (every value is gated by on-chain ACLs).</p>}
+      <div className="row" style={{ marginTop: 14 }}>
+        {demo
+          ? <button className="btn primary" onClick={() => startDemo(demo)}>⚡ Try as the demo {demo === 'delegate' ? 'Delegate' : 'Auditor'} — instant</button>
+          : <button className="btn primary" onClick={openRolePicker}>⚡ Try a demo role</button>}
+        <span className="muted" style={{ fontSize: 12.5 }}>a shared, gas-sponsored account with the right permissions — no setup</span>
+      </div>
+    </div>
+  );
+}
