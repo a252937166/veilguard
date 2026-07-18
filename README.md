@@ -20,8 +20,8 @@ Exact limits, remaining budgets, thresholds and amounts are **never** revealed o
 Auditors receive **scoped, immutable disclosure snapshots** — not live state.
 
 **Live contracts on Ethereum Sepolia** · current public dApp: **https://veilguard.axiqo.xyz**.
-This source tree contains the v1.2 Operations Desk release; publish it assets-first
-and verify the footer build SHA before treating the public URL as the same release.
+The v1.2 Operations Desk is deployed there. Releases upload every hashed asset
+first, switch `index.html` last, then verify the live footer SHA and dynamic imports.
 
 ## Live deployment (Ethereum Sepolia)
 
