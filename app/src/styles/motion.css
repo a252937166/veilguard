@@ -1,0 +1,22 @@
+@keyframes state-tint {
+  from { background-color: rgba(118, 87, 255, .24); }
+  to { background-color: transparent; }
+}
+
+.row-flash td { animation: state-tint 900ms var(--ease-out); }
+.value { animation: value-reveal 180ms var(--ease-out); }
+@keyframes value-reveal {
+  from { opacity: .35; filter: blur(3px); }
+  to { opacity: 1; filter: blur(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+  }
+  .wavefield { display: none; }
+  .spin { animation: none; border-color: currentColor; }
+}

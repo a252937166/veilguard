@@ -3,6 +3,7 @@ import { ADDR, erc20Abi, fmt, scan, short, usdc, wrapperAbi } from '../config';
 import { publicClient } from '../nox';
 import { walletWrite } from '../walletTx';
 import { useApp } from '../App';
+import { Icon } from '../icons';
 
 const ETH_FAUCETS = [
   { name: 'Google Cloud Faucet', note: 'Sign in with any Google account — 0.05 Sepolia ETH daily, no mainnet balance required.', url: 'https://cloud.google.com/application/web3/faucet/ethereum/sepolia', tag: 'EASIEST' },
@@ -66,17 +67,26 @@ export function FaucetView() {
 
   return (
     <>
+      <header className="workspace-heading">
+        <div>
+          <span className="detail-kicker">Sepolia utilities</span>
+          <h1>Test funds</h1>
+          <p>Get gas for your wallet, claim the public test asset, or optionally fund the confidential Safe treasury.</p>
+        </div>
+      </header>
+
       <div className="notice">
         Grab <b>Sepolia ETH for gas</b> (official faucets, one is enough) and, if you like, claim demo
         <b> TestUSDC</b>. Note: claiming TestUSDC does <b>not</b> make your wallet a delegate — the module
-        only accepts the delegate address fixed in a mandate. To act as a delegate, use <b>⚡ Try a role</b>
+        only accepts the delegate address fixed in a mandate. To act as a delegate, use <b>Try a role</b>
         in the top bar (a shared demo account that holds the delegate permission).
       </div>
 
       <div className="card">
-        <h3>1 · Sepolia ETH — official faucets <small>login/captcha-gated by design — no site can claim for you</small></h3>
+        <h2>1 · Sepolia ETH — official faucets <small>login/captcha-gated by design — no site can claim for you</small></h2>
         <div className="tbl"><table>
-          <thead><tr><th>Faucet</th><th>How it works</th><th></th></tr></thead>
+          <caption className="sr-only">Official Sepolia ETH faucets</caption>
+          <thead><tr><th scope="col">Faucet</th><th scope="col">How it works</th><th scope="col">Action</th></tr></thead>
           <tbody>
             {ETH_FAUCETS.map((f) => (
               <tr key={f.url}>
@@ -90,14 +100,15 @@ export function FaucetView() {
       </div>
 
       <div className="card">
-        <h3>2 · TestUSDC — claim in one click
+        <h2>2 · TestUSDC — claim in one click
           {account && balance !== undefined && <small>your balance: {fmt(balance)} tUSDC</small>}
-        </h3>
+        </h2>
         <div className="row">
-          <div style={{ width: 150 }}>
-            <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} min="1" max="10000" />
+          <div className="faucet-amount-field">
+            <label htmlFor="faucet-amount">Amount</label>
+            <input id="faucet-amount" type="number" value={amount} onChange={(e) => setAmount(e.target.value)} min="1" max="10000" />
           </div>
-          <button className="btn primary" disabled={!account || !!busy} onClick={claim}>💧 Claim TestUSDC</button>
+          <button className="btn primary" disabled={!account || !!busy} onClick={claim}><Icon name="funds" /> Claim TestUSDC</button>
         </div>
         <p className="muted" style={{ marginTop: 10, fontSize: 12.5 }}>
           Cap 10,000 per claim · token <a href={scan(ADDR.TestUSDC)} target="_blank" rel="noopener" className="mono">{short(ADDR.TestUSDC)}</a>.
@@ -106,9 +117,9 @@ export function FaucetView() {
       </div>
 
       <div className="card">
-        <h3>3 · Optional — fund the treasury <small>wrap TestUSDC 1:1 into confidential cUSDC held by the Safe</small></h3>
+        <h2>3 · Optional — fund the treasury <small>wrap TestUSDC 1:1 into confidential cUSDC held by the Safe</small></h2>
         <div className="row">
-          <button className="btn" disabled={!account || !!busy} onClick={wrapToTreasury}>🔒 Wrap {amount} → Safe treasury</button>
+          <button className="btn" disabled={!account || !!busy} onClick={wrapToTreasury}><Icon name="payments" /> Wrap {amount} → Safe treasury</button>
           <span className="muted" style={{ fontSize: 12.5 }}>needs TestUSDC balance ≥ amount; the treasury is already funded for the demo</span>
         </div>
         <p className="muted" style={{ marginTop: 10, fontSize: 12.5 }}>
