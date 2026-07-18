@@ -19,7 +19,9 @@ and the chain only ever learns a coarse, publicly verifiable outcome:
 Exact limits, remaining budgets, thresholds and amounts are **never** revealed on-chain.
 Auditors receive **scoped, immutable disclosure snapshots** — not live state.
 
-**Live on Ethereum Sepolia** · dApp: **https://veilguard.axiqo.xyz**
+**Live contracts on Ethereum Sepolia** · current public dApp: **https://veilguard.axiqo.xyz**.
+This source tree contains the v1.2 Operations Desk release; publish it assets-first
+and verify the footer build SHA before treating the public URL as the same release.
 
 ## Live deployment (Ethereum Sepolia)
 
@@ -33,7 +35,7 @@ Auditors receive **scoped, immutable disclosure snapshots** — not live state.
 
 Full addresses & roles: [`deployments.json`](./deployments.json).
 
-## On-chain evidence
+## Frozen on-chain evidence run
 
 One clean run on Sepolia (commit `2dde792`), **real 2-of-2 Safe governance** — a single owner cannot act alone. Every hash is verifiable on Etherscan:
 
@@ -89,25 +91,35 @@ scripts/
   smoke-sepolia.ts           on-chain within-mandate loop + latency
   e2e-sepolia.ts             three-state + cancel + audit coverage
   keeper.ts                  untrusted finalize courier (one-shot or loop)
-app/                         React + viem + Nox SDK dApp (5 role views)
+app/                         Hash-routed React + viem + Nox SDK operations desk
+server/provisioner.mjs       bounded decision, audit, governance and onboarding API
 feedback.md                  developer feedback on the Nox tooling
 ```
 
 ## Development
 
-Prerequisites: Node.js ≥ 22, Docker running (the plugin boots the Nox off-chain
-stack locally).
+Prerequisites: Node.js **22.x** (pinned in `.nvmrc` / `.node-version`) and Docker
+running (the plugin boots the Nox off-chain stack locally). On Apple Silicon,
+use an arm64 Node process rather than an x64/Rosetta shell; the preflight check
+fails early with a clear message when the runtime is incompatible.
 
 ```sh
+nvm use
 npm install
-npx hardhat test "$PWD/test/00-stack.test.ts" \
-                 "$PWD/test/10-veilguard-flows.test.ts" \
-                 "$PWD/test/20-audit-isolation.test.ts" \
-                 "$PWD/test/30-governance.test.ts"   # 17 tests on the local Nox off-chain stack
+npm --prefix app install
+npm run check
+npm run test:server                    # bounded API and Safe-serialization tests
+npm test -- "$PWD/test/00-stack.test.ts" \
+            "$PWD/test/10-veilguard-flows.test.ts" \
+            "$PWD/test/20-audit-isolation.test.ts" \
+            "$PWD/test/30-governance.test.ts"   # 17 tests on the local Nox off-chain stack
 ```
 
 > Pass **absolute** test paths — `hardhat test` with a relative path can misresolve
 > against `node_modules/@iexec-nox/handle` when the suite imports the handle SDK.
+> With Colima, also export its socket for the Nox plugin, for example
+> `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock`; Docker CLI context selection
+> alone is not visible to the plugin.
 
 ### Deploy & exercise on Sepolia
 
@@ -122,6 +134,8 @@ npx hardhat run scripts/e2e-sepolia.ts    --network sepolia
 
 ```sh
 cd app && npm install && npm run dev      # http://localhost:5173
+npm test                                  # Vitest + React Testing Library
+npm run test:e2e                         # Playwright: 1366x768 + 390x844
 npm run build                             # → app/dist (static SPA)
 ```
 
@@ -133,21 +147,61 @@ KEEPER_LOOP=1 npx hardhat run scripts/keeper.ts --network sepolia   # loop
 ```
 Systemd/cron templates: [`scripts/keeper.service.example`](./scripts/keeper.service.example).
 
-## Interactive 2-of-2 & the demo committee
+## Confidential Operations Desk
 
-The Signer tab performs a **real in-browser 2-of-2**: you sign as **owner A** (the
-demo committee key, intentionally public on testnet) and **owner B is co-signed
-server-side** — but the co-signer refuses anything that is not a bounded
-governance call (`activateMandate` / `executeEscalated` / `cancelEscalated` /
-`retireMandate` / `unpauseAll`). Consequently owner A alone can never reach the
-Safe threshold for a raw transfer, so the public owner-A key cannot drain or
-brick the Safe. Both signatures are genuine EIP-712; `execTransaction` runs
-on-chain. This is a demo committee, not separate human approvers.
+The dApp is organized around work objects rather than disconnected role demos.
+Its refresh-safe routes include `#/overview`, `#/payments`, `#/payments/:id`,
+`#/policies/:id`, `#/approvals/:id`, `#/disclosure`, `#/audit/:packetId`,
+`#/verify/:flowId`, `#/contracts`, `#/provenance` and `#/funds`. The guided
+Launch Day run cannot skip ahead:
 
-The self-service provisioner (`/api/provision`) is likewise hardened: idempotent
-per address, a global daily cap, a `PROVISION_ENABLED` kill switch, and CORS
-locked to the app origin. Owner B's key (`/api/cosign`, `/api/provision`) stays
-server-side only.
+1. submit the 25 cUSDC CloudNode invoice and verify direct execution;
+2. submit the 60 cUSDC ShieldOps request and explicitly choose Approve or Reject;
+3. submit the 600 cUSDC Atlas Contractor request, verify it is blocked, and decrypt
+   the private reason as its isolated Delegate;
+4. review the immutable v1 disclosure scope and create the run-bound packet set;
+5. unlock, review or flag every disclosed request, pass integrity checks, then
+   inspect the direct, committee, blocked and audit flows in Verify.
+
+`DemoSessionV2` binds every request and packet to one run. An unfinished run can
+be resumed. Restart is refused until any old pending escalation has been really
+cancelled and its escrow refund confirmed. The public view never receives
+plaintext amounts, policy values or blocked reasons.
+
+## Real 2-of-2 demo committee
+
+The guided ShieldOps Approve/Reject buttons select a constrained demo action;
+they are not presented as the visitor's signature. Both current Safe owner keys
+remain server-side and produce a real threshold-2 `execTransaction`. There is no
+timer-based auto-approval: after the disclosed three-minute decision window the
+only automatic action is `cancelEscalated`, which returns escrow and restores the
+request budget.
+
+The provisioner enforces three narrow server interfaces:
+
+- `POST /api/demo-decision` accepts only the current run's pending ShieldOps
+  request, exact recipient and decrypted 60 cUSDC amount. Same-action retries are
+  idempotent; `202` means the same action is still processing, `409` is a
+  conflicting decision, `410` means the window expired and escrow was returned,
+  and `503` refuses to sign when Finance Admin cannot decrypt and verify the amount.
+- `POST /api/demo-audit-packet` accepts only verified terminal requests from the
+  current run, groups them by mandate and creates or reuses real on-chain packets.
+  The returned bundle is explicitly a UI aggregate, never a synthetic contract object.
+- `POST /api/governance-execute` replaces the removed `/api/cosign`. It verifies a
+  current owner-A EIP-712 signature, canonical allow-listed module calldata and the
+  latest Safe nonce before owner B co-signs and broadcasts.
+
+Every Safe operation shares one serialized nonce boundary from state revalidation
+through receipt. The self-service `/api/provision` path remains idempotent per
+address, daily-capped, protected by `PROVISION_ENABLED`, and CORS-locked to the app
+origin. Finance-admin and both current Safe-owner secrets are never shipped in the
+browser bundle; only intentionally low-power Delegate and snapshot-Auditor testnet
+keys are public.
+
+In production, set `DEMO_DECISION_JOURNAL_PATH` to a writable persistent volume.
+The journal stores the first observed approval timestamp plus terminal decision
+receipts, so the three-minute window and idempotent retries survive a provisioner
+restart. The OS temporary-directory default is suitable only for local development.
 
 ## Security & trust model
 
@@ -172,12 +226,18 @@ mandate.
 - **Recipient addresses are public** in P0 (the allow-list is plaintext).
 - **Escalation UX**: signers decrypt the amount in the VeilGuard view and confirm
   the escalated amount in the VeilGuard view; the official Safe UI does not decrypt Nox handles itself.
-- The Sepolia Safe is **2-of-2**: activation and escalation approval each require
-  two distinct owner EIP-712 signatures, threshold 2 (driven on-chain by `scripts/final-evidence.ts`). The signatures are produced by the demo automation, not collected from separate humans via the Safe Transaction Service / Safe{Wallet} queue.
+- The Sepolia Safe is **2-of-2**: activation and escalation decisions each require
+  two distinct owner EIP-712 signatures, threshold 2. Guided-demo signatures are
+  produced by the bounded server committee, not collected from separate humans via
+  the Safe Transaction Service / Safe{Wallet} queue.
+- The deployed v1 audit ABI always snapshots `autoLimit`, `budgetLeft` and
+  `reserveFloor`, plus amount and reason for every selected request. The UI labels
+  this fixed scope; per-field policy masking would require a new contract version.
 - **Changing the Safe owner set does not revoke access already granted to historical
   handles** (Nox ACLs are irreversible). Propose a new policy version after owner rotation.
-- Audit packets are **selective disclosure**, not a standalone compliance proof: they
-  disclose chosen policy values, request amounts and coarse reasons — verify the public
+- Audit packets are **selective disclosure**, not a standalone compliance proof: v1
+  discloses its three fixed policy snapshots plus selected request amounts and coarse
+  reasons — verify the public
   request state and transaction hashes alongside them.
 
 ## License

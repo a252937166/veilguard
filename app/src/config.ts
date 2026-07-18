@@ -45,6 +45,9 @@ export const DECISION_LABEL: Record<number, string> = { 1: 'WITHIN MANDATE', 2: 
 /** Friendly names for known payout addresses — raw hex is not a product UI. */
 export const VENDOR_NAMES: Record<string, string> = {
   '0xc4ba09787f46441a517467fc12af459d8268c60f': 'Demo Vendor',
+  '0x04ebe79419f42f12748aba1502331e336219b1f7': 'CloudNode',
+  '0xe32148e45c3b1f8a692bec3baa0079ad103a4c6b': 'ShieldOps',
+  '0x6152f8ebe4e9b35c5042e095fc0e4af98c6a347d': 'Atlas Contractor',
 };
 export const vendorName = (a?: string) => (a ? VENDOR_NAMES[a.toLowerCase()] : undefined);
 

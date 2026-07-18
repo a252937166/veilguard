@@ -10,3 +10,5 @@ dist/
 .playwright-cli/
 offchain-services.log
 server/dist/
+app/test-results/
+app/playwright-report/

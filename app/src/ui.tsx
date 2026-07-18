@@ -76,7 +76,7 @@ export function NoRole({
   const { account, startDemo, openRolePicker } = useApp();
   return (
     <div className="norole">
-      <h3>{title}</h3>
+      <h2>{title}</h2>
       <p className="muted" style={{ fontSize: 13.5, maxWidth: 640 }}>{body}</p>
       {account && <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>Connected: <span className="mono">{account.slice(0, 6)}…{account.slice(-4)}</span> — this wallet holds no such role, by design (every value is gated by on-chain ACLs).</p>}
       <div className="row" style={{ marginTop: 14 }}>

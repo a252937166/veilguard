@@ -11,13 +11,14 @@ jobs:
         with: { node-version: 22 }
       - run: npm ci
       - run: npx hardhat build
+      - run: node --test server/test/*.test.mjs
   app-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
-      - run: cd app && npm ci && npm run build
+      - run: cd app && npm ci && npm test && npm run build
   contract-tests:
     # Full suite runs against the local Nox off-chain stack (Docker). Best-effort:
     # image pulls can be slow/flaky in CI, so this job does not gate merges.
@@ -30,7 +31,7 @@ jobs:
       - run: npm ci
       - name: Run test suite (local Nox Docker stack)
         run: |
-          npx hardhat test \
+          npm test -- \
             "$PWD/test/00-stack.test.ts" \
             "$PWD/test/10-veilguard-flows.test.ts" \
             "$PWD/test/20-audit-isolation.test.ts" \

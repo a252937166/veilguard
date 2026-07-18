@@ -7,7 +7,11 @@ import { fetchRequestTxs, type RequestTxs } from '../txlog';
 import { useApp, type SpendRequest } from '../App';
 import { NoRole, RequestPill } from '../ui';
 import { FREEPLAY_DELEGATE, VIOLATION_DELEGATE, demoWalletByAddress } from '../demo';
-import { MISSIONS, completeMission, loadMissions, type MissionKey, type MissionState } from '../missions';
+import { MISSIONS, bindMissionRequest, completeMission, confirmApprovalDecision, getOrCreateDemoSession, loadMissions, type MissionKey, type MissionState } from '../missions';
+import { DEMO_SCENARIOS, demoMemoHash, scenarioByKey, scenarioByRecipient, type DemoScenarioKey } from '../demo-scenarios';
+import { loadDemoSession } from '../demo-session';
+import { formatAppRoute, parseAppHash } from '../routes';
+import { PrivacyLens } from '../components/PrivacyLens';
 
 const REASONS: Record<number, string> = {
   1: 'over the delegated budget',
@@ -15,12 +19,16 @@ const REASONS: Record<number, string> = {
   3: 'would breach the reserve floor',
 };
 
-type Track = { id: string; mission: MissionKey | 'free'; amount: string; tx?: `0x${string}`; at: number };
+type Track = { id: string; mission: MissionKey | 'free'; amount: string; tx?: `0x${string}`; at: number; runId?: string };
 const loadTrack = (): Track | null => { try { return JSON.parse(sessionStorage.getItem('vg_track') ?? 'null'); } catch { return null; } };
 const saveTrack = (t: Track | null) => { try { t ? sessionStorage.setItem('vg_track', JSON.stringify(t)) : sessionStorage.removeItem('vg_track'); } catch { /* ignore */ } };
 
 const MAIN_DEMO = '0x17ee5ad7e4b40cadafad27c5f68f74d02c7fd532';
 const isDemoAddr = (a?: string) => !!a && [MAIN_DEMO, VIOLATION_DELEGATE.address.toLowerCase(), FREEPLAY_DELEGATE.address.toLowerCase()].includes(a.toLowerCase());
+
+function activeRunId(): string {
+  return getOrCreateDemoSession().runId;
+}
 
 function mmss(sec: number): string {
   const m = Math.floor(sec / 60), s = sec % 60;
@@ -41,6 +49,9 @@ export function DelegateView() {
   const [missions, setMissions] = useState<MissionState>(loadMissions);
   const [txs, setTxs] = useState<Map<string, RequestTxs>>(new Map());
   const [cool, setCool] = useState<{ main: number; violation: number; freeplay: number }>({ main: 0, violation: 0, freeplay: 0 });
+  const [selectedScenario, setSelectedScenario] = useState<DemoScenarioKey>('routine');
+  const [decisionBusy, setDecisionBusy] = useState<'approve' | 'reject' | null>(null);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
 
   // Rich progress state: label + started + expected duration + optional tx link.
   type Flow = { label: string; startedAt: number; expect?: number; tx?: `0x${string}` };
@@ -64,6 +75,22 @@ export function DelegateView() {
   const freeFormRef = useRef<HTMLDivElement>(null);
   const amountRef = useRef<HTMLInputElement>(null);
   const receiptRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const selectFromRoute = () => {
+      const route = parseAppHash(window.location.hash);
+      if (route?.page !== 'payment-detail' || !/^\d+$/.test(route.requestId)) return;
+      const id = BigInt(route.requestId);
+      const session = loadDemoSession();
+      const mission = session && (['routine', 'approval', 'violation'] as const)
+        .find((key) => session.missions[key].requestId === route.requestId);
+      setTrackId(id);
+      setMissionOf(mission ?? null);
+    };
+    selectFromRoute();
+    window.addEventListener('hashchange', selectFromRoute);
+    return () => window.removeEventListener('hashchange', selectFromRoute);
+  }, []);
 
   const isDemo = account?.toLowerCase() === '0x17ee5ad7e4b40cadafad27c5f68f74d02c7fd532';
   const myMandate = useMemo(
@@ -146,8 +173,20 @@ export function DelegateView() {
     const key = `${latest.id}:${latest.state}`;
     if (seenTerminal.current === key) return;
     seenTerminal.current = key;
-    if (latest.state === 2 && missionOf === 'routine') setMissions(completeMission('routine'));
-    if (latest.state === 2 && missionOf === 'approval') { setMissions(completeMission('approval')); fetchRequestTxs(true).then(setTxs).catch(() => {}); }
+    const tracked = loadTrack();
+    const runId = tracked?.runId ?? activeRunId();
+    if (latest.state === 2 && missionOf === 'routine') {
+      setMissions(completeMission('routine', { requestId: latest.id, outcome: 'executed', runId }));
+    }
+    if ((latest.state === 2 || latest.state === 5) && missionOf === 'approval') {
+      setMissions(completeMission('approval', {
+        requestId: latest.id,
+        outcome: latest.state === 5 ? 'cancelled' : 'executed',
+        decision: latest.state === 5 ? 'reject' : 'approve',
+        runId,
+      }));
+      fetchRequestTxs(true).then(setTxs).catch(() => {});
+    }
     saveTrack(null);
     setTimeout(() => receiptRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 250);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -158,6 +197,10 @@ export function DelegateView() {
     window.addEventListener('vg-missions', on);
     return () => window.removeEventListener('vg-missions', on);
   }, []);
+  useEffect(() => {
+    const next = DEMO_SCENARIOS.find((scenario) => !missions[scenario.key]);
+    if (next) setSelectedScenario(next.key);
+  }, [missions.routine, missions.approval, missions.violation]);
 
   // flash table rows whose outcome just changed (skip the initial load)
   const prevStates = useRef<Map<string, number>>(new Map());
@@ -196,6 +239,7 @@ export function DelegateView() {
   const submitCore = (who: `0x${string}`, mandateId: bigint, recipient: `0x${string}`, amt: string, mission: MissionKey | 'free') =>
     run(`Pay ${amt} cUSDC`, async () => {
       const local = !!demoWalletByAddress(who);
+      const runId = activeRunId();
       try {
         setFlow(local ? 'Encrypting the amount in-browser…' : '① Check your wallet — approve the signature to encrypt your amount', local ? 6 : undefined);
         const sigHint = !local && setTimeout(() => setFlow(
@@ -212,7 +256,10 @@ export function DelegateView() {
         try {
           hash = await walletWrite({
             account: who, address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'requestSpend',
-            args: [mandateId, recipient, enc.handle, enc.handleProof, keccak256(stringToBytes(memo || 'veilguard'))],
+            args: [mandateId, recipient, enc.handle, enc.handleProof,
+              local && mission !== 'free' && mission !== 'audit'
+                ? demoMemoHash(runId, mission as DemoScenarioKey, mandateId, who)
+                : keccak256(stringToBytes(memo || 'veilguard'))],
             onHint: setFlow, injected: !local,
           });
         } catch (e: any) {
@@ -227,7 +274,8 @@ export function DelegateView() {
         const ev = evs.find((e) => (e.args?.delegate as string)?.toLowerCase() === who.toLowerCase()) ?? evs[0];
         if (!ev) throw new Error('transaction confirmed but no SpendRequested event found');
         const id = ev.args.requestId as bigint;
-        saveTrack({ id: String(id), mission, amount: amt, tx: hash, at: Date.now() });
+        saveTrack({ id: String(id), mission, amount: amt, tx: hash, at: Date.now(), runId });
+        if (mission !== 'free' && mission !== 'audit') bindMissionRequest(mission, id, runId);
         setReasonVal(null); setLastAmount(amt); setLastTx(hash); setMissionOf(mission); setTrackId(id);
       } finally { setFlow(null); }
     });
@@ -260,8 +308,8 @@ export function DelegateView() {
   };
   const vendorOf = (m?: { recipients: `0x${string}`[] }) => (m?.recipients[0] ?? '0x') as `0x${string}`;
 
-  const loadScenario = (amt: string, label: string) => {
-    setAmount(amt); setTrackId(null); setReasonVal(null);
+  const loadScenario = (amt: string, label: string, to?: `0x${string}`) => {
+    setAmount(amt); if (to) setRecipient(to); setTrackId(null); setReasonVal(null);
     requestAnimationFrame(() => freeFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
     setTimeout(() => amountRef.current?.focus(), 420);
     toast(`${label} loaded — press Submit to run it with your wallet.`);
@@ -287,24 +335,35 @@ export function DelegateView() {
     if (!myMandate || busy) return;
     if (blockingRequest) { toast('A payment is still in flight — it clears in under a minute.', true); return; }
     if (key === 'routine' || key === 'approval') {
-      const amt = key === 'routine' ? '25' : '60';
-      if (!isDemo) { loadScenario(amt, key === 'routine' ? 'Routine payment' : 'Approval challenge'); return; }
+      const scenario = scenarioByKey(key);
+      const amt = scenario.amount;
+      if (!isDemo) { loadScenario(amt, scenario.vendor, scenario.recipient); return; }
       if (!(await ensureReady(account!))) return;
-      submitCore(account!, myMandate.id, vendorOf(myMandate), amt, key);
+      if (!myMandate.recipients.some((r) => r.toLowerCase() === scenario.recipient.toLowerCase())) {
+        toast('The demo treasury is refreshing its recipient policy. Try again in about two minutes.', true);
+        return;
+      }
+      submitCore(account!, myMandate.id, scenario.recipient, amt, key);
       return;
     }
     // violation: use the dedicated delegate so the main one never enters cooldown
     if (isDemo && violationMandate && violationCoolLeft <= 0) {
       if (!(await ensureReady(VIOLATION_DELEGATE.address))) return;
-      submitCore(VIOLATION_DELEGATE.address, violationMandate.id, vendorOf(violationMandate), '600', 'violation');
+      const scenario = scenarioByKey('violation');
+      if (!violationMandate.recipients.some((r) => r.toLowerCase() === scenario.recipient.toLowerCase())) {
+        toast('The isolated demo mandate is refreshing its recipient policy. Try again shortly.', true);
+        return;
+      }
+      submitCore(VIOLATION_DELEGATE.address, violationMandate.id, scenario.recipient, scenario.amount, 'violation');
       return;
     }
     if (isDemo && violationMandate) {
-      // someone just ran it — exhibit the freshest blocked request instead
+      // A shared visitor's request is useful live evidence, but its memo is
+      // bound to another run and must never advance this session or its audit.
       const exhibit = [...requests].reverse().find((r) => r.mandateId === violationMandate.id && r.state === 4);
       if (exhibit) {
-        setReasonVal(null); setLastAmount('600'); setLastTx(null); setMissionOf('violation'); setTrackId(exhibit.id);
-        toast('A visitor just triggered the block — showing that live payment. Decrypt its reason to finish the mission.');
+        setReasonVal(null); setLastAmount('600'); setLastTx(null); setMissionOf(null); setTrackId(exhibit.id);
+        toast('Another run just triggered this live block. You may inspect it, but it cannot complete or enter your run-bound audit packet.');
         setTimeout(() => receiptRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 250);
         return;
       }
@@ -312,7 +371,8 @@ export function DelegateView() {
       return;
     }
     // own wallet (or setup missing): run it on the caller's own mandate
-    loadScenario('600', 'Policy violation');
+    const scenario = scenarioByKey('violation');
+    loadScenario(scenario.amount, scenario.vendor, scenario.recipient);
   };
 
   const decryptReason = async () => {
@@ -323,10 +383,74 @@ export function DelegateView() {
       const { value } = await client.decrypt(latest.blockedReason as any);
       const n = Number(value);
       setReasonVal(`${n} · ${REASONS[n] ?? 'unknown'}`);
-      if (missionOf === 'violation') setMissions(completeMission('violation'));
+      if (missionOf === 'violation') {
+        const tracked = loadTrack();
+        const runId = tracked?.runId ?? activeRunId();
+        const expectedMemo = demoMemoHash(runId, 'violation', latest.mandateId, latest.delegate);
+        if (latest.memoHash.toLowerCase() === expectedMemo.toLowerCase()) {
+          setMissions(completeMission('violation', {
+            requestId: latest.id,
+            outcome: 'blocked',
+            reasonDecrypted: true,
+            runId,
+          }));
+        } else {
+          toast('Reason unlocked for this live exhibit, but it belongs to another run and was not added to your mission.', true);
+        }
+      }
     } catch (e: any) {
       toast(`Decrypt refused: ${e?.message ?? e}`.slice(0, 260), true);
     } finally { setReasonBusy(false); }
+  };
+
+  const decideEscalation = async (action: 'approve' | 'reject') => {
+    if (!latest || latest.state !== 3) return;
+    setDecisionBusy(action);
+    setDecisionError(null);
+    try {
+      const tracked = loadTrack();
+      const runId = tracked?.runId ?? activeRunId();
+      let data: any;
+      for (let attempt = 0; attempt < 45; attempt++) {
+        const res = await fetch('/api/demo-decision', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ runId, requestId: String(latest.id), action }),
+        });
+        data = await res.json().catch(() => ({}));
+        if (res.status === 202) {
+          if (attempt === 0) toast('The Safe decision is being assembled. Recovering its on-chain receipt…');
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+          continue;
+        }
+        if (!res.ok) throw new Error(data?.error ?? data?.code ?? 'committee decision failed');
+        break;
+      }
+      if (!data?.ok || data?.state !== (action === 'approve' ? 'safe-approved' : 'safe-rejected')) {
+        throw new Error('committee decision did not return a confirmed terminal receipt');
+      }
+      confirmApprovalDecision(latest.id, action, { runId, transactionHash: data.hash });
+      setMissions(completeMission('approval', {
+        requestId: latest.id,
+        outcome: action === 'reject' ? 'cancelled' : 'executed',
+        decision: action,
+        runId,
+      }));
+      toast(action === 'approve'
+        ? 'Safe 2-of-2 approved the payment. Confirming the confidential payout…'
+        : 'Safe 2-of-2 rejected the payment. Confirming escrow return and budget restoration…');
+      for (let i = 0; i < 12; i++) {
+        refresh();
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+      }
+      fetchRequestTxs(true).then(setTxs).catch(() => {});
+    } catch (e: any) {
+      const message = e?.message ?? String(e);
+      setDecisionError(message);
+      toast(`Decision not completed: ${message}. Your request remains recoverable from this page.`, true);
+    } finally {
+      setDecisionBusy(null);
+    }
   };
 
   if (!account)
@@ -335,19 +459,30 @@ export function DelegateView() {
   if (!myMandate)
     return <ProvisionMe account={account} />;
 
-  const vendor = vendorOf(latest ? mandates.find((m) => m.id === latest.mandateId) ?? myMandate : myMandate);
-  const vName = vendorName(vendor) ?? short(vendor);
+  const selectedStory = scenarioByKey(selectedScenario);
+  const latestStory = scenarioByRecipient(latest?.recipient) ?? (missionOf && missionOf !== 'free' && missionOf !== 'audit' ? scenarioByKey(missionOf as DemoScenarioKey) : undefined);
+  const vendor = (latest?.recipient ?? selectedStory.recipient) as `0x${string}`;
+  const vName = latestStory?.vendor ?? vendorName(vendor) ?? short(vendor);
   const stage = !latest ? (busy ? 1 : 0) : latest.state === 1 ? 2 : 3;
   const inFlight = stage === 1 || stage === 2;
   const terminal = latest && latest.state !== 1 && latest.state !== 3;
   const escalated = latest?.state === 3;
   const allCollected = missions.routine && missions.approval && missions.violation;
+  const demoComplete = allCollected && missions.audit;
+  const sessionSnapshot = loadDemoSession();
+  const confirmedApproval = latest && sessionSnapshot?.missions.approval.requestId === String(latest.id)
+    && sessionSnapshot.missions.approval.decisionConfirmed === true
+    ? sessionSnapshot.missions.approval.decision
+    : undefined;
 
   const primaryNext = () => {
     if (!missions.routine) return { label: '▶ Run: Routine payment', act: () => runScenario('routine') };
     if (!missions.approval) return { label: 'Continue: Approval challenge →', act: () => runScenario('approval') };
     if (!missions.violation) return { label: 'Continue: Policy violation →', act: () => runScenario('violation') };
-    return { label: 'Open the disclosure packet as Auditor →', act: () => startDemo('auditor') };
+    return {
+      label: 'Build the Launch Day disclosure bundle →',
+      act: () => { window.location.hash = formatAppRoute({ page: 'disclosure-builder' }); },
+    };
   };
 
   // ---------------- render ----------------
@@ -356,19 +491,20 @@ export function DelegateView() {
       <div className="paymain">
         {flow && (() => {
           const elapsed = Math.floor((Date.now() - flow.startedAt) / 1000);
-          const pct = flow.expect ? Math.min(96, (elapsed / flow.expect) * 100) : null;
           const slow = flow.expect ? elapsed > flow.expect * 2 : false;
           return (
-            <div className="flowbar rich">
+            <div className="flowbar rich" role="status" aria-live="polite">
               <div className="fb-row">
                 <span className="spin" /> <b>{flow.label}</b>
-                <span className="fb-elapsed mono">{elapsed}s{flow.expect ? ` · ~${flow.expect}s expected` : ''}</span>
+                <span className="fb-elapsed mono">{elapsed}s elapsed{flow.expect ? ` · usually ${flow.expect}–${flow.expect * 2}s` : ''}</span>
                 {flow.tx && <a className="alink mono" href={scanTx(flow.tx)} target="_blank" rel="noopener">view tx ↗</a>}
               </div>
-              {pct !== null && <div className="fb-track"><div className="fb-fill" style={{ width: `${pct}%` }} /></div>}
+              <div className="progress-status" aria-label="Payment processing stages">
+                <span className="done">Encrypted</span><span className="active">TEE evaluation</span><span>On-chain finalization</span>
+              </div>
               {!isDemo && flow.label.startsWith('①') && <div className="fb-note">Your wallet should be asking you to sign a message — approve it to continue.</div>}
               {!isDemo && flow.label.startsWith('②') && <div className="fb-note">Your wallet should be asking you to confirm a transaction.</div>}
-              {slow && <div className="fb-note">Taking longer than usual — Sepolia occasionally stretches to ~30s. Nothing is stuck.</div>}
+              {slow && <div className="fb-note">Taking longer than usual. You can leave this page and resume from Payment Inbox; the request id and transaction are saved.</div>}
             </div>
           );
         })()}
@@ -396,15 +532,16 @@ export function DelegateView() {
             <div className="r-rows">
               {lastAmount && <div className="r-row"><span>Amount</span><span><b>{lastAmount} cUSDC</b> → {vName} <i className="muted">(visible only to you)</i></span></div>}
               {!lastAmount && <div className="r-row"><span>Paid to</span><span>{vName} <span className="mono muted">{short(latest.recipient)}</span></span></div>}
-              <div className="r-row"><span>Policy result</span><span>{latest.state === 2 ? (missionOf === 'approval' ? 'Above auto-limit — approved by the committee' : 'Within mandate') : latest.state === 3 ? 'Above auto-limit — committee sign-off required' : latest.state === 4 ? 'Violates the confidential policy' : '—'}</span></div>
+              <div className="r-row"><span>Policy result</span><span>{latest.state === 2 ? (confirmedApproval === 'approve' ? 'Committee approved the policy exception' : missionOf === 'routine' ? 'Within mandate' : 'Executed · path evidence indexing') : latest.state === 3 ? 'Committee sign-off required' : latest.state === 4 ? 'Blocked by the confidential policy' : latest.state === 5 ? (confirmedApproval === 'reject' ? 'Committee rejected the policy exception' : 'Cancelled and refunded; no user Reject is claimed') : '—'}</span></div>
               {latest.state === 3 && <div className="r-row"><span>Funds</span><span className="ok-text">reserved in escrow — nothing moves without the 2-of-2</span></div>}
               {latest.state === 4 && <div className="r-row"><span>Funds</span><span className="ok-text">untouched — budget intact, cooldown armed</span></div>}
+              {latest.state === 5 && <div className="r-row"><span>Funds</span><span className="ok-text">returned from escrow · delegated budget restored</span></div>}
               {latest.state === 4 && (
                 <div className="r-row"><span>Private reason</span>
                   <span>{reasonVal ? <b className="value">{reasonVal}</b> : <i className="muted">encrypted — only you can open it</i>}</span>
                 </div>
               )}
-              {missionOf === 'approval' && latest.state === 2 && (
+              {confirmedApproval === 'approve' && latest.state === 2 && (
                 <div className="r-row"><span>Committee</span>
                   <span className="ok-text">✓ approved by a real Safe 2-of-2{txs.get(String(latest.id))?.approval && <> · <a className="alink mono" href={scanTx(txs.get(String(latest.id))!.approval!)} target="_blank" rel="noopener">view approval ↗</a></>}</span>
                 </div>
@@ -414,23 +551,53 @@ export function DelegateView() {
 
             {escalated && (() => {
               const demoReq = isDemoAddr(latest.delegate);
-              const age = Math.max(0, Math.floor(Date.now() / 1000) - Number(latest.createdAt));
               return (
-                <div className="committee-live stages">
-                  <div className="cl-row done"><span className="cl-dot">✓</span><span>Funds reserved in escrow</span></div>
-                  <div className="cl-row active"><span className="cl-dot"><span className="spin" /></span>
-                    <span>{demoReq ? 'Committee review' : 'Awaiting the Safe owners'}</span>
-                    {demoReq && <span className="mono muted cl-age">{age}s · ~20s window</span>}
+                <div className="committee-decision" data-tour="committee-decision">
+                  <div className="decision-copy">
+                    <div className="cl-row done"><span className="cl-dot">✓</span><span>Funds reserved in confidential escrow</span></div>
+                    <div className="cl-row active"><span className="cl-dot">2</span>
+                      <span>{demoReq ? 'Choose the demo committee outcome' : 'Awaiting the Safe owners'}</span>
+                      {demoReq && <span className="mono muted cl-age">server-enforced · 3 min</span>}
+                    </div>
+                    <p className="muted">
+                      {demoReq
+                        ? 'Your click selects one tightly-scoped demo action. Both current Safe owner keys stay server-side; the resulting 2-of-2 transaction is real and inspectable.'
+                        : 'A connected Safe owner may approve or reject this reserved request. Unapproved requests are cancelled after the disclosed deadline.'}
+                    </p>
                   </div>
-                  <div className="cl-row"><span className="cl-dot">○</span><span>2-of-2 execTransaction on Sepolia</span></div>
-                  <div className="cl-note muted">
-                    {demoReq
-                      ? 'The demo treasury committee signs a REAL Safe 2-of-2 — this card flips by itself.'
-                      : 'This public demo\u2019s committee only signs demo-treasury requests. Your escalation stays reserved until a Safe owner signs; if unapproved for ~30 minutes it is returned (cancelled) and the escrow released.'}
-                  </div>
+                  {demoReq ? (
+                    <div className="sticky-decision-bar">
+                      <button className="btn danger" disabled={!!decisionBusy} onClick={() => decideEscalation('reject')}>
+                        {decisionBusy === 'reject' ? <><span className="spin" /> Returning funds…</> : 'Reject & return funds'}
+                      </button>
+                      <button className="btn primary" disabled={!!decisionBusy} onClick={() => decideEscalation('approve')}>
+                        {decisionBusy === 'approve' ? <><span className="spin" /> Executing 2-of-2…</> : 'Approve payment'}
+                      </button>
+                    </div>
+                  ) : <button className="btn primary" onClick={() => goTab('Signer')}>Open approval workspace →</button>}
+                  {decisionError && <div className="inline-alert bad" role="alert">{decisionError} · Refresh or retry; escrow remains recoverable.</div>}
                 </div>
               );
             })()}
+
+            {terminal && (
+              <PrivacyLens
+                authorized={[
+                  { label: 'Amount', value: `${lastAmount || latestStory?.amount || 'Encrypted value'} cUSDC` },
+                  { label: 'Recipient', value: vName },
+                  { label: 'Purpose', value: latestStory?.purpose ?? 'Private payment memo' },
+                  { label: 'Outcome', value: latest.state === 2 ? 'Executed' : latest.state === 4 ? 'Blocked' : latest.state === 5 ? 'Rejected · funds returned' : 'Expired' },
+                  ...(latest.state === 4 ? [{ label: 'Reason', value: reasonVal ?? 'Encrypted · decrypt to inspect' }] : []),
+                ]}
+                publicView={[
+                  { label: 'Amount', value: <span className="enc">Encrypted handle</span> },
+                  { label: 'Recipient', value: <span className="mono">{short(latest.recipient)}</span> },
+                  { label: 'Memo', value: <span className="mono">{short(latest.memoHash)}</span> },
+                  { label: 'Outcome', value: latest.state === 2 ? 'EXECUTED' : latest.state === 4 ? 'BLOCKED' : latest.state === 5 ? 'CANCELLED' : 'EXPIRED' },
+                  { label: 'Policy values', value: <span className="enc">Protected</span> },
+                ]}
+              />
+            )}
 
             {!escalated && (
               <div className="r-cta">
@@ -460,35 +627,82 @@ export function DelegateView() {
           </div>
         )}
 
-        {/* ---- guided sandbox ---- */}
-        <div className="card">
-          <h3>Guided sandbox <small>collect all three outcomes — deterministic teaching scenarios</small></h3>
-          <div className="scen-list">
-            {MISSIONS.map((m, i) => {
-              const done = missions[m.key];
-              const locked = !unlocked[m.key];
+        {/* ---- payment inbox + selected request detail ---- */}
+        <section className="workbench payment-workbench" aria-labelledby="payment-inbox-title">
+          <div className="object-list">
+            <div className="object-list-head">
+              <div><h2 id="payment-inbox-title">Payment Inbox</h2><p>Launch Day Treasury Shift</p></div>
+              <span className="object-count">{DEMO_SCENARIOS.length}</span>
+            </div>
+            {DEMO_SCENARIOS.map((scenario) => {
+              const done = missions[scenario.key];
+              const locked = !unlocked[scenario.key];
               return (
-                <div key={m.key} className={`scen-card ${done ? 'done' : ''} ${locked ? 'locked' : ''}`}
-                  data-tour={`scenario-${m.key}`}>
-                  <div className="sc-head">
-                    <b>{i + 1} · {m.title}</b>
-                    {done ? <span className="pill ok">COLLECTED</span> : locked ? <span className="pill dim">🔒 finish the previous one</span> : <span className="pill tee">{m.outcome}</span>}
-                  </div>
-                  <p className="muted">{m.goal}</p>
-                  {!locked && (
-                    <button className={`btn small ${done ? '' : 'primary'}`} disabled={!!busy || !!blockingRequest}
-                      onClick={() => runScenario(m.key)}>
-                      {done ? '↻ Run again' : isDemo ? '▶ Run scenario' : '→ Load scenario'}
-                    </button>
-                  )}
-                  {m.key === 'violation' && !locked && isDemo && violationCoolLeft > 0 && (
-                    <span className="muted" style={{ fontSize: 11.5, marginLeft: 8 }}>fresh run in {mmss(violationCoolLeft)} — or replay the latest block</span>
-                  )}
-                </div>
+                <button key={scenario.key} type="button"
+                  className={`object-row ${selectedScenario === scenario.key ? 'selected' : ''}`}
+                  onClick={() => setSelectedScenario(scenario.key)}
+                  aria-pressed={selectedScenario === scenario.key}
+                  data-tour={`scenario-${scenario.key}`}>
+                  <span className={`object-avatar ${done ? 'ok' : locked ? 'muted' : ''}`}>{scenario.vendor.slice(0, 1)}</span>
+                  <span className="object-row-copy">
+                    <b>{scenario.vendor}</b>
+                    <small>{scenario.purpose}</small>
+                    {scenario.urgency && <em>{scenario.urgency}</em>}
+                  </span>
+                  <span className="object-row-end">
+                    <b>{scenario.amount} cUSDC</b>
+                    <small>{done ? 'Complete' : locked ? 'Finish prior invoice' : 'Ready to review'}</small>
+                  </span>
+                </button>
               );
             })}
           </div>
-        </div>
+
+          <article className="detail-pane" aria-label={`${selectedStory.vendor} payment detail`}>
+            <header className="detail-header">
+              <div>
+                <span className="detail-kicker">Payment request · {selectedStory.urgency ?? 'Launch day'}</span>
+                <h2>{selectedStory.vendor}</h2>
+                <p>{selectedStory.purpose}</p>
+              </div>
+              <span className={missions[selectedStory.key] ? 'status-badge ok' : 'status-badge'}>
+                {missions[selectedStory.key] ? 'Completed' : 'Draft'}
+              </span>
+            </header>
+
+            <dl className="data-list">
+              <div><dt>Amount</dt><dd>{selectedStory.amount} cUSDC <span className="privacy-note">visible to Delegate</span></dd></div>
+              <div><dt>Recipient</dt><dd>{selectedStory.vendor}<span className="mono muted">{short(selectedStory.recipient)}</span></dd></div>
+              <div><dt>Mandate</dt><dd className="mono">#{String(selectedStory.isolatedDelegate ? violationMandate?.id ?? 'provisioning' : myMandate.id)}</dd></div>
+              <div><dt>Public memo</dt><dd>Only a run-bound hash is published</dd></div>
+            </dl>
+
+            <div className="policy-evaluation" aria-label="Confidential policy checks">
+              <h3>Private policy evaluation</h3>
+              <p>The result remains unknown until Nox evaluates all three checks on ciphertext.</p>
+              <div className="evaluation-grid">
+                {['Per-payment auto-limit', 'Delegated budget', 'Treasury reserve floor'].map((label) => (
+                  <div key={label}><span>{label}</span><b className="enc">Protected</b></div>
+                ))}
+              </div>
+            </div>
+
+            <div className="detail-actions">
+              {!unlocked[selectedStory.key] ? (
+                <div className="inline-alert">Complete the previous invoice before submitting this one.</div>
+              ) : (
+                <button className="btn primary" disabled={!!busy || (!!blockingRequest && selectedStory.key !== 'violation')}
+                  onClick={() => runScenario(selectedStory.key)}>
+                  {missions[selectedStory.key] ? 'Run this invoice again' : 'Submit confidential payment'}
+                </button>
+              )}
+              <span className="muted">Review first, then submit. The policy never reveals its thresholds.</span>
+            </div>
+            {selectedStory.key === 'violation' && isDemo && violationCoolLeft > 0 && (
+              <div className="inline-alert">The isolated stress-test delegate is cooling down. A verified recent block can be reviewed now; a fresh run is available in {mmss(violationCoolLeft)}.</div>
+            )}
+          </article>
+        </section>
 
         {/* ---- free play (demo: own sandboxed delegate; collapsed until missions done) ---- */}
         <details className="card prog-acc" data-tour="submit" ref={freeFormRef as any}
@@ -562,7 +776,7 @@ export function DelegateView() {
           {!allCollected ? (
             <p className="mp-goal">{MISSIONS.find((m) => !missions[m.key])?.goal}</p>
           ) : !missions.audit ? (
-            <p className="mp-goal">All three outcomes collected — finish the relay as the Auditor.</p>
+            <p className="mp-goal">All three outcomes collected — create the run-bound disclosure bundle.</p>
           ) : (
             <p className="mp-goal ok-text">Demo completed — you've seen the whole confidential loop.</p>
           )}
@@ -576,19 +790,19 @@ export function DelegateView() {
             ))}
             <div className={`mp-row ${missions.audit ? 'done' : ''}`}>
               <span className="mp-dot">{missions.audit ? '✓' : '○'}</span>
-              <span>Audit the packet</span>
-              <span className="mp-out muted">🕵 selective disclosure</span>
+              <span>Create and audit the packet</span>
+              <span className="mp-out muted">selective disclosure</span>
             </div>
           </div>
 
           {allCollected && !missions.audit && (
-            <button className="btn primary wide" style={{ marginTop: 12 }} onClick={() => startDemo('auditor')}>
-              Open the disclosure packet as Auditor →
+            <button className="btn primary wide" style={{ marginTop: 12 }} onClick={() => { window.location.hash = formatAppRoute({ page: 'disclosure-builder' }); }}>
+              Build the Launch Day disclosure bundle →
             </button>
           )}
-          {missions.audit && (
+          {demoComplete && (
             <div className="mp-doneblock">
-              <div className="mp-donetitle">🎉 Demo completed</div>
+              <div className="mp-donetitle">Demo completed</div>
               {['Confidential state', 'Confidential computation', 'Confidential execution', 'Safe 2-of-2 governance', 'Selective disclosure'].map((t) => (
                 <div key={t} className="mp-row done"><span className="mp-dot">✓</span><span>{t}</span></div>
               ))}
@@ -679,7 +893,7 @@ function ProvisionMe({ account }: { account: `0x${string}` }) {
         <button className="btn" onClick={() => startDemo('delegate')}>or use the shared demo delegate</button>
       </div>
       <p className="muted" style={{ fontSize: 12, marginTop: 10 }}>
-        Onboarding is sponsored (the treasury pays the two governance txs); you then sign requests with your own wallet and gas. Capped demo policy: auto-execute ≤ 40, budget 300, reserve 100 cUSDC ·
+        Onboarding is sponsored (the treasury pays the two governance txs); you then sign requests with your own wallet and gas. The capped demo policy remains encrypted; only its terminal outcomes are public ·
         one per address per hour. You'll need a little Sepolia ETH to submit requests —{' '}
         <button className="btn small ghost" onClick={openRolePicker} style={{ display: 'none' }}>x</button>
         grab some from 💧 Get test funds.
