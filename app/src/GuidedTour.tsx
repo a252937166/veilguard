@@ -25,19 +25,19 @@ export const STEPS: Step[] = [
   {
     title: 'A routine payment — WITHIN MANDATE',
     tab: 'Delegate',
-    body: 'A delegate submits an encrypted amount. The Nox TEE checks it against the secret policy and returns a decision. Request #1 came back WITHIN MANDATE and paid out immediately — the amount stayed hidden the whole time. As the delegate you can decrypt your own amount; nobody else can.',
+    body: 'A delegate submits an encrypted amount. The Nox TEE checks it against the secret policy and returns a decision. A small payment comes back WITHIN MANDATE and pays out immediately — the amount stays hidden the whole time. As the delegate you can decrypt your own amount; nobody else can. The Dashboard evidence table links the exact on-chain transactions.',
     hint: 'Encryption happens in your browser before the value ever leaves.',
   },
   {
     title: 'Too big — APPROVAL REQUIRED',
     tab: 'Signer',
-    body: 'Request #4 was above the secret auto-limit, so the TEE returned APPROVAL REQUIRED and the funds were held in escrow until the Safe multisig signed. Signers — and only signers — can decrypt the escalated amount here before approving or rejecting.',
-    hint: 'Approve / reject each go through a real Safe transaction.',
+    body: 'A payment above the secret auto-limit returns APPROVAL REQUIRED, and the funds are held in escrow until the Safe multisig signs. The treasury Safe is 2-of-2: activation and approval each need TWO distinct owner signatures — a single owner cannot act alone. This tab links the on-chain proof of both 2-of-2 executions.',
+    hint: 'Signers (only signers) can decrypt the escalated amount.',
   },
   {
     title: 'Against the rules — BLOCKED',
     tab: 'Delegate',
-    body: 'Request #5 would have broken the policy, so it came back BLOCKED — no funds moved and the budget was untouched. The delegate can decrypt a coarse reason (budget / balance / reserve) but never the exact limit, so the policy can not be probed out by trial and error. A blocked request also starts a cooldown.',
+    body: 'A payment that would break the policy comes back BLOCKED — no funds move and the budget is untouched. The delegate can decrypt a coarse reason (budget / balance / reserve) but never the exact limit, so the policy cannot be probed out by trial and error. A blocked request also starts a cooldown.',
   },
   {
     title: 'Audit without exposure',

@@ -2,9 +2,9 @@
  * VeilGuard Sepolia deployment.
  *
  * Deploys: TestUSDC -> ConfidentialUSDCWrapper (official ERC-20→7984 wrapper)
- * -> real Safe v1.4.1 (canonical proxy factory; falls back to MinimalSafe if
- * the canonical contracts are missing) -> VeilGuardModule. Then funds the
- * demo role accounts and enables the module on the Safe.
+ * -> real Safe v1.4.1 via the canonical proxy factory (hard-fails if the
+ * canonical Safe contracts are missing — no stand-ins on a real network)
+ * -> VeilGuardModule. Then funds the demo role accounts and enables the module.
  *
  * Run: npx hardhat run scripts/deploy-sepolia.ts --network sepolia
  */
@@ -116,7 +116,11 @@ for (const s of [SAFE_SINGLETON_L1, SAFE_SINGLETON_L2]) {
   if (code && code !== '0x') { singleton = s; break; }
 }
 
-if (factoryCode && factoryCode !== '0x' && singleton) {
+if (!factoryCode || factoryCode === '0x' || !singleton) {
+  // Safe IS the integration target — no stand-ins on a real network.
+  throw new Error('canonical Safe v1.4.1 contracts not found on this chain; aborting');
+}
+{
   const initializer = encodeFunctionData({
     abi: safeAbi,
     functionName: 'setup',
@@ -137,11 +141,6 @@ if (factoryCode && factoryCode !== '0x' && singleton) {
   const [created] = parseEventLogs({ abi: factoryAbi, logs: receipt.logs, eventName: 'ProxyCreation' });
   safeAddress = created.args.proxy as `0x${string}`;
   safeKind = `safe-v1.4.1 (singleton ${singleton})`;
-} else {
-  console.log('  canonical Safe contracts not found — falling back to MinimalSafe');
-  const minimal = await viem.deployContract('MinimalSafe', [[admin.address, signerB.address]]);
-  safeAddress = minimal.address;
-  safeKind = 'minimal-safe-standin';
 }
 console.log(`  Safe: ${safeAddress} (${safeKind})`);
 

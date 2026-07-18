@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { keccak256, stringToBytes } from 'viem';
-import { ADDR, REASON_LABEL, moduleAbi, short, usdc } from '../config';
+import { ADDR, REASON_LABEL, moduleAbi, parseUsdc, short } from '../config';
 import { handleClientFor, makeWalletClient, publicClient } from '../nox';
 import { useApp } from '../App';
 import { Decrypt, RequestPill } from '../ui';
@@ -25,7 +25,7 @@ export function DelegateView() {
       if (!account || !myMandate) throw new Error('no active mandate for this account');
       const to = (recipient || myMandate.recipients[0]) as `0x${string}`;
       const client = await handleClientFor(account);
-      const enc = await client.encryptInput(usdc(Number(amount)), 'uint256', ADDR.VeilGuardModule);
+      const enc = await client.encryptInput(parseUsdc(amount), 'uint256', ADDR.VeilGuardModule);
       const wallet = makeWalletClient(account);
       const hash = await wallet.writeContract({
         address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'requestSpend',
@@ -64,7 +64,7 @@ export function DelegateView() {
           <label>Memo (only its hash goes on-chain)</label>
           <input value={memo} onChange={(e) => setMemo(e.target.value)} placeholder="invoice #… (optional)" />
           <div style={{ marginTop: 14 }}>
-            <button className="btn primary" disabled={!!busy || !Number(amount)} onClick={submit}>
+            <button className="btn primary" disabled={!!busy || !amount} onClick={submit}>
               🔒 Encrypt &amp; submit
             </button>
           </div>

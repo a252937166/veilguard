@@ -1,118 +1,77 @@
-import { encodeFunctionData, encodePacked, padHex } from 'viem';
-import { ADDR, moduleAbi, safeAbi, short } from '../config';
-import { makeWalletClient, publicClient } from '../nox';
+import { ADDR, scan, scanTx, short } from '../config';
 import { useApp } from '../App';
-import { Decrypt, MandatePill, RequestPill } from '../ui';
+import { Decrypt } from '../ui';
+import ev from '../demo-evidence.json';
 
+/**
+ * Escalations require a REAL 2-of-2 Safe multisig: two distinct owner signatures.
+ * A single connected owner cannot execute one alone (that is the whole point), so
+ * this view is honest about it — an owner can decrypt the escalated amount and
+ * see the proven on-chain 2-of-2 flow, rather than offering a button that would
+ * revert without the second signature.
+ */
 export function SignerView() {
-  const { account, owners, mandates, requests, run, busy, paused } = useApp();
+  const { account, owners, requests } = useApp();
   const isOwner = owners.some((o) => o.toLowerCase() === account?.toLowerCase());
-
-  if (!account) return <div className="notice">Connect a Safe owner wallet to review escalations.</div>;
-  if (!isOwner)
-    return <div className="notice">The connected account is not a Safe owner. Owners: {owners.map(short).join(', ')}</div>;
-
-  /** Execute a module call *through the Safe* with the pre-validated owner signature. */
-  const safeExec = (label: string, fn: string, args: unknown[]) =>
-    run(label, async () => {
-      const w = makeWalletClient(account);
-      const sig = encodePacked(
-        ['bytes32', 'bytes32', 'uint8'],
-        [padHex(account, { size: 32 }), padHex('0x00', { size: 32 }), 1],
-      );
-      const hash = await w.writeContract({
-        address: ADDR.Safe, abi: safeAbi, functionName: 'execTransaction',
-        args: [ADDR.VeilGuardModule, 0n,
-          encodeFunctionData({ abi: moduleAbi, functionName: fn, args }),
-          0, 0n, 0n, 0n,
-          '0x0000000000000000000000000000000000000000',
-          '0x0000000000000000000000000000000000000000', sig],
-        chain: w.chain, account: w.account!,
-      });
-      await publicClient.waitForTransactionReceipt({ hash });
-    });
-
   const escalated = requests.filter((r) => r.state === 3);
-  const drafts = mandates.filter((m) => m.state === 1);
 
   return (
     <>
       <div className="notice">
-        You act <b>as the Safe</b>: every action below is a real Safe transaction
-        (<span className="mono">execTransaction</span> with an owner signature). As a signer you may
-        decrypt escalated amounts — the public still sees nothing.
+        The treasury Safe is <b>2-of-{owners.length || 2}</b>: activating a policy or approving an escalation needs
+        <b> two distinct owner signatures</b> — a single owner physically cannot act alone.
+        {!account && <> Connect a Safe owner wallet to decrypt escalated amounts; the 2-of-2 proof below is public.</>}
+        {account && !isOwner && <> The connected wallet is not an owner{owners.length ? <> (owners: {owners.map(short).join(', ')})</> : null}.</>}
       </div>
 
       <div className="card">
-        <h3>Escalated requests — approval required</h3>
+        <h3>Escalated requests — awaiting 2-of-{owners.length} approval</h3>
         <div className="tbl"><table>
-          <thead><tr><th>ID</th><th>Delegate</th><th>Recipient</th><th>Amount (signers only)</th><th></th></tr></thead>
+          <thead><tr><th>ID</th><th>Delegate</th><th>Recipient</th><th>Amount (owners only)</th></tr></thead>
           <tbody>
             {escalated.map((r) => (
               <tr key={String(r.id)}>
                 <td className="mono">#{String(r.id)}</td>
                 <td className="mono">{short(r.delegate)}</td>
                 <td className="mono">{short(r.recipient)}</td>
-                <td><Decrypt handle={r.amount} /></td>
-                <td className="row">
-                  <button className="btn small primary" disabled={!!busy}
-                    onClick={() => safeExec(`Execute escalated #${r.id}`, 'executeEscalated', [r.id])}>
-                    ✓ Approve &amp; execute
-                  </button>
-                  <button className="btn small" disabled={!!busy}
-                    onClick={() => safeExec(`Cancel escalated #${r.id}`, 'cancelEscalated', [r.id])}>
-                    ✕ Reject (refund escrow)
-                  </button>
-                </td>
+                <td>{isOwner ? <Decrypt handle={r.amount} /> : <span className="muted">owner-gated</span>}</td>
               </tr>
             ))}
-            {!escalated.length && <tr><td colSpan={5} className="muted">Nothing awaiting approval.</td></tr>}
+            {!escalated.length && <tr><td colSpan={4} className="muted">Nothing awaiting approval right now.</td></tr>}
           </tbody>
         </table></div>
+        <p className="muted" style={{ marginTop: 10, fontSize: 12.5 }}>
+          Approval is driven by a real Safe transaction with two owner signatures
+          (<span className="mono">Protocol Kit</span> → both owners sign → execute). Because a genuine 2-of-2 needs
+          two separate keys, the interactive demo does not custody the owner keys in your browser — instead the
+          proven flow is recorded on-chain below.
+        </p>
       </div>
 
-      <div className="grid2">
-        <div className="card">
-          <h3>Draft policies awaiting activation</h3>
-          <div className="tbl"><table>
-            <thead><tr><th>ID</th><th>Delegate</th><th>Status</th><th>Auto-limit</th><th></th></tr></thead>
-            <tbody>
-              {drafts.map((m) => (
-                <tr key={String(m.id)}>
-                  <td className="mono">#{String(m.id)}</td>
-                  <td className="mono">{short(m.delegate)}</td>
-                  <td><MandatePill state={m.state} /></td>
-                  <td><Decrypt handle={m.autoLimit} /></td>
-                  <td>
-                    <button className="btn small primary" disabled={!!busy}
-                      onClick={() => {
-                        const prev = mandates.find(
-                          (x) => x.state === 2 && x.delegate.toLowerCase() === m.delegate.toLowerCase(),
-                        );
-                        safeExec(`Activate mandate #${m.id}`, 'activateMandate', [m.id, prev?.id ?? 0n]);
-                      }}>
-                      ✓ Activate (Safe)
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {!drafts.length && <tr><td colSpan={5} className="muted">No drafts.</td></tr>}
-            </tbody>
-          </table></div>
-        </div>
-
-        <div className="card">
-          <h3>Safe controls</h3>
-          <div className="row">
-            {paused
-              ? <button className="btn primary" disabled={!!busy} onClick={() => safeExec('Resume (unpause)', 'unpauseAll', [])}>▶ Resume all mandates</button>
-              : <span className="muted">System active. If the admin pauses, only the Safe can resume here.</span>}
-          </div>
-          <p className="muted" style={{ marginTop: 12, fontSize: 12.5 }}>
-            Safe owners: {owners.map(short).join(' · ')} (threshold 1 on this testnet deployment —
-            raise it in the Safe for production-style multi-party approval).
-          </p>
-        </div>
+      <div className="card">
+        <h3>Proof: 2-of-2 governance worked on-chain</h3>
+        <div className="tbl"><table>
+          <thead><tr><th>Governance action</th><th>Owner A</th><th>Owner B</th><th>Executed (2-of-2)</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Activate mandate #{ev.mandate.id}</td>
+              <td className="pill ok" style={{ display: 'inline-block' }}>signed</td>
+              <td><span className="pill ok">signed</span></td>
+              <td><a className="mono alink" href={scanTx(ev.mandate.activation.executeTxHash)} target="_blank" rel="noopener">{short(ev.mandate.activation.executeTxHash)} ↗</a></td>
+            </tr>
+            <tr>
+              <td>Approve escalation #{(ev.requests as any).escalated.id}</td>
+              <td><span className="pill ok">signed</span></td>
+              <td><span className="pill ok">signed</span></td>
+              <td><a className="mono alink" href={scanTx((ev.requests as any).escalated.approval.executeTxHash)} target="_blank" rel="noopener">{short((ev.requests as any).escalated.approval.executeTxHash)} ↗</a></td>
+            </tr>
+          </tbody>
+        </table></div>
+        <p className="muted" style={{ marginTop: 10, fontSize: 12.5 }}>
+          Safe: <a className="mono alink" href={scan(ADDR.Safe)} target="_blank" rel="noopener">{short(ADDR.Safe)}</a> ·
+          threshold {ev.threshold} · each action carries two confirmations. Verify on Etherscan or in the
+          Safe&#123;Wallet&#125; queue.
+        </p>
       </div>
     </>
   );

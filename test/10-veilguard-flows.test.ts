@@ -99,8 +99,8 @@ describe('10 VeilGuard flows (gates G1+G2 + lifecycle)', { timeout: 1_800_000 },
   });
 
   it('only the Safe can activate the mandate', async () => {
-    await assert.rejects(module.write.activateMandate([1n, 0n])); // admin direct → NotSafe
-    await safeExec(module.address, moduleCall('activateMandate', [1n, 0n]));
+    await assert.rejects(module.write.activateMandate([1n])); // admin direct → NotSafe
+    await safeExec(module.address, moduleCall('activateMandate', [1n]));
     const m = await module.read.getMandate([1n]);
     assert.equal(m[4], 2); // MandateState.Active
   });
@@ -241,7 +241,7 @@ describe('10 VeilGuard flows (gates G1+G2 + lifecycle)', { timeout: 1_800_000 },
       floor.handle,
       floor.handleProof,
     ]);
-    await safeExec(module.address, moduleCall('activateMandate', [2n, 0n]));
+    await safeExec(module.address, moduleCall('activateMandate', [2n]));
 
     const delegate2Client = await clientFor(delegate2);
     const { handle, handleProof } = await delegate2Client.encryptInput(

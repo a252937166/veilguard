@@ -1,0 +1,58 @@
+{
+  "network": "sepolia",
+  "chainId": 11155111,
+  "module": "0x02e9b09f5929604b101244661835605b1ee67fea",
+  "safe": "0x22Ab88236b21D4A528251474b05f5045c6e71e99",
+  "threshold": 2,
+  "generatedAt": "2026-07-18T02:51:14.123Z",
+  "commit": "2dde792",
+  "teeLatencySec": {
+    "within": 5.4,
+    "escalated": 5.4,
+    "blocked": 1.526
+  },
+  "mandate": {
+    "id": 4,
+    "proposeTx": "0x30016956c101f4c937b0fbfe72cadc95ead90e17c1a7af73ea8afa3d79cd9352",
+    "activation": {
+      "safeTxHash": "0x55b2c948a6b706a675558dd2504567d4f2de5410c3e538201a3c9e816ec1d0e6",
+      "executeTxHash": "0x179476edcffae54c85077bcaf681b162f2ad156d8ace078e8dd564b32b08e857",
+      "nonce": 1,
+      "confirmations": 2,
+      "threshold": 2
+    }
+  },
+  "requests": {
+    "within": {
+      "id": 5,
+      "requestTx": "0x72c07b64d7faa10db837ba6965a6ae40357353046c4a3e892b156f7bd235db32",
+      "finalizeTx": "0xb73036c3a45daf99512df64d2e3909589a84866d920fca33a4d3e4b94c871108"
+    },
+    "escalated": {
+      "id": 4,
+      "requestTx": "0xa3e45c0d82d9545a3cd97c265177f88d2e315fb05e15d93cf355450789384ed4",
+      "finalizeTx": "0xd97f49b73090af9c73dce2f6abb34bdc1fdde3aa3c3a80a4cc8868e6ed634695",
+      "approval": {
+        "safeTxHash": "0xaab2060208b3f9b76d0ea21df71aa41d89fd120b4a3777f0ba4ce70aaadf703c",
+        "executeTxHash": "0x3edd9d7d09508c9f093bf4ac456b4ce1288050e0b82f161c12ff55ba3637f2a5",
+        "nonce": 2,
+        "confirmations": 2,
+        "threshold": 2
+      }
+    },
+    "blocked": {
+      "id": 6,
+      "requestTx": "0x6e084c52be59da98a9c5b8a87f570415df7fc3aebbfa0e7a72dea15ba896f204",
+      "finalizeTx": "0xa1c79fa8d8652c59dd640ee9ab1e0b09a08750b9479b68f77a164140275ece63"
+    }
+  },
+  "packet": {
+    "id": 1,
+    "createTx": "0xde733271081e955be5c10cbaa15776cf4227ed1f980b1a242eadb49e335592a7",
+    "requestIds": [
+      5,
+      4,
+      6
+    ]
+  }
+}

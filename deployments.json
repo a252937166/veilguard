@@ -6,7 +6,7 @@
     "TestUSDC": "0x94c426eb57f5bb3fa9dfdbbbe7ae1efb2cb958ab",
     "ConfidentialUSDC": "0x71ac9a2872048f78dc3d627c6fe7f3b2f35467b3",
     "Safe": "0x22Ab88236b21D4A528251474b05f5045c6e71e99",
-    "VeilGuardModule": "0xaf1ca44d1c83bb800f2e791ab299bb0ad1a568cb",
+    "VeilGuardModule": "0x02e9b09f5929604b101244661835605b1ee67fea",
     "NoxCompute": "0x24Ef36Ec5b626D7DCD09a98F3083c2758F0F77bF"
   },
   "safe": {
@@ -15,7 +15,7 @@
       "0x9327bfC0aE0e03772A29AEB0B5c7D34609349EA4",
       "0x1919EAD8d1b7D0F6124B93b8eA3E8a68021dDfD7"
     ],
-    "threshold": 1
+    "threshold": 2
   },
   "roles": {
     "financeAdmin": "0x9327bfC0aE0e03772A29AEB0B5c7D34609349EA4",
@@ -23,5 +23,9 @@
     "delegate": "0x17ee5Ad7e4B40CADafaD27C5F68f74D02C7fd532",
     "auditor": "0x09eeE433992D869A7f3a572CC6AB9068B426C0A6",
     "deployer": "0xc4ba09787f46441a517467fc12af459d8268c60f"
-  }
+  },
+  "retired": {
+    "moduleV09": "0xaf1ca44d1c83bb800f2e791ab299bb0ad1a568cb"
+  },
+  "redeployedAt": "2026-07-18T02:11:53.546Z"
 }

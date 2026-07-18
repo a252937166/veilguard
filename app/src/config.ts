@@ -43,7 +43,20 @@ export const DECISION_LABEL: Record<number, string> = { 1: 'WITHIN MANDATE', 2: 
 export const REASON_LABEL: Record<number, string> = { 0: '—', 1: 'policy budget', 2: 'treasury balance', 3: 'treasury reserve' };
 
 export const fmt = (v: bigint | number) => (Number(v) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 2 });
-export const usdc = (n: number) => BigInt(Math.round(n * 1e6));
 export const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+
+/** Parse a user amount string to 6-decimal base units, rejecting junk. */
+export function parseUsdc(input: string): bigint {
+  const s = input.trim();
+  if (!/^\d+(\.\d{1,6})?$/.test(s)) throw new Error('amount must be a positive number with ≤ 6 decimals');
+  const [whole, frac = ''] = s.split('.');
+  const base = BigInt(whole) * 1_000_000n + BigInt(frac.padEnd(6, '0'));
+  if (base <= 0n) throw new Error('amount must be greater than zero');
+  if (base > 10_000_000_000_000n) throw new Error('amount too large');
+  return base;
+}
+/** kept for tests/scripts that pass numbers */
+export const usdc = (n: number) => BigInt(Math.round(n * 1e6));
+export const isAddress = (a: string) => /^0x[0-9a-fA-F]{40}$/.test(a.trim());
 export const scan = (a: string) => `https://sepolia.etherscan.io/address/${a}`;
 export const scanTx = (h: string) => `https://sepolia.etherscan.io/tx/${h}`;

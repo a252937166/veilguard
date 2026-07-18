@@ -11,6 +11,9 @@ import { Landing } from './views/Landing';
 import { GuidedTour, useTour, type TabName } from './GuidedTour';
 import { WalletMenu } from './WalletMenu';
 import { DEMO_ROLES, demoAddress, type DemoRole } from './demo';
+import evidence from './demo-evidence.json';
+
+const EVIDENCE_COMMIT = evidence.commit;
 
 export type Mandate = {
   id: bigint; delegate: `0x${string}`; validFrom: bigint; validUntil: bigint;
@@ -76,6 +79,8 @@ export function App() {
   const [toastMsg, setToastMsg] = useState<{ msg: string; err: boolean } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [loadError, setLoadError] = useState(false);
   const toastTimer = useRef<any>(null);
 
   const toast = useCallback((msg: string, err = false) => {
@@ -193,8 +198,8 @@ export function App() {
             r.decisionReady = await handlesResolved([r.decision]);
           }));
         }
-        if (!stop) { setMandates(ms); setRequests(rs); setOwners(own); setPaused(isPaused); }
-      } catch (e) { console.error('poll', e); }
+        if (!stop) { setMandates(ms); setRequests(rs); setOwners(own); setPaused(isPaused); setLastUpdated(Date.now()); setLoadError(false); }
+      } catch (e) { console.error('poll', e); if (!stop) setLoadError(true); }
     };
     load();
     const iv = setInterval(load, 10_000);
@@ -348,8 +353,20 @@ export function App() {
         {tab === 'Get Funds' && <FaucetView />}
 
         <footer>
-          <div>VEILGUARD — confidential treasury controls on <a href="https://safe.global" target="_blank" rel="noopener">Safe</a> · powered by <a href="https://docs.noxprotocol.io" target="_blank" rel="noopener">iExec Nox</a></div>
-          <div><a href={`https://sepolia.etherscan.io/address/${ADDR.VeilGuardModule}`} target="_blank" rel="noopener">Module ↗</a> · <a href={`https://sepolia.etherscan.io/address/${ADDR.Safe}`} target="_blank" rel="noopener">Safe ↗</a> · Testnet prototype — not audited</div>
+          <div>
+            VEILGUARD — confidential treasury controls on <a href="https://safe.global" target="_blank" rel="noopener">Safe</a> · powered by <a href="https://docs.noxprotocol.io" target="_blank" rel="noopener">iExec Nox</a>
+            <br />
+            <span className="mono" style={{ fontSize: 11.5 }}>
+              {loadError ? <span style={{ color: 'var(--warn)' }}>⚠ chain read failing — showing last known state</span>
+                : lastUpdated ? `chain synced ${Math.round((Date.now() - lastUpdated) / 1000)}s ago` : 'loading…'}
+            </span>
+          </div>
+          <div>
+            <a href="https://github.com/a252937166/veilguard" target="_blank" rel="noopener">GitHub ↗</a> ·
+            {' '}<a href={`https://sepolia.etherscan.io/address/${ADDR.VeilGuardModule}`} target="_blank" rel="noopener">Module ↗</a> ·
+            {' '}<a href={`https://sepolia.etherscan.io/address/${ADDR.Safe}`} target="_blank" rel="noopener">Safe ↗</a> ·
+            {' '}<span className="mono">{EVIDENCE_COMMIT}</span> · Testnet prototype — not audited
+          </div>
         </footer>
       </div>
       {tryModal}

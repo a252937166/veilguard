@@ -67,9 +67,10 @@ export function FaucetView() {
   return (
     <>
       <div className="notice">
-        <b>Step 1 — Sepolia ETH for gas</b> (official faucets, one is enough), then
-        <b> Step 2 — claim demo TestUSDC</b> in one click below. That's all you need to act as a delegate.
-        Wrapping into the treasury is an optional admin-style step.
+        Grab <b>Sepolia ETH for gas</b> (official faucets, one is enough) and, if you like, claim demo
+        <b> TestUSDC</b>. Note: claiming TestUSDC does <b>not</b> make your wallet a delegate — the module
+        only accepts the delegate address fixed in a mandate. To act as a delegate, use <b>⚡ Try a role</b>
+        in the top bar (a shared demo account that holds the delegate permission).
       </div>
 
       <div className="card">

@@ -138,7 +138,7 @@ await send('proposeMandate', admin, {
   ],
 });
 const activateData = encodeFunctionData({
-  abi: moduleAbi, functionName: 'activateMandate', args: [1n, 0n],
+  abi: moduleAbi, functionName: 'activateMandate', args: [1n],
 });
 const preValidatedSig = encodePacked(
   ['bytes32', 'bytes32', 'uint8'],

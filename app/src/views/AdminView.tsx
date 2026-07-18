@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ADDR, ROLES, moduleAbi, usdc } from '../config';
+import { ADDR, ROLES, isAddress, moduleAbi, parseUsdc } from '../config';
 import { handleClientFor, makeWalletClient, publicClient } from '../nox';
 import { useApp } from '../App';
 import { Decrypt, MandatePill } from '../ui';
@@ -25,19 +25,26 @@ export function AdminView() {
 
   const propose = () =>
     run('Propose encrypted mandate', async () => {
+      if (!isAddress(delegate)) throw new Error('delegate is not a valid address');
+      const recips = recipients.split(',').map((s) => s.trim()).filter(Boolean);
+      if (!recips.length) throw new Error('add at least one recipient');
+      if (recips.some((r) => !isAddress(r))) throw new Error('a recipient is not a valid address');
+      if (new Set(recips.map((r) => r.toLowerCase())).size !== recips.length) throw new Error('duplicate recipient');
+      const d = Number(days);
+      if (!Number.isInteger(d) || d <= 0 || d > 3650) throw new Error('validity days must be 1–3650');
       const client = await handleClientFor(account);
       const [l, b, f] = await Promise.all([
-        client.encryptInput(usdc(Number(autoLimit)), 'uint256', ADDR.VeilGuardModule),
-        client.encryptInput(usdc(Number(budget)), 'uint256', ADDR.VeilGuardModule),
-        client.encryptInput(usdc(Number(floor)), 'uint256', ADDR.VeilGuardModule),
+        client.encryptInput(parseUsdc(autoLimit), 'uint256', ADDR.VeilGuardModule),
+        client.encryptInput(parseUsdc(budget), 'uint256', ADDR.VeilGuardModule),
+        client.encryptInput(parseUsdc(floor), 'uint256', ADDR.VeilGuardModule),
       ]);
       const now = BigInt(Math.floor(Date.now() / 1000));
       const w = wallet();
       const hash = await w.writeContract({
         address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'proposeMandate',
         args: [
-          delegate as `0x${string}`, 0n, now + BigInt(Number(days)) * 86_400n,
-          recipients.split(',').map((s) => s.trim()) as `0x${string}`[],
+          delegate as `0x${string}`, 0n, now + BigInt(d) * 86_400n,
+          recips as `0x${string}`[],
           l.handle, l.handleProof, b.handle, b.handleProof, f.handle, f.handleProof,
         ],
         chain: w.chain, account: w.account!,

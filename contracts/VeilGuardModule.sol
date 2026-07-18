@@ -63,7 +63,8 @@ contract VeilGuardModule is ReentrancyGuard {
 
     address public immutable safe;
     IConfidentialToken public immutable token;
-    address public immutable financeAdmin;
+    /// Rotatable by the Safe (lost/compromised admin keys can be replaced).
+    address public financeAdmin;
 
     // ---------------------------------------------------------------- state
 
@@ -116,7 +117,8 @@ contract VeilGuardModule is ReentrancyGuard {
         uint32 policyVersion;
         bytes32 manifestHash;
         uint64 createdAt;
-        bytes32[] snapshotHandles;
+        uint256[] requestIds; // which requests the snapshots cover (order-aligned)
+        bytes32[] snapshotHandles; // [autoLimit, budgetLeft, reserveFloor, then per request: amount, blockedReason]
     }
 
     bool public paused;
@@ -132,12 +134,15 @@ contract VeilGuardModule is ReentrancyGuard {
     /// One in-flight request per mandate (budget-chain correctness + probing resistance).
     mapping(uint256 => uint256) public pendingRequestOf; // mandateId => requestId (0 = none)
     mapping(address => uint64) public cooldownUntil; // delegate => timestamp
+    /// Contract-enforced single active mandate per delegate.
+    mapping(address => uint256) public activeMandateOf; // delegate => mandateId (0 = none)
 
     // ---------------------------------------------------------------- events
 
     event MandateProposed(uint256 indexed mandateId, address indexed delegate, uint32 version);
-    event MandateActivated(uint256 indexed mandateId);
+    event MandateActivated(uint256 indexed mandateId, address indexed delegate, uint256 retiredMandateId);
     event MandateRetired(uint256 indexed mandateId);
+    event FinanceAdminChanged(address indexed previousAdmin, address indexed newAdmin);
     event Paused(address by);
     event Unpaused();
     event SpendRequested(
@@ -176,6 +181,11 @@ contract VeilGuardModule is ReentrancyGuard {
     error TreasuryUninitialized();
     error SafeCallFailed();
     error UnexpectedDecision(uint16 decision);
+    error NotActiveMandate();
+    error ZeroAddress();
+    error BadWindow();
+    error BadRecipients();
+    error RequestNotTerminal(uint256 requestId);
 
     // ---------------------------------------------------------------- modifiers
 
@@ -220,6 +230,9 @@ contract VeilGuardModule is ReentrancyGuard {
         externalEuint256 encReserveFloor,
         bytes calldata reserveProof
     ) external onlyFinanceAdmin returns (uint256 mandateId) {
+        if (delegate == address(0)) revert ZeroAddress();
+        if (validUntil <= validFrom || validUntil <= block.timestamp) revert BadWindow();
+        if (recipients.length == 0 || recipients.length > 16) revert BadRecipients();
         mandateId = nextMandateId++;
         Mandate storage m = _mandates[mandateId];
         m.delegate = delegate;
@@ -249,22 +262,21 @@ contract VeilGuardModule is ReentrancyGuard {
         emit MandateProposed(mandateId, delegate, m.version);
     }
 
-    /// Multisig-only activation. Optionally retires the delegate's previously
-    /// active mandate (single active mandate per delegate is a product rule the
-    /// UI enforces; the contract enforces it when previousMandateId is given).
-    function activateMandate(uint256 mandateId, uint256 previousMandateId) external onlySafe {
+    /// Multisig-only activation. The contract itself enforces a single active
+    /// mandate per delegate: any previously active mandate of the same delegate
+    /// is retired automatically (refusing if it still has an in-flight request).
+    function activateMandate(uint256 mandateId) external onlySafe {
         Mandate storage m = _mandates[mandateId];
         if (m.state != MandateState.Draft) revert BadState();
-        if (previousMandateId != 0) {
-            Mandate storage prev = _mandates[previousMandateId];
-            if (prev.state == MandateState.Active && prev.delegate == m.delegate) {
-                if (pendingRequestOf[previousMandateId] != 0) revert PendingRequestExists();
-                prev.state = MandateState.Retired;
-                emit MandateRetired(previousMandateId);
-            }
+        uint256 prevId = activeMandateOf[m.delegate];
+        if (prevId != 0) {
+            if (pendingRequestOf[prevId] != 0) revert PendingRequestExists();
+            _mandates[prevId].state = MandateState.Retired;
+            emit MandateRetired(prevId);
         }
         m.state = MandateState.Active;
-        emit MandateActivated(mandateId);
+        activeMandateOf[m.delegate] = mandateId;
+        emit MandateActivated(mandateId, m.delegate, prevId);
     }
 
     function retireMandate(uint256 mandateId) external onlySafe {
@@ -272,7 +284,17 @@ contract VeilGuardModule is ReentrancyGuard {
         if (m.state != MandateState.Active && m.state != MandateState.Draft) revert BadState();
         if (pendingRequestOf[mandateId] != 0) revert PendingRequestExists();
         m.state = MandateState.Retired;
+        if (activeMandateOf[m.delegate] == mandateId) activeMandateOf[m.delegate] = 0;
         emit MandateRetired(mandateId);
+    }
+
+    /// Safe-controlled admin rotation (lost or compromised admin keys). Note:
+    /// viewer grants already issued to the old admin are irrevocable by Nox
+    /// design — rotate the policy (new mandate version) after rotating the admin.
+    function setFinanceAdmin(address newAdmin) external onlySafe {
+        if (newAdmin == address(0)) revert ZeroAddress();
+        emit FinanceAdminChanged(financeAdmin, newAdmin);
+        financeAdmin = newAdmin;
     }
 
     /// The admin may tighten (pause everything); only the Safe may resume.
@@ -305,6 +327,7 @@ contract VeilGuardModule is ReentrancyGuard {
         // -- plaintext admission gates (reveal nothing about encrypted policy)
         if (msg.sender != m.delegate) revert NotDelegate();
         if (m.state != MandateState.Active) revert BadState();
+        if (activeMandateOf[msg.sender] != mandateId) revert NotActiveMandate();
         if (block.timestamp < m.validFrom || block.timestamp > m.validUntil) revert MandateNotInWindow();
         if (!isAllowedRecipient[mandateId][recipient]) revert RecipientNotAllowed();
         if (pendingRequestOf[mandateId] != 0) revert PendingRequestExists();
@@ -411,7 +434,9 @@ contract VeilGuardModule is ReentrancyGuard {
 
         if (decision == D_EXECUTE) {
             r.state = RequestState.Executed;
-            _escrowTransfer(r.recipient, r.amount);
+            // pay out exactly what was atomically reserved (amount for admissible
+            // requests by construction, but `reserved` is the escrowed handle)
+            _escrowTransfer(r.recipient, r.reserved);
             emit SpendExecuted(requestId);
         } else if (decision == D_ESCALATE) {
             r.state = RequestState.AwaitingSafeApproval;
@@ -436,7 +461,7 @@ contract VeilGuardModule is ReentrancyGuard {
         if (r.state != RequestState.AwaitingSafeApproval) revert BadState();
         r.state = RequestState.Executed;
         pendingRequestOf[r.mandateId] = 0;
-        _escrowTransfer(r.recipient, r.amount);
+        _escrowTransfer(r.recipient, r.reserved);
         emit EscalationExecuted(requestId);
     }
 
@@ -466,14 +491,18 @@ contract VeilGuardModule is ReentrancyGuard {
 
     // ---------------------------------------------------------------- audit
 
-    /// Scoped immutable disclosure: fresh snapshot handles (identity ciphertext
+    /// Selective disclosure packet: fresh snapshot handles (identity ciphertext
     /// computation — the official "isolating access via a new handle" pattern)
-    /// are granted to the auditor. Live state handles are never granted.
+    /// are granted to the auditor, covering the policy values and, per selected
+    /// terminal request, its amount and blocked reason. Live state handles are
+    /// never granted. This is scoped disclosure — not a standalone proof that
+    /// every historical request complied.
     function createAuditPacket(
         address auditor,
         uint256 mandateId,
         uint256[] calldata requestIds
     ) external onlyFinanceAdmin returns (uint256 packetId) {
+        if (auditor == address(0)) revert ZeroAddress();
         if (requestIds.length > MAX_AUDIT_REQUESTS) revert TooManyAuditRequests();
         Mandate storage m = _mandates[mandateId];
         if (m.state == MandateState.None) revert BadState();
@@ -484,17 +513,26 @@ contract VeilGuardModule is ReentrancyGuard {
         p.mandateId = mandateId;
         p.policyVersion = m.version;
         p.createdAt = uint64(block.timestamp);
+        p.requestIds = requestIds;
 
         // Policy snapshots (as they stand now)
         p.snapshotHandles.push(_snapshotFor(m.autoLimit, auditor));
         p.snapshotHandles.push(_snapshotFor(m.budgetLeft, auditor));
         p.snapshotHandles.push(_snapshotFor(m.reserveFloor, auditor));
 
-        // Request snapshots (amounts)
+        // Per-request snapshots: amount + blocked reason. Terminal states only —
+        // in-flight requests would disclose values that may still change meaning.
         for (uint256 i = 0; i < requestIds.length; i++) {
             SpendRequest storage r = _requests[requestIds[i]];
             if (r.mandateId != mandateId) revert BadState();
+            if (
+                r.state != RequestState.Executed &&
+                r.state != RequestState.Blocked &&
+                r.state != RequestState.Cancelled &&
+                r.state != RequestState.Expired
+            ) revert RequestNotTerminal(requestIds[i]);
             p.snapshotHandles.push(_snapshotFor(r.amount, auditor));
+            p.snapshotHandles.push(_snapshotFor16(r.blockedReason, auditor));
         }
 
         p.manifestHash = keccak256(
@@ -572,11 +610,20 @@ contract VeilGuardModule is ReentrancyGuard {
             uint32 policyVersion,
             bytes32 manifestHash,
             uint64 createdAt,
+            uint256[] memory requestIds,
             bytes32[] memory snapshotHandles
         )
     {
         AuditPacket storage p = _packets[packetId];
-        return (p.auditor, p.mandateId, p.policyVersion, p.manifestHash, p.createdAt, p.snapshotHandles);
+        return (
+            p.auditor,
+            p.mandateId,
+            p.policyVersion,
+            p.manifestHash,
+            p.createdAt,
+            p.requestIds,
+            p.snapshotHandles
+        );
     }
 
     // ---------------------------------------------------------------- internals
@@ -640,5 +687,12 @@ contract VeilGuardModule is ReentrancyGuard {
         Nox.allowThis(snap);
         Nox.addViewer(snap, auditor);
         return euint256.unwrap(snap);
+    }
+
+    function _snapshotFor16(euint16 value, address auditor) internal returns (bytes32) {
+        euint16 snap = Nox.add(value, Nox.toEuint16(0));
+        Nox.allowThis(snap);
+        Nox.addViewer(snap, auditor);
+        return euint16.unwrap(snap);
     }
 }
