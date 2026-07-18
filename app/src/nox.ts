@@ -1,0 +1,70 @@
+import {
+  createPublicClient,
+  createWalletClient,
+  custom,
+  http,
+  type PublicClient,
+  type WalletClient,
+} from 'viem';
+import { sepolia } from 'viem/chains';
+import { createViemHandleClient, type HandleClient } from '@iexec-nox/handle';
+import { GATEWAY, RPC_URL } from './config';
+
+export const publicClient: PublicClient = createPublicClient({
+  chain: sepolia,
+  transport: http(RPC_URL),
+}) as PublicClient;
+
+export function makeWalletClient(account: `0x${string}`): WalletClient {
+  return createWalletClient({
+    account,
+    chain: sepolia,
+    transport: custom((window as any).ethereum),
+  });
+}
+
+const clientCache = new Map<string, Promise<HandleClient>>();
+
+/**
+ * Handle client bound to the connected account. Pins `getAddresses` to that
+ * account so encrypt-proof identity and decrypt signatures always agree
+ * (workaround for the SDK deriving identity from `getAddresses()[0]`).
+ */
+export function handleClientFor(account: `0x${string}`): Promise<HandleClient> {
+  let cached = clientCache.get(account);
+  if (!cached) {
+    const wallet = makeWalletClient(account);
+    cached = createViemHandleClient(
+      { ...wallet, getAddresses: async () => [account] } as any,
+    );
+    clientCache.set(account, cached);
+  }
+  return cached;
+}
+
+export async function handlesResolved(handles: string[]): Promise<boolean> {
+  try {
+    const res = await fetch(`${GATEWAY}/v0/public/handles/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ handles }),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    const map = new Map<string, boolean>(
+      data.payload.statuses.map((s: any) => [s.handle.toLowerCase(), s.resolved]),
+    );
+    return handles.every((h) => map.get(h.toLowerCase()) === true);
+  } catch {
+    return false;
+  }
+}
+
+export async function waitResolved(handles: string[], timeoutMs = 180_000): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (await handlesResolved(handles)) return;
+    await new Promise((r) => setTimeout(r, 2500));
+  }
+  throw new Error('TEE did not resolve the handles in time');
+}

@@ -1,0 +1,21 @@
+{
+  "name": "veilguard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Confidential spending policies for Safe treasuries, powered by iExec Nox",
+  "scripts": {
+    "test": "hardhat test",
+    "build": "hardhat build"
+  },
+  "devDependencies": {
+    "@iexec-nox/nox-hardhat-plugin": "^0.1.0",
+    "@nomicfoundation/hardhat-toolbox-viem": "^5.0.7",
+    "@types/node": "^26.1.1",
+    "hardhat": "^3.10.0",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@iexec-nox/nox-confidential-contracts": "^0.2.2"
+  }
+}
