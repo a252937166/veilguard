@@ -102,7 +102,8 @@ stack locally).
 npm install
 npx hardhat test "$PWD/test/00-stack.test.ts" \
                  "$PWD/test/10-veilguard-flows.test.ts" \
-                 "$PWD/test/20-audit-isolation.test.ts"   # 10 tests on the local Nox off-chain stack
+                 "$PWD/test/20-audit-isolation.test.ts" \
+                 "$PWD/test/30-governance.test.ts"   # 17 tests on the local Nox off-chain stack
 ```
 
 > Pass **absolute** test paths — `hardhat test` with a relative path can misresolve
