@@ -1,8 +1,10 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
-import { ADDR, moduleAbi, scan, short } from '../config';
+import { ADDR, moduleAbi, scan, scanTx, short } from '../config';
 import { handleClientFor, publicClient, waitResolved } from '../nox';
+import { fetchRequestTxs, type RequestTxs } from '../txlog';
 import { useApp } from '../App';
-import { Decrypt, NoRole } from '../ui';
+import { completeMission } from '../missions';
+import { Decrypt, NoRole, RequestPill } from '../ui';
 
 type Packet = {
   id: bigint; auditor: `0x${string}`; mandateId: bigint; policyVersion: number;
@@ -10,7 +12,11 @@ type Packet = {
 };
 
 export function AuditorView() {
-  const { account, toast } = useApp();
+  const { account, toast, requests } = useApp();
+  const [txs, setTxs] = useState<Map<string, RequestTxs>>(new Map());
+  useEffect(() => { fetchRequestTxs().then(setTxs).catch(() => { /* links stay hidden */ }); }, []);
+  const TxLink = ({ h }: { h?: `0x${string}` }) =>
+    h ? <a className="mono alink" href={scanTx(h)} target="_blank" rel="noopener">{h.slice(0, 8)}… ↗</a> : <span className="muted">—</span>;
   const [packets, setPackets] = useState<Packet[]>([]);
   const [selected, setSelected] = useState<bigint | null>(null);
   const [tab, setTab] = useState<'Overview' | 'Requests' | 'Proofs'>('Overview');
@@ -66,6 +72,34 @@ export function AuditorView() {
     } finally { setDownloading(false); }
   };
 
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [bulk, setBulk] = useState(false);
+  const decryptAll = async () => {
+    if (!pkt) return;
+    setBulk(true);
+    try {
+      const client = await handleClientFor(account);
+      await waitResolved(pkt.snapshotHandles);
+      const out: Record<string, string> = {};
+      const dec = async (h: string) => Number((await client.decrypt(h as any)).value);
+      out[pkt.snapshotHandles[0]] = `${(await dec(pkt.snapshotHandles[0])) / 1e6} cUSDC`;
+      out[pkt.snapshotHandles[1]] = `${(await dec(pkt.snapshotHandles[1])) / 1e6} cUSDC`;
+      out[pkt.snapshotHandles[2]] = `${(await dec(pkt.snapshotHandles[2])) / 1e6} cUSDC`;
+      for (let k = 0; k < pkt.requestIds.length; k++) {
+        out[pkt.snapshotHandles[3 + k * 2]] = `${(await dec(pkt.snapshotHandles[3 + k * 2])) / 1e6} cUSDC`;
+        const r = await dec(pkt.snapshotHandles[4 + k * 2]);
+        out[pkt.snapshotHandles[4 + k * 2]] = r === 0 ? '0 (ok)' : `${r} (${['', 'budget', 'balance', 'reserve'][r] ?? 'reason'})`;
+      }
+      setVals(out);
+      completeMission('audit');
+      toast(`✓ Packet #${pkt.id} fully decrypted — one grant, every value. Mission complete!`);
+    } catch (e: any) {
+      toast(`Decrypt failed: ${e?.message ?? e}`, true);
+    } finally { setBulk(false); }
+  };
+  const V = ({ h, unit, label }: { h: `0x${string}`; unit?: string; label?: string }) =>
+    vals[h] ? <span className="value">{vals[h]}</span> : <Decrypt handle={h} unit={unit} label={label} />;
+
   return (
     <>
       <div className="notice">
@@ -90,10 +124,13 @@ export function AuditorView() {
             </div>
           </div>
 
-          <div className="card">
+          <div className="card" data-tour="packets">
             <div className="pkt-head">
               <h3 style={{ margin: 0 }}>Audit packet #{String(pkt.id)}</h3>
-              <button className="btn small primary" disabled={downloading} onClick={download}>{downloading ? <><span className="spin" /> Decrypting…</> : '⬇ Download decrypted JSON'}</button>
+              <div className="row">
+                <button className="btn small primary" disabled={bulk} onClick={decryptAll}>{bulk ? <><span className="spin" /> Decrypting…</> : '🔓 Decrypt this packet'}</button>
+                <button className="btn small" disabled={downloading} onClick={download}>{downloading ? <><span className="spin" /> Exporting…</> : '⬇ JSON'}</button>
+              </div>
             </div>
             <div className="subtabs">
               {(['Overview', 'Requests', 'Proofs'] as const).map((t) => (
@@ -107,26 +144,34 @@ export function AuditorView() {
                 <div className="kv-row"><span>Mandate ID</span><span className="mono">#{String(pkt.mandateId)} (policy v{pkt.policyVersion})</span></div>
                 <div className="kv-row"><span>Auditor</span><span className="mono">{short(pkt.auditor)}</span></div>
                 <div className="kv-row"><span>Created</span><span>{new Date(Number(pkt.createdAt) * 1000).toLocaleString()}</span></div>
-                <div className="kv-row"><span>Policy auto-limit</span><Decrypt handle={pkt.snapshotHandles[0]} /></div>
-                <div className="kv-row"><span>Budget left (at packet time)</span><Decrypt handle={pkt.snapshotHandles[1]} /></div>
-                <div className="kv-row"><span>Reserve floor</span><Decrypt handle={pkt.snapshotHandles[2]} /></div>
+                <div className="kv-row"><span>Policy auto-limit</span><V h={pkt.snapshotHandles[0]} /></div>
+                <div className="kv-row"><span>Budget left (at packet time)</span><V h={pkt.snapshotHandles[1]} /></div>
+                <div className="kv-row"><span>Reserve floor</span><V h={pkt.snapshotHandles[2]} /></div>
               </div>
             )}
 
             {tab === 'Requests' && (
               <div className="tbl"><table>
-                <thead><tr><th>Request ID</th><th>Amount</th><th>Blocked reason</th></tr></thead>
+                <thead><tr><th>Request</th><th>Recipient</th><th>Outcome</th><th>Amount</th><th>Blocked reason</th><th>Request tx</th><th>Finalize tx</th></tr></thead>
                 <tbody>
-                  {pkt.requestIds.map((rid, k) => (
-                    <Fragment key={String(rid)}>
-                      <tr>
-                        <td className="mono">#{String(rid)}</td>
-                        <td><Decrypt handle={pkt.snapshotHandles[3 + k * 2]} /></td>
-                        <td><Decrypt handle={pkt.snapshotHandles[4 + k * 2]} unit="" label="Reason (0=ok,1=budget,2=balance,3=reserve)" /></td>
-                      </tr>
-                    </Fragment>
-                  ))}
-                  {!pkt.requestIds.length && <tr><td colSpan={3} className="muted">Policy-only packet (no request snapshots).</td></tr>}
+                  {pkt.requestIds.map((rid, k) => {
+                    const pub = requests.find((r) => r.id === rid);
+                    const t = txs.get(String(rid));
+                    return (
+                      <Fragment key={String(rid)}>
+                        <tr>
+                          <td className="mono">#{String(rid)}</td>
+                          <td className="mono">{pub ? short(pub.recipient) : '—'}</td>
+                          <td>{pub ? <RequestPill state={pub.state} /> : <span className="muted">—</span>}</td>
+                          <td><V h={pkt.snapshotHandles[3 + k * 2]} /></td>
+                          <td><V h={pkt.snapshotHandles[4 + k * 2]} unit="" label="Reason (0=ok,1=budget,2=balance,3=reserve)" /></td>
+                          <td><TxLink h={t?.request} /></td>
+                          <td><TxLink h={t?.approval ?? t?.finalize} /></td>
+                        </tr>
+                      </Fragment>
+                    );
+                  })}
+                  {!pkt.requestIds.length && <tr><td colSpan={7} className="muted">Policy-only packet (no request snapshots).</td></tr>}
                 </tbody>
               </table></div>
             )}

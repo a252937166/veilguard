@@ -130,6 +130,20 @@ async function cosignGovernance(to, data, nonce) {
   return { signature, signer: signerB.address, nonce: Number(onchainNonce) };
 }
 
+// Serialize admin-wallet txs — finalize, provisioning and the demo-mandate
+// watchdog all sign with the same account; without a lock they race on nonces.
+let adminChain = Promise.resolve();
+function withAdminLock(fn) {
+  const p = adminChain.then(fn, fn);
+  adminChain = p.catch(() => {});
+  return p;
+}
+const adminWrite = (params) => withAdminLock(async () => {
+  const hash = await adminWallet.writeContract(params);
+  await pub.waitForTransactionReceipt({ hash });
+  return hash;
+});
+
 let handleClient;
 async function getHandleClient() {
   if (!handleClient) {
@@ -139,6 +153,165 @@ async function getHandleClient() {
     );
   }
   return handleClient;
+}
+
+// ------- proof-gated finalize (keeper) -------
+// Anyone may submit finalize(id, proof); the on-chain proof decides the outcome,
+// so this courier can only DELAY a result, never change one. Running it here lets
+// the delegate's outcome just "appear" with no second wallet popup.
+const SWEEP_ENABLED = process.env.SWEEP_ENABLED !== 'false';
+const SWEEP_MS = Number(process.env.SWEEP_MS ?? 15_000);
+const finalizingIds = new Set();
+
+async function decisionResolved(handle) {
+  try {
+    const r = await fetch(`${GATEWAY_URL}/v0/public/handles/status`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ handles: [handle] }),
+    });
+    if (!r.ok) return false;
+    const d = await r.json();
+    return d?.payload?.statuses?.[0]?.resolved === true;
+  } catch { return false; }
+}
+
+/** Finalize one request if it is still pending and its decision is provable. */
+async function finalizeRequest(id) {
+  id = BigInt(id);
+  const key = String(id);
+  if (finalizingIds.has(key)) return { skipped: 'in-flight' };
+  const r = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getRequest', args: [id] });
+  if (Number(r[5]) !== 1) return { skipped: 'not-pending', state: Number(r[5]) };
+  const decisionHandle = r[7];
+  if (!(await decisionResolved(decisionHandle))) return { skipped: 'tee-not-ready' };
+  finalizingIds.add(key);
+  try {
+    const hc = await getHandleClient();
+    const { decryptionProof } = await hc.publicDecrypt(decisionHandle);
+    const hash = await adminWrite({
+      address: MODULE, abi: MODULE_ABI, functionName: 'finalize', args: [id, decryptionProof],
+    });
+    return { ok: true, hash };
+  } finally { finalizingIds.delete(key); }
+}
+
+/**
+ * Background sweep: self-heal any pending request the TEE can already prove,
+ * and act as the demo's treasury committee — escalated requests are approved
+ * after a short review window with a REAL Safe 2-of-2 execTransaction (both
+ * owner keys live only on this server; neither is ever shipped to a browser).
+ */
+const AUTO_APPROVE_MS = Number(process.env.AUTO_APPROVE_MS ?? 45_000);
+const approvingIds = new Set();
+async function sweepFinalize() {
+  try {
+    const nextId = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'nextRequestId' });
+    for (let i = 1n; i < nextId; i++) {
+      const key = String(i);
+      if (finalizingIds.has(key) || approvingIds.has(key)) continue;
+      const r = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getRequest', args: [i] });
+      const state = Number(r[5]);
+      if (state === 1) {
+        if (!(await decisionResolved(r[7]))) continue;
+        try { await finalizeRequest(i); console.log(`[sweep] finalized #${i}`); }
+        catch (e) { console.log(`[sweep] #${i} finalize failed: ${e?.shortMessage ?? e?.message}`); }
+      } else if (state === 3) {
+        // AwaitingSafeApproval — approve after the review window
+        if (Date.now() - Number(r[4]) * 1000 < AUTO_APPROVE_MS) continue;
+        approvingIds.add(key);
+        try {
+          const data = encodeFunctionData({ abi: MODULE_ABI, functionName: 'executeEscalated', args: [i] });
+          const hash = await safeExec2of2(MODULE, data);
+          console.log(`[sweep] escalation #${i} approved by committee 2-of-2 ${hash}`);
+        } catch (e) {
+          console.log(`[sweep] #${i} approve failed: ${e?.shortMessage ?? e?.message}`);
+        } finally { approvingIds.delete(key); }
+      }
+    }
+  } catch (e) { console.log(`[sweep] error: ${e?.shortMessage ?? e?.message}`); }
+  refreshDemoMandateIfDrained();
+}
+if (SWEEP_ENABLED) setInterval(sweepFinalize, SWEEP_MS);
+
+// ---- shared-demo watchdog: keep BOTH demo delegates deterministic ----
+// The public demo policy is auto≤40 / budget 300 / reserve 100. The watchdog
+// (a) self-provisions a mandate for any demo delegate that lacks one (this is
+// how the violation delegate bootstraps), (b) replaces mandates whose budget
+// dropped below the floor, and (c) tops up the delegates' Sepolia gas — so
+// every judge sees reproducible outcomes with zero manual setup.
+const DEMO_RECIPIENT = process.env.DEMO_RECIPIENT ?? '0xc4ba09787f46441a517467fc12af459d8268c60f';
+const DEMO_DELEGATES = [
+  process.env.DEMO_DELEGATE ?? '0x17ee5ad7e4b40cadafad27c5f68f74d02c7fd532',        // main demo delegate
+  process.env.VIOLATION_DELEGATE ?? '0xdfc0c6e0baed0948d8ba22a4917438938f2a40f4',   // blocked-scenario delegate
+];
+const REFRESH_MIN_BUDGET = usdc(100);
+const REFRESH_CHECK_MS = Number(process.env.REFRESH_CHECK_MS ?? 5 * 60_000);
+const GAS_FLOOR = 3n * 10n ** 15n;   // 0.003 ETH
+const GAS_TOPUP = 10n * 10n ** 15n;  // 0.01 ETH
+
+const adminSend = (to, value) => withAdminLock(async () => {
+  const hash = await adminWallet.sendTransaction({ to, value });
+  await pub.waitForTransactionReceipt({ hash });
+  return hash;
+});
+
+let refreshing = false;
+let lastBudgetCheck = 0;
+
+async function refreshDemoMandateIfDrained() {
+  if (refreshing || Date.now() - lastBudgetCheck < REFRESH_CHECK_MS) return;
+  lastBudgetCheck = Date.now();
+  refreshing = true;
+  try {
+    for (const delegate of DEMO_DELEGATES) {
+      try {
+        // gas top-up
+        const bal = await pub.getBalance({ address: delegate });
+        if (bal < GAS_FLOOR) {
+          await adminSend(delegate, GAS_TOPUP);
+          console.log(`[demo] topped up ${delegate} with 0.01 ETH gas`);
+        }
+        // mandate freshness
+        const id = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'activeMandateOf', args: [delegate] });
+        let needsFresh = id === 0n;
+        if (!needsFresh) {
+          const m = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getMandate', args: [id] });
+          const hc = await getHandleClient();
+          const budget = BigInt((await hc.decrypt(m[6])).value);
+          needsFresh = budget < REFRESH_MIN_BUDGET;
+          if (needsFresh) console.log(`[demo] ${delegate} mandate #${id} budget ${budget} below floor — refreshing`);
+        } else {
+          console.log(`[demo] ${delegate} has no active mandate — provisioning`);
+        }
+        if (!needsFresh) continue;
+        // an in-flight request occupies the slot; activation would revert — retry next cycle
+        const nextR = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'nextRequestId' });
+        let busySlot = false;
+        for (let i = 1n; i < nextR; i++) {
+          const r = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getRequest', args: [i] });
+          if ([1, 3].includes(Number(r[5])) && r[1].toLowerCase() === delegate.toLowerCase()) { busySlot = true; break; }
+        }
+        if (busySlot) continue;
+        const hc = await getHandleClient();
+        const [l, b, f] = await Promise.all([
+          hc.encryptInput(POLICY.autoLimit, 'uint256', MODULE),
+          hc.encryptInput(POLICY.budget, 'uint256', MODULE),
+          hc.encryptInput(POLICY.reserve, 'uint256', MODULE),
+        ]);
+        const now = BigInt(Math.floor(Date.now() / 1000));
+        await adminWrite({
+          address: MODULE, abi: MODULE_ABI, functionName: 'proposeMandate',
+          args: [delegate, 0n, now + POLICY.days * 86_400n, [DEMO_RECIPIENT, delegate],
+            l.handle, l.handleProof, b.handle, b.handleProof, f.handle, f.handleProof],
+        });
+        const mandateId = (await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'nextMandateId' })) - 1n;
+        await safeExec2of2(MODULE, encodeFunctionData({ abi: MODULE_ABI, functionName: 'activateMandate', args: [mandateId] }));
+        console.log(`[demo] fresh mandate #${mandateId} activated for ${delegate} (2-of-2)`);
+      } catch (e) {
+        console.log(`[demo] ${delegate} refresh failed: ${e?.shortMessage ?? e?.message}`);
+      }
+    }
+  } finally { refreshing = false; }
 }
 
 // ------- rate limiting -------
@@ -164,12 +337,11 @@ async function provision(address) {
     hc.encryptInput(POLICY.reserve, 'uint256', MODULE),
   ]);
   const now = BigInt(Math.floor(Date.now() / 1000));
-  const proposeTx = await adminWallet.writeContract({
+  const proposeTx = await adminWrite({
     address: MODULE, abi: MODULE_ABI, functionName: 'proposeMandate',
     args: [address, 0n, now + POLICY.days * 86_400n, [address],
       l.handle, l.handleProof, b.handle, b.handleProof, f.handle, f.handleProof],
   });
-  await pub.waitForTransactionReceipt({ hash: proposeTx });
   const mandateId = (await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'nextMandateId' })) - 1n;
 
   const activateData = encodeFunctionData({ abi: MODULE_ABI, functionName: 'activateMandate', args: [mandateId] });
@@ -186,7 +358,7 @@ const json = (res, code, obj) => {
 
 http.createServer((req, res) => {
   if (req.method === 'OPTIONS') return json(res, 204, {});
-  if (req.url === '/api/health') return json(res, 200, { ok: true, enabled, module: MODULE, safe: SAFE, dayCount, dayCap });
+  if (req.url === '/api/health') return json(res, 200, { ok: true, enabled, module: MODULE, safe: SAFE, dayCount, dayCap, sweep: SWEEP_ENABLED, finalizing: finalizingIds.size });
   if (req.method === 'POST' && req.url === '/api/cosign') {
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 4000) req.destroy(); });
@@ -198,6 +370,22 @@ http.createServer((req, res) => {
         json(res, 200, { ok: true, ...result });
       } catch (e) {
         json(res, 400, { error: e?.shortMessage ?? e?.message ?? 'co-sign failed' });
+      }
+    });
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/api/finalize') {
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 200) req.destroy(); });
+    req.on('end', async () => {
+      try {
+        const { requestId } = JSON.parse(body || '{}');
+        const idStr = String(requestId);
+        if (!/^\d{1,9}$/.test(idStr) || Number(idStr) < 1) return json(res, 400, { error: 'bad requestId' });
+        const result = await finalizeRequest(BigInt(idStr));
+        json(res, 200, { ok: true, ...result });
+      } catch (e) {
+        json(res, 500, { error: e?.shortMessage ?? e?.message ?? 'finalize failed' });
       }
     });
     return;

@@ -1,10 +1,17 @@
 import { useState } from 'react';
-import { ADDR, moduleAbi, scan, scanTx, short } from '../config';
-import { makeWalletClient, publicClient } from '../nox';
+import { ADDR, scan, scanTx, short } from '../config';
+import { makeWalletClient } from '../nox';
 import { governance2of2, type GovFn } from '../safe-browser';
 import { useApp } from '../App';
 import { Decrypt } from '../ui';
 import ev from '../demo-evidence.json';
+
+function ago(ts: bigint): string {
+  const s = Math.floor(Date.now() / 1000) - Number(ts);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return `${Math.floor(s / 3600)}h`;
+}
 
 export function SignerView() {
   const { account, owners, mandates, requests, paused, run, busy, refresh, toast } = useApp();
@@ -28,14 +35,55 @@ export function SignerView() {
   return (
     <>
       <div className="notice">
-        The treasury Safe is <b>2-of-{owners.length || 2}</b>. Activation and escalation approval each need
-        <b> two owner signatures</b>. In this demo you sign as <b>owner A</b> and a server-side co-signer
-        provides <b>owner B</b> — but only for bounded governance calls, so owner A alone can never drain or
-        brick the Safe. Every action below is a real on-chain <span className="mono">execTransaction</span>.
-        {!isOwner && !account && <> Use <b>⚡ Try a role → Signer</b> to operate the demo committee.</>}
+        {isOwner ? (
+          <>You are a <b>Safe owner</b>. Activation and escalation approval each need <b>two owner
+          signatures</b> — you sign as owner A, the governance co-signer provides owner B (bounded
+          calls only). Every action is a real on-chain 2-of-2.</>
+        ) : (
+          <>The treasury committee is a <b>2-of-{owners.length || 2} Safe</b>. Its owner keys are
+          deliberately <b>not public</b> — a signer key could reshape treasury policy. In this demo the
+          committee reviews escalations <b>server-side</b> and approves them with a real 2-of-2 within
+          about a minute; everything it does lands on-chain below, where you can verify it.</>
+        )}
       </div>
 
       {step && <div className="flowbar"><span className="spin" /> <b>{step}</b></div>}
+
+      <div className="card">
+        <h3>Pending approvals <small>{isOwner ? 'approve or reject with a 2-of-2' : 'the committee reviews these — watch them resolve live'}</small></h3>
+        {escalated.length ? (
+          <div className="approve-list">
+            {escalated.map((r) => (
+              <div className="approve-card" key={String(r.id)}>
+                <div className="ac-head">
+                  <b>Request #{String(r.id)}</b>
+                  <span className="pill warn">AWAITING APPROVAL</span>
+                  <span className="ac-age">waiting {ago(r.createdAt)}</span>
+                </div>
+                <div className="ac-grid">
+                  <div><span className="ac-label">Requested by</span><span className="mono">{short(r.delegate)}</span></div>
+                  <div><span className="ac-label">Pay to</span><span className="mono">{short(r.recipient)}</span></div>
+                  <div><span className="ac-label">Amount</span>{isOwner ? <Decrypt handle={r.amount} /> : <span className="enc">🔒 owner-gated</span>}</div>
+                  <div><span className="ac-label">Funds</span><span className="ok-text">reserved in escrow</span></div>
+                </div>
+                <div className="ac-why muted">Why: above the mandate's confidential auto-limit — policy requires committee sign-off.</div>
+                <div className="row" style={{ marginTop: 10 }}>
+                  {isOwner ? (
+                    <>
+                      <button className="btn small" disabled={!!busy} onClick={() => gov(`Reject escalation #${r.id}`, 'cancelEscalated', [r.id])}>✕ Reject</button>
+                      <button className="btn small primary" disabled={!!busy} onClick={() => gov(`Approve escalation #${r.id}`, 'executeEscalated', [r.id])}>✓ Approve payment (2-of-2)</button>
+                    </>
+                  ) : (
+                    <span className="muted" style={{ fontSize: 12.5 }}><span className="spin" /> committee review in progress — approves automatically in ≤1 min</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">Nothing awaiting approval. Submit a payment above the auto-limit as the Delegate (try 60) to create one.</p>
+        )}
+      </div>
 
       {isOwner && (
         <div className="grid2">
@@ -73,33 +121,7 @@ export function SignerView() {
       )}
 
       <div className="card">
-        <h3>Escalated requests — approve or reject (2-of-2)</h3>
-        <div className="tbl"><table>
-          <thead><tr><th>ID</th><th>Delegate</th><th>Recipient</th><th>Amount</th><th></th></tr></thead>
-          <tbody>
-            {escalated.map((r) => (
-              <tr key={String(r.id)}>
-                <td className="mono">#{String(r.id)}</td>
-                <td className="mono">{short(r.delegate)}</td>
-                <td className="mono">{short(r.recipient)}</td>
-                <td>{isOwner ? <Decrypt handle={r.amount} /> : <span className="muted">owner-gated</span>}</td>
-                <td className="row">
-                  {isOwner ? (
-                    <>
-                      <button className="btn small primary" disabled={!!busy} onClick={() => gov(`Approve escalation #${r.id}`, 'executeEscalated', [r.id])}>✓ Approve 2-of-2</button>
-                      <button className="btn small" disabled={!!busy} onClick={() => gov(`Reject escalation #${r.id}`, 'cancelEscalated', [r.id])}>✕ Reject</button>
-                    </>
-                  ) : <span className="muted" style={{ fontSize: 12 }}>connect the Signer committee to act</span>}
-                </td>
-              </tr>
-            ))}
-            {!escalated.length && <tr><td colSpan={5} className="muted">Nothing awaiting approval. Submit a large payment as the Delegate to create one.</td></tr>}
-          </tbody>
-        </table></div>
-      </div>
-
-      <div className="card">
-        <h3>Proof: 2-of-2 governance on-chain <small>frozen evidence</small></h3>
+        <h3>Committee actions on-chain <small>every approval is a verifiable 2-of-2 execTransaction</small></h3>
         <div className="tbl"><table>
           <thead><tr><th>Governance action</th><th>Executed (2-of-2)</th></tr></thead>
           <tbody>
@@ -108,7 +130,7 @@ export function SignerView() {
           </tbody>
         </table></div>
         <p className="muted" style={{ marginTop: 10, fontSize: 12.5 }}>
-          Safe <a className="mono alink" href={scan(ADDR.Safe)} target="_blank" rel="noopener">{short(ADDR.Safe)}</a> · each carries two confirmations.
+          Safe <a className="mono alink" href={scan(ADDR.Safe)} target="_blank" rel="noopener">{short(ADDR.Safe)}</a> · each carries two confirmations — inspect them on-chain.
         </p>
       </div>
     </>

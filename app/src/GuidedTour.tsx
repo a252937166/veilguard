@@ -1,67 +1,123 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import type { SpendRequest } from './App';
+import type { DemoRole } from './demo';
+import { demoAddress } from './demo';
 
-export type TabName = 'Dashboard' | 'Delegate' | 'Admin' | 'Signer' | 'Auditor' | 'Get Funds';
+export type TabName = 'Dashboard' | 'Delegate' | 'Admin' | 'Signer' | 'Auditor' | 'Verify' | 'Get Funds';
 
-export type Step = {
+/**
+ * Task-driven guided demo. Each step DOES things (enters the demo role,
+ * switches tabs, highlights the exact control) and auto-advances when the
+ * on-chain state shows the user completed the action — not a page-flipping
+ * manual.
+ */
+type Step = {
   title: string;
   body: string;
-  tab: TabName;
   hint?: string;
+  tab: TabName;
+  role?: DemoRole;          // demo role to auto-enter on this step
+  target?: string;          // [data-tour=…] element to highlight & scroll to
+  auto?: 'submitted' | 'settled';  // auto-advance condition
+  nextLabel?: string;
+  waiting?: string;         // spinner label while waiting for `auto`
 };
 
-export const STEPS: Step[] = [
+const STEPS: Step[] = [
   {
-    title: 'A treasury nobody can read',
-    tab: 'Dashboard',
-    body: 'This is a live Safe treasury on Sepolia holding confidential cUSDC. Every mandate and request below is real on-chain state — yet the budgets, limits and amounts are all encrypted. Scroll the tables: you see who and when, never how much.',
-    hint: 'You are looking at the public view — exactly what any chain observer gets.',
+    title: "You're the Delegate now",
+    tab: 'Delegate', role: 'delegate',
+    body: "We put you in the shoes of a real spender: a shared, pre-funded demo account that holds an encrypted mandate. You never see the policy — it decides for you. Let's send a confidential payment.",
+    hint: 'No wallet needed — the demo key signs locally. The policy, not key custody, is what contains you.',
+    nextLabel: "Let's pay someone →",
   },
   {
-    title: 'A secret spending policy',
-    tab: 'Admin',
-    body: 'A finance admin proposed an encrypted mandate: a per-payment auto-limit, a total delegated budget and a minimum treasury reserve. On-chain they are just handles. Only authorised viewers can decrypt them — connect the admin wallet and the 🔓 buttons reveal the numbers; anyone else is refused by the on-chain ACL.',
-    hint: 'The admin can only propose and pause. Activating a policy needs the Safe multisig.',
+    title: 'Run the first scenario',
+    tab: 'Delegate', target: 'scenario-routine',
+    body: 'Press ▶ Run scenario on the Routine payment card. Your amount is encrypted in the browser before it leaves — the chain will only ever see a ciphertext handle.',
+    auto: 'submitted',
+    waiting: 'waiting for you to run it…',
+    nextLabel: 'I ran it',
   },
   {
-    title: 'A routine payment — WITHIN MANDATE',
+    title: 'The TEE is deciding',
     tab: 'Delegate',
-    body: 'A delegate submits an encrypted amount. The Nox TEE checks it against the secret policy and returns a decision. A small payment comes back WITHIN MANDATE and pays out immediately — the amount stays hidden the whole time. As the delegate you can decrypt your own amount; nobody else can. The Dashboard evidence table links the exact on-chain transactions.',
-    hint: 'Encryption happens in your browser before the value ever leaves.',
+    body: 'Your encrypted amount is being checked against the encrypted policy inside a Trusted Execution Environment — budget, balance and reserve rules, all on ciphertext. A keeper then publishes the signed decision proof on-chain. Nothing to do; the outcome appears by itself.',
+    auto: 'settled',
+    waiting: 'TEE computing → keeper publishing the proof…',
+    nextLabel: 'Skip the wait',
   },
   {
-    title: 'Too big — APPROVAL REQUIRED',
-    tab: 'Signer',
-    body: 'A payment above the secret auto-limit returns APPROVAL REQUIRED, and the funds are held in escrow until the Safe multisig signs. The treasury Safe is 2-of-2: activation and approval each need TWO distinct owner signatures — a single owner cannot act alone. This tab links the on-chain proof of both 2-of-2 executions.',
-    hint: 'Signers (only signers) can decrypt the escalated amount.',
+    title: 'Outcome revealed — amount still secret',
+    tab: 'Delegate', target: 'outcome',
+    body: 'The chain learned exactly one of three words: EXECUTED, APPROVAL REQUIRED, or BLOCKED — never the number. 25 auto-executes; try 60 to watch the treasury committee approve a real 2-of-2, or 600 to get blocked with a private reason.',
+    hint: 'Escalations are approved server-side by the real committee within ~1 min — owner keys are never in the browser.',
+    nextLabel: 'Continue as the Auditor →',
   },
   {
-    title: 'Against the rules — BLOCKED',
-    tab: 'Delegate',
-    body: 'A payment that would break the policy comes back BLOCKED — no funds move and the budget is untouched. The delegate can decrypt a coarse reason (budget / balance / reserve) but never the exact limit, so the policy cannot be probed out by trial and error. A blocked request also starts a cooldown.',
+    title: "Now you're the Auditor",
+    tab: 'Auditor', role: 'auditor', target: 'packets',
+    body: 'The finance admin granted this account an immutable disclosure snapshot: one policy version plus chosen requests. Open a packet and press Decrypt — you can read exactly those values, forever, and nothing else. Selective disclosure instead of all-or-nothing transparency.',
+    nextLabel: 'Almost done →',
   },
   {
-    title: 'Audit without exposure',
-    tab: 'Auditor',
-    body: 'The admin can hand an auditor a scoped, immutable snapshot of one policy version and a chosen set of requests. The auditor decrypts exactly those values — forever — but never gains access to live state, future versions, or the ability to compute on the handles.',
-  },
-  {
-    title: 'Your turn',
-    tab: 'Delegate',
-    body: 'Now drive it yourself: hit "⚡ Try a role" in the top bar and act as the Delegate — a shared, pre-funded public demo account. Submit an encrypted amount and watch the TEE decide in real time. Small amounts execute, big ones escalate, oversized ones get blocked. The delegate key is public on purpose: the policy, not key custody, is what contains you.',
-    hint: 'No wallet needed. You can also switch to the Auditor role to decrypt the disclosure snapshots.',
+    title: 'Believe none of it — verify',
+    tab: 'Verify',
+    body: 'Everything you just did is on Sepolia: request txs, proof-gated finalizations, real 2-of-2 governance executions. This page links every hash. That is the point — confidential numbers, publicly verifiable process.',
+    nextLabel: 'Explore freely ✓',
   },
 ];
 
 export function GuidedTour({
-  step, setStep, onGoToTab, onClose,
+  step, setStep, onGoToTab, onClose, requests, demoRole, startDemo,
 }: {
   step: number;
   setStep: (n: number) => void;
   onGoToTab: (t: TabName) => void;
   onClose: () => void;
+  requests: SpendRequest[];
+  demoRole: DemoRole | null;
+  startDemo: (r: DemoRole) => void;
 }) {
   const s = STEPS[step];
-  useEffect(() => { onGoToTab(s.tab); }, [step]);
+  const baselineId = useRef<bigint>(0n);
+  const [waited, setWaited] = useState(false);
+
+  // step entry: enter the right role, switch tab, snapshot baseline, highlight target
+  useEffect(() => {
+    if (s.role && demoRole !== s.role) startDemo(s.role);
+    onGoToTab(s.tab);
+    if (s.auto === 'submitted') {
+      baselineId.current = requests.reduce((m, r) => (r.id > m ? r.id : m), 0n);
+    }
+    setWaited(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
+
+  // highlight + scroll to the step's target control
+  useEffect(() => {
+    document.querySelectorAll('.tour-target').forEach((el) => el.classList.remove('tour-target'));
+    if (!s.target) return;
+    const t = setTimeout(() => {
+      const el = document.querySelector(`[data-tour="${s.target}"]`);
+      if (el) { el.classList.add('tour-target'); el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+    }, 350);
+    return () => { clearTimeout(t); document.querySelectorAll('.tour-target').forEach((el) => el.classList.remove('tour-target')); };
+  }, [step, s.target]);
+
+  // auto-advance on real on-chain progress
+  const demoDelegate = demoAddress('delegate').toLowerCase();
+  useEffect(() => {
+    if (!s.auto) return;
+    const mine = requests.filter((r) => r.delegate.toLowerCase() === demoDelegate);
+    if (s.auto === 'submitted') {
+      if (mine.some((r) => r.id > baselineId.current)) { setWaited(true); setTimeout(() => setStep(step + 1), 600); }
+    } else if (s.auto === 'settled') {
+      const newest = mine.reduce<SpendRequest | null>((a, r) => (!a || r.id > a.id ? r : a), null);
+      if (newest && newest.state !== 1) { setWaited(true); setTimeout(() => setStep(step + 1), 600); }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requests, step]);
 
   return (
     <div className="tour">
@@ -71,20 +127,20 @@ export function GuidedTour({
             <span key={i} className={`tdot ${i === step ? 'on' : ''} ${i < step ? 'done' : ''}`} onClick={() => setStep(i)} />
           ))}
         </div>
-        <div className="tour-step-of">Guided demo · step {step + 1} / {STEPS.length}</div>
-        <button className="tour-x" onClick={onClose} title="Exit guided demo">✕</button>
+        <div className="tour-step-of">Interactive demo · step {step + 1} / {STEPS.length}</div>
+        <button className="tour-x" onClick={onClose} title="Exit demo">✕</button>
       </div>
       <div className="tour-body">
-        <div className="tour-tab">{s.tab}</div>
         <h3>{s.title}</h3>
         <p>{s.body}</p>
         {s.hint && <p className="tour-hint">💡 {s.hint}</p>}
       </div>
       <div className="tour-nav">
         <button className="btn small ghost" disabled={step === 0} onClick={() => setStep(step - 1)}>← Back</button>
+        {s.auto && !waited && <span className="muted tour-wait"><span className="spin" /> {s.waiting}</span>}
         {step < STEPS.length - 1
-          ? <button className="btn small primary" onClick={() => setStep(step + 1)}>Next →</button>
-          : <button className="btn small primary" onClick={onClose}>Explore freely ✓</button>}
+          ? <button className={`btn small ${s.auto ? 'ghost' : 'primary'}`} onClick={() => setStep(step + 1)}>{s.nextLabel ?? 'Next →'}</button>
+          : <button className="btn small primary" onClick={onClose}>{s.nextLabel ?? 'Done ✓'}</button>}
       </div>
     </div>
   );

@@ -21,14 +21,24 @@ export function getActiveProvider(): Eip1193Provider | undefined {
 }
 
 const RPCS = [
-  RPC_URL,
+  RPC_URL, // publicnode
+  'https://sepolia.drpc.org',
+  'https://ethereum-sepolia.blockpi.network/v1/rpc/public',
+  'https://endpoints.omniatech.io/v1/eth/sepolia/public',
+  'https://gateway.tenderly.co/public/sepolia',
   'https://rpc.sepolia.org',
-  'https://1rpc.io/sepolia',
 ];
 
 export const publicClient: PublicClient = createPublicClient({
   chain: sepolia,
-  transport: fallback(RPCS.map((u) => http(u)), { rank: false }),
+  // JSON-RPC request batching per endpoint + Multicall3 aggregation: the dashboard's
+  // ~20 getMandate/getRequest reads collapse into a single aggregate eth_call, so a
+  // 10s poll no longer blows through free-tier rate limits.
+  transport: fallback(RPCS.map((u) => http(u, { batch: true })), { rank: true, retryCount: 2 }),
+  batch: { multicall: { wait: 24 } },
+  // receipt waits poll at this cadence — the default 4s adds needless perceived
+  // latency on a 12s-block testnet
+  pollingInterval: 1_500,
 }) as PublicClient;
 
 export function makeWalletClient(account: `0x${string}`): WalletClient {

@@ -11,7 +11,7 @@ export function MandatePill({ state }: { state: number }) {
 export function RequestPill({ state, decisionReady }: { state: number; decisionReady?: boolean }) {
   if (state === 1) {
     return decisionReady
-      ? <span className="pill tee">DECIDED — FINALIZE</span>
+      ? <span className="pill tee">DECISION READY · PUBLISHING</span>
       : <span className="pill tee"><span className="spin" /> CHECKING IN TEE</span>;
   }
   const map: Record<number, [string, string]> = {
@@ -23,8 +23,10 @@ export function RequestPill({ state, decisionReady }: { state: number; decisionR
 }
 
 /** Decrypt-on-click for a handle the connected account can view. */
-export function Decrypt({ handle, unit = 'cUSDC', label = 'Decrypt' }: {
+export function Decrypt({ handle, unit = 'cUSDC', label = 'Decrypt', format }: {
   handle: `0x${string}`; unit?: string; label?: string;
+  /** custom renderer for the raw decrypted value (e.g. enum → human label) */
+  format?: (raw: unknown) => string;
 }) {
   const { account, toast } = useApp();
   const [value, setValue] = useState<string>();
@@ -41,7 +43,7 @@ export function Decrypt({ handle, unit = 'cUSDC', label = 'Decrypt' }: {
           const client = await handleClientFor(account);
           await waitResolved([handle]);
           const { value: v, solidityType } = await client.decrypt(handle as any);
-          setValue(solidityType === 'uint256' ? fmt(v as bigint) : String(v));
+          setValue(format ? format(v) : solidityType === 'uint256' ? fmt(v as bigint) : String(v));
         } catch (e: any) {
           toast(`Decrypt refused: ${e?.message ?? e}`.slice(0, 300), true);
         } finally {

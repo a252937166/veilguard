@@ -1,35 +1,74 @@
 import { useMemo, useState } from 'react';
 import { ADDR, ROLES, fmt, isAddress, moduleAbi, parseUsdc, short } from '../config';
-import { handleClientFor, makeWalletClient, publicClient } from '../nox';
+import { handleClientFor, publicClient } from '../nox';
+import { walletWrite } from '../walletTx';
 import { useApp } from '../App';
-import { Decrypt, MandatePill, NoRole } from '../ui';
+import { Decrypt, MandatePill, NoRole, RequestPill } from '../ui';
 
 const WIZ = ['Policy details', 'Recipients', 'Review & encrypt'];
+
+/** Tiny persistent address book so the admin works with names, not raw hex. */
+const loadBook = (): Record<string, string> => {
+  try { return JSON.parse(localStorage.getItem('vg_addrbook') ?? '{}'); } catch { return {}; }
+};
+const saveBook = (b: Record<string, string>) => { try { localStorage.setItem('vg_addrbook', JSON.stringify(b)); } catch { /* ignore */ } };
 
 export function AdminView() {
   const { account, mandates, requests, run, busy, paused, toast } = useApp();
   const [step, setStep] = useState(0);
+  const [book, setBook] = useState<Record<string, string>>(loadBook);
   const [delegate, setDelegate] = useState<string>(ROLES.delegate);
-  const [recipients, setRecipients] = useState<string>(ROLES.deployer);
+  const [delegateName, setDelegateName] = useState('');
+  const [recips, setRecips] = useState<string[]>([ROLES.deployer]);
+  const [recipInput, setRecipInput] = useState('');
   const [autoLimit, setAutoLimit] = useState('40');
   const [budget, setBudget] = useState('100');
   const [floor, setFloor] = useState('500');
   const [days, setDays] = useState('30');
   const [auditor, setAuditor] = useState<string>(ROLES.auditor);
-  const [auditMandate, setAuditMandate] = useState('1');
-  const [auditReqs, setAuditReqs] = useState('');
+  const [auditMandate, setAuditMandate] = useState<string>('');
+  const [auditSel, setAuditSel] = useState<Set<string>>(new Set());
 
   const isAdmin = account?.toLowerCase() === ROLES.financeAdmin.toLowerCase();
-  const recips = useMemo(() => recipients.split(',').map((s) => s.trim()).filter(Boolean), [recipients]);
+
+  // name → address suggestions: built-ins + saved book + every address seen on-chain
+  const nameOf = (a: string): string | undefined => {
+    const lc = a.toLowerCase();
+    if (book[lc]) return book[lc];
+    if (lc === ROLES.delegate.toLowerCase()) return 'Demo delegate';
+    if (lc === ROLES.auditor.toLowerCase()) return 'Demo auditor';
+    if (lc === ROLES.deployer.toLowerCase()) return 'Ops payout';
+    return undefined;
+  };
+  const knownAddrs = useMemo(() => {
+    const set = new Map<string, string>();
+    const add = (a?: string) => { if (a && isAddress(a)) set.set(a.toLowerCase(), a); };
+    add(ROLES.delegate); add(ROLES.deployer); add(ROLES.auditor);
+    Object.keys(book).forEach(add);
+    mandates.forEach((m) => { add(m.delegate); m.recipients.forEach(add); });
+    return [...set.values()];
+  }, [mandates, book]);
 
   if (!isAdmin)
     return <NoRole title="Finance Admin — restricted"
-      body="The finance admin proposes encrypted policies and can pause the module. It is deliberately NOT a public demo role (it can create disclosure packets and pause spending), so it isn't offered as a one-click account. Watch what the admin did in the Dashboard evidence table, or try the Delegate / Auditor roles to experience the confidential flow." />;
-
-  const wallet = () => makeWalletClient(account!);
+      body="The finance admin proposes encrypted policies and can pause the module. It is deliberately NOT a public demo role (it can create disclosure packets and pause spending), so it isn't offered as a one-click account. Watch what the admin did in the Verify page, or try the Delegate / Auditor roles to experience the confidential flow." />;
 
   const step1Valid = isAddress(delegate) && [autoLimit, budget, floor].every((v) => /^\d+(\.\d{1,6})?$/.test(v) && Number(v) > 0) && Number(days) > 0 && Number(days) <= 3650;
   const step2Valid = recips.length > 0 && recips.every(isAddress) && new Set(recips.map((r) => r.toLowerCase())).size === recips.length;
+
+  const addRecip = (a: string) => {
+    const v = a.trim();
+    if (!isAddress(v)) { toast('Not a valid address', true); return; }
+    if (recips.some((r) => r.toLowerCase() === v.toLowerCase())) return;
+    setRecips([...recips, v]); setRecipInput('');
+  };
+
+  const rememberName = () => {
+    if (delegateName.trim() && isAddress(delegate)) {
+      const next = { ...book, [delegate.toLowerCase()]: delegateName.trim() };
+      setBook(next); saveBook(next);
+    }
+  };
 
   const propose = () =>
     run('Propose encrypted mandate', async () => {
@@ -40,33 +79,62 @@ export function AdminView() {
         client.encryptInput(parseUsdc(floor), 'uint256', ADDR.VeilGuardModule),
       ]);
       const now = BigInt(Math.floor(Date.now() / 1000));
-      const w = wallet();
-      const hash = await w.writeContract({
-        address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'proposeMandate',
+      const hash = await walletWrite({
+        account: account!, address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'proposeMandate',
         args: [delegate as `0x${string}`, 0n, now + BigInt(Number(days)) * 86_400n,
           recips as `0x${string}`[], l.handle, l.handleProof, b.handle, b.handleProof, f.handle, f.handleProof],
-        chain: w.chain, account: w.account!,
+        onHint: (m) => toast(m),
       });
       await publicClient.waitForTransactionReceipt({ hash });
+      rememberName();
       toast('✓ Encrypted mandate proposed. It stays a Draft until the Safe 2-of-2 activates it.');
       setStep(0);
     });
 
   const pause = () =>
     run('Pause all mandates', async () => {
-      const w = wallet();
-      const hash = await w.writeContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'pauseAll', args: [], chain: w.chain, account: w.account! });
+      const hash = await walletWrite({ account: account!, address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'pauseAll', args: [], onHint: (m) => toast(m) });
       await publicClient.waitForTransactionReceipt({ hash });
     });
 
+  // ---- packet builder: pick a mandate, tick terminal requests ----
+  const packetMandate = auditMandate || (mandates[0] ? String(mandates[0].id) : '');
+  const packetReqs = useMemo(
+    () => requests.filter((r) => String(r.mandateId) === packetMandate && [2, 4, 5, 6].includes(r.state)),
+    [requests, packetMandate],
+  );
+  const toggleReq = (id: string) => {
+    const next = new Set(auditSel);
+    if (next.has(id)) next.delete(id);
+    else if (next.size >= 8) { toast('A packet holds at most 8 requests', true); return; }
+    else next.add(id);
+    setAuditSel(next);
+  };
+
   const createPacket = () =>
     run('Create audit packet', async () => {
-      const ids = auditReqs.split(',').map((s) => s.trim()).filter(Boolean).map(BigInt);
-      const w = wallet();
-      const hash = await w.writeContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'createAuditPacket', args: [auditor as `0x${string}`, BigInt(auditMandate), ids], chain: w.chain, account: w.account! });
+      const ids = [...auditSel].map(BigInt).sort((a, b) => (a < b ? -1 : 1));
+      const hash = await walletWrite({
+        account: account!, address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'createAuditPacket',
+        args: [auditor as `0x${string}`, BigInt(packetMandate), ids], onHint: (m) => toast(m),
+      });
       await publicClient.waitForTransactionReceipt({ hash });
+      setAuditSel(new Set());
       toast('✓ Selective-disclosure packet created for the auditor.');
     });
+
+  const suggest = (current: string, onPick: (a: string) => void, exclude: string[] = []) => (
+    <div className="addr-suggest">
+      {knownAddrs
+        .filter((a) => a.toLowerCase() !== current.toLowerCase() && !exclude.some((e) => e.toLowerCase() === a.toLowerCase()))
+        .slice(0, 5)
+        .map((a) => (
+          <button key={a} type="button" className="addr-chip" onClick={() => onPick(a)}>
+            {nameOf(a) ? <b>{nameOf(a)}</b> : null}<span className="mono">{short(a)}</span>
+          </button>
+        ))}
+    </div>
+  );
 
   return (
     <>
@@ -88,9 +156,18 @@ export function AdminView() {
 
         {step === 0 && (
           <div className="wiz-body">
-            <label>Delegate address</label>
-            <input value={delegate} onChange={(e) => setDelegate(e.target.value)} className="mono" />
-            {!isAddress(delegate) && delegate && <p className="field-err">not a valid address</p>}
+            <div className="form-grid" style={{ gridTemplateColumns: '2fr 1fr' }}>
+              <div>
+                <label>Delegate address</label>
+                <input value={delegate} onChange={(e) => setDelegate(e.target.value)} className="mono" />
+                {!isAddress(delegate) && delegate && <p className="field-err">not a valid address</p>}
+              </div>
+              <div>
+                <label>Name (optional, saved locally)</label>
+                <input value={delegateName} onChange={(e) => setDelegateName(e.target.value)} placeholder="e.g. Marketing — Alice" />
+              </div>
+            </div>
+            {suggest(delegate, (a) => setDelegate(a))}
             <div className="form-grid">
               <div><label>Auto-limit (cUSDC)</label><input type="number" value={autoLimit} onChange={(e) => setAutoLimit(e.target.value)} /><span className="field-hint">≤ this auto-executes</span></div>
               <div><label>Total budget</label><input type="number" value={budget} onChange={(e) => setBudget(e.target.value)} /><span className="field-hint">delegated spend cap</span></div>
@@ -106,11 +183,21 @@ export function AdminView() {
 
         {step === 1 && (
           <div className="wiz-body">
-            <label>Allowed recipients — comma-separated addresses the delegate may pay</label>
-            <textarea value={recipients} onChange={(e) => setRecipients(e.target.value)} className="mono" rows={3} style={{ width: '100%', resize: 'vertical' }} />
-            <div className="recip-chips">
-              {recips.map((r) => <span key={r} className={`pill ${isAddress(r) ? 'dim' : 'bad'} mono`}>{isAddress(r) ? short(r) : `invalid: ${r.slice(0, 12)}…`}</span>)}
+            <label>Allowed recipients — the only addresses this delegate can pay</label>
+            <div className="recip-picker">
+              {recips.map((r) => (
+                <span key={r} className="recip-chip">
+                  {nameOf(r) && <b>{nameOf(r)}</b>}
+                  <span className="mono">{short(r)}</span>
+                  <button type="button" className="chip-x" onClick={() => setRecips(recips.filter((x) => x !== r))}>✕</button>
+                </span>
+              ))}
+              <input value={recipInput} className="mono recip-input" placeholder="paste 0x… and press Enter"
+                onChange={(e) => setRecipInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addRecip(recipInput); } }} />
+              {recipInput && <button type="button" className="btn small" onClick={() => addRecip(recipInput)}>+ Add</button>}
             </div>
+            {suggest('', (a) => addRecip(a), recips)}
             {!step2Valid && recips.length > 0 && <p className="field-err">every recipient must be a unique valid address</p>}
             <div className="wiz-nav">
               <button className="btn ghost" onClick={() => setStep(0)}>← Back</button>
@@ -121,13 +208,20 @@ export function AdminView() {
 
         {step === 2 && (
           <div className="wiz-body">
+            <div className="nl-summary">
+              In plain words: <b>{delegateName.trim() || short(delegate)}</b> may pay up to a confidential total
+              budget of <b>{fmt(parseUsdc(budget))} cUSDC</b>, only to <b>{recips.length} approved
+              recipient{recips.length === 1 ? '' : 's'}</b>, for <b>{days} days</b>. Payments over{' '}
+              <b>{fmt(parseUsdc(Number(autoLimit) ? autoLimit : '0'))} cUSDC</b> need Safe approval, and the
+              treasury never drops below <b>{fmt(parseUsdc(floor))} cUSDC</b>. On-chain, all four numbers are ciphertext.
+            </div>
             <div className="review">
-              <div className="rv-row"><span>Delegate</span><span className="mono">{short(delegate)}</span></div>
+              <div className="rv-row"><span>Delegate</span><span className="mono">{delegateName.trim() ? `${delegateName.trim()} · ` : ''}{short(delegate)}</span></div>
               <div className="rv-row"><span>Auto-limit</span><span className="value">{fmt(parseUsdc(Number(autoLimit) ? autoLimit : '0'))} cUSDC 🔒</span></div>
               <div className="rv-row"><span>Total budget</span><span className="value">{fmt(parseUsdc(budget))} cUSDC 🔒</span></div>
               <div className="rv-row"><span>Reserve floor</span><span className="value">{fmt(parseUsdc(floor))} cUSDC 🔒</span></div>
               <div className="rv-row"><span>Valid for</span><span>{days} days</span></div>
-              <div className="rv-row"><span>Recipients</span><span className="mono">{recips.map(short).join(', ')}</span></div>
+              <div className="rv-row"><span>Recipients</span><span className="mono">{recips.map((r) => nameOf(r) ?? short(r)).join(', ')}</span></div>
             </div>
             <p className="muted" style={{ fontSize: 12.5, margin: '12px 0' }}>
               On submit, the three amounts are encrypted and only their handles go on-chain. The mandate is a
@@ -154,9 +248,24 @@ export function AdminView() {
           <h3>Create disclosure packet <small>selective, immutable</small></h3>
           <label>Auditor address</label>
           <input value={auditor} onChange={(e) => setAuditor(e.target.value)} className="mono" />
-          <div className="form-grid">
-            <div><label>Mandate ID</label><input value={auditMandate} onChange={(e) => setAuditMandate(e.target.value)} /></div>
-            <div><label>Request IDs (comma, ≤8)</label><input value={auditReqs} onChange={(e) => setAuditReqs(e.target.value)} placeholder="1,2,3" /></div>
+          {suggest(auditor, (a) => setAuditor(a))}
+          <label>Mandate</label>
+          <select value={packetMandate} onChange={(e) => { setAuditMandate(e.target.value); setAuditSel(new Set()); }}>
+            {mandates.map((m) => (
+              <option key={String(m.id)} value={String(m.id)}>#{String(m.id)} · {nameOf(m.delegate) ?? short(m.delegate)} · v{m.version}</option>
+            ))}
+          </select>
+          <label>Requests to disclose — tick finished ones ({auditSel.size}/8)</label>
+          <div className="req-picker">
+            {packetReqs.map((r) => (
+              <label key={String(r.id)} className={`req-opt ${auditSel.has(String(r.id)) ? 'on' : ''}`}>
+                <input type="checkbox" checked={auditSel.has(String(r.id))} onChange={() => toggleReq(String(r.id))} />
+                <span className="mono">#{String(r.id)}</span>
+                <span className="mono muted">→ {short(r.recipient)}</span>
+                <RequestPill state={r.state} />
+              </label>
+            ))}
+            {!packetReqs.length && <p className="muted" style={{ fontSize: 12.5 }}>No finished requests on this mandate yet.</p>}
           </div>
           <div style={{ marginTop: 12 }}>
             <button className="btn" disabled={!!busy || !isAddress(auditor)} onClick={createPacket}>📦 Create snapshot packet</button>
@@ -172,7 +281,7 @@ export function AdminView() {
             {mandates.map((m) => (
               <tr key={String(m.id)}>
                 <td className="mono">#{String(m.id)}</td>
-                <td className="mono">{short(m.delegate)}</td>
+                <td className="mono">{nameOf(m.delegate) ? `${nameOf(m.delegate)} · ` : ''}{short(m.delegate)}</td>
                 <td><MandatePill state={m.state} /></td>
                 <td><Decrypt handle={m.autoLimit} /></td>
                 <td><Decrypt handle={m.budgetLeft} /></td>

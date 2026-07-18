@@ -12,13 +12,13 @@
   "safe": {
     "kind": "safe-v1.4.1 (singleton 0x41675C099F32341bf84BFc5382aF534df5C7461a)",
     "owners": [
-      "0x9327bfC0aE0e03772A29AEB0B5c7D34609349EA4",
+      "0x0D72929bB21c359Fce029870e010976dCeD201eD",
       "0x1919EAD8d1b7D0F6124B93b8eA3E8a68021dDfD7"
     ],
     "threshold": 2
   },
   "roles": {
-    "financeAdmin": "0x9327bfC0aE0e03772A29AEB0B5c7D34609349EA4",
+    "financeAdmin": "0x0D72929bB21c359Fce029870e010976dCeD201eD",
     "signerB": "0x1919EAD8d1b7D0F6124B93b8eA3E8a68021dDfD7",
     "delegate": "0x17ee5Ad7e4B40CADafaD27C5F68f74D02C7fd532",
     "auditor": "0x09eeE433992D869A7f3a572CC6AB9068B426C0A6",
@@ -27,5 +27,6 @@
   "retired": {
     "moduleV09": "0xaf1ca44d1c83bb800f2e791ab299bb0ad1a568cb"
   },
-  "redeployedAt": "2026-07-18T02:11:53.546Z"
+  "redeployedAt": "2026-07-18T02:11:53.546Z",
+  "rotated": "2026-07-18: financeAdmin + Safe owner A rotated on-chain (old key was published in git history for the since-removed public Signer demo; it now holds no power). setFinanceAdmin 0x117ed4ed\u2026, swapOwner 0x792ed808\u2026"
 }

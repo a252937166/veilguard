@@ -5,6 +5,7 @@ export const RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com';
 export const GATEWAY = 'https://gateway-testnets.noxprotocol.dev';
 export const CHAIN_ID = 11155111;
 export const PROVISION_API = '/api/provision';
+export const FINALIZE_API = '/api/finalize';
 
 export const ADDR = deployments.contracts as {
   TestUSDC: `0x${string}`;
@@ -41,6 +42,12 @@ export const safeAbi = [
 export const MANDATE_STATES = ['None', 'Draft', 'Active', 'Retired'];
 export const REQUEST_STATES = ['None', 'Requested', 'Executed', 'AwaitingSafeApproval', 'Blocked', 'Cancelled', 'Expired'];
 export const DECISION_LABEL: Record<number, string> = { 1: 'WITHIN MANDATE', 2: 'APPROVAL REQUIRED', 3: 'BLOCKED' };
+/** Friendly names for known payout addresses — raw hex is not a product UI. */
+export const VENDOR_NAMES: Record<string, string> = {
+  '0xc4ba09787f46441a517467fc12af459d8268c60f': 'Demo Vendor',
+};
+export const vendorName = (a?: string) => (a ? VENDOR_NAMES[a.toLowerCase()] : undefined);
+
 export const REASON_LABEL: Record<number, string> = { 0: '—', 1: 'policy budget', 2: 'treasury balance', 3: 'treasury reserve' };
 
 export const fmt = (v: bigint | number) => (Number(v) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 2 });

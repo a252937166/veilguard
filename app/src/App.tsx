@@ -7,9 +7,12 @@ import { AdminView } from './views/AdminView';
 import { SignerView } from './views/SignerView';
 import { AuditorView } from './views/AuditorView';
 import { FaucetView } from './views/FaucetView';
+import { VerifyView } from './views/VerifyView';
 import { Landing } from './views/Landing';
 import { GuidedTour, useTour, type TabName } from './GuidedTour';
 import { WalletMenu } from './WalletMenu';
+import { Logo } from './Logo';
+import { WaveField } from './WaveField';
 import { ConnectModal } from './ConnectModal';
 import { DEMO_ROLES, demoAddress, type DemoRole } from './demo';
 import { getActiveProvider, setActiveProvider } from './nox';
@@ -49,7 +52,7 @@ type Ctx = {
 const AppCtx = createContext<Ctx>(null as any);
 export const useApp = () => useContext(AppCtx);
 
-const TABS = ['Dashboard', 'Delegate', 'Admin', 'Signer', 'Auditor', 'Get Funds'] as const;
+const TABS = ['Dashboard', 'Delegate', 'Admin', 'Signer', 'Auditor', 'Verify', 'Get Funds'] as const;
 
 export function App() {
   const [stage, setStage] = useState<'landing' | 'app'>(
@@ -68,17 +71,20 @@ export function App() {
     setDemoRole(role);
     setAccount(demoAddress(role));
     setTryOpen(false);
-    setTab(role === 'delegate' ? 'Delegate' : role === 'signer' ? 'Signer' : 'Auditor');
+    setTab(role === 'delegate' ? 'Delegate' : 'Auditor');
+    try { sessionStorage.setItem('vg_demo', role); } catch { /* ignore */ }
   }, []);
 
   const exitDemo = useCallback(() => {
     setDemoRole(null);
     setAccount(undefined);
+    try { sessionStorage.removeItem('vg_demo'); } catch { /* ignore */ }
   }, []);
 
-  const launch = useCallback((withTour: boolean) => {
+  const launch = useCallback((withTour: boolean, target?: string) => {
     window.location.hash = '#app';
     setStage('app');
+    if (target) setTab(target as any);
     if (withTour) tour.start();
   }, [tour]);
   const [mandates, setMandates] = useState<Mandate[]>([]);
@@ -120,20 +126,46 @@ export function App() {
   }, []);
 
   // connect to a SPECIFIC detected wallet
-  const connectWallet = useCallback(async (w: WalletInfo) => {
+  const connectWallet = useCallback(async (w: WalletInfo, silent = false) => {
     try {
       setActiveProvider(w.provider);
       setDemoRole(null);
-      const accts = (await w.provider.request({ method: 'eth_requestAccounts' })) as string[];
-      if (!accts?.[0]) return;
+      const accts = (await w.provider.request({ method: silent ? 'eth_accounts' : 'eth_requestAccounts' })) as string[];
+      if (!accts?.[0]) return false;
       setAccount(accts[0] as `0x${string}`);
       setChainId(Number(await w.provider.request({ method: 'eth_chainId' })));
       setWalletInfo(w);
       setConnectOpen(false);
+      try { localStorage.setItem('vg_wallet', w.rdns ?? w.uuid); } catch { /* ignore */ }
+      return true;
     } catch (e: any) {
-      if (e?.code !== 4001) toast(`Connect failed: ${e?.shortMessage ?? e?.message ?? e}`, true);
+      if (!silent && e?.code !== 4001) toast(`Connect failed: ${e?.shortMessage ?? e?.message ?? e}`, true);
+      return false;
     }
   }, [toast]);
+
+  // restore a demo role for this tab, else reconnect the previously-used wallet
+  useEffect(() => {
+    try {
+      const demo = sessionStorage.getItem('vg_demo');
+      if (demo && demo in DEMO_ROLES) { enterDemo(demo as DemoRole); return; }
+    } catch { /* ignore */ }
+    let saved: string | null = null;
+    try { saved = localStorage.getItem('vg_wallet'); } catch { /* ignore */ }
+    if (!saved) return;
+    let done = false;
+    const tryReconnect = async () => {
+      if (done) return;
+      const w = listWallets().find((x) => (x.rdns ?? x.uuid) === saved);
+      if (!w) return;
+      done = true;
+      await connectWallet(w, true); // silent: only if the wallet is still authorized
+    };
+    const off = onWalletsChanged(tryReconnect);
+    tryReconnect();
+    const t = setTimeout(() => { done = true; }, 3500);
+    return () => { off(); clearTimeout(t); };
+  }, [connectWallet]);
 
   const switchChain = useCallback(async () => {
     const eth = getActiveProvider();
@@ -172,6 +204,7 @@ export function App() {
     setAccount(undefined);
     setWalletInfo(null);
     setActiveProvider(undefined);
+    try { localStorage.removeItem('vg_wallet'); } catch { /* ignore */ }
     toast('Wallet disconnected from VeilGuard.');
   }, [toast]);
 
@@ -202,20 +235,16 @@ export function App() {
           publicClient.readContract({ address: ADDR.Safe, abi: safeAbi, functionName: 'getOwners' }) as Promise<`0x${string}`[]>,
           publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'paused' }) as Promise<boolean>,
         ]);
-        const ms: Mandate[] = [];
-        for (let i = 1n; i < nextM; i++) {
-          const m = (await publicClient.readContract({
-            address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'getMandate', args: [i],
-          })) as any[];
-          ms.push({ id: i, delegate: m[0], validFrom: m[1], validUntil: m[2], version: Number(m[3]), state: Number(m[4]), autoLimit: m[5], budgetLeft: m[6], reserveFloor: m[7], recipients: m[8] });
-        }
-        const rs: SpendRequest[] = [];
-        for (let i = 1n; i < nextR; i++) {
-          const r = (await publicClient.readContract({
-            address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'getRequest', args: [i],
-          })) as any[];
-          rs.push({ id: i, mandateId: r[0], delegate: r[1], recipient: r[2], memoHash: r[3], createdAt: r[4], state: Number(r[5]), amount: r[6], decision: r[7], blockedReason: r[8] });
-        }
+        // Fire all reads concurrently so viem's Multicall3 batching collapses them
+        // into a single aggregate eth_call (keeps free-tier RPCs from rate-limiting).
+        const mIds = Array.from({ length: Math.max(0, Number(nextM) - 1) }, (_, k) => BigInt(k + 1));
+        const rIds = Array.from({ length: Math.max(0, Number(nextR) - 1) }, (_, k) => BigInt(k + 1));
+        const [mRaw, rRaw] = await Promise.all([
+          Promise.all(mIds.map((i) => publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'getMandate', args: [i] }) as Promise<any[]>)),
+          Promise.all(rIds.map((i) => publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'getRequest', args: [i] }) as Promise<any[]>)),
+        ]);
+        const ms: Mandate[] = mRaw.map((m, k) => ({ id: mIds[k], delegate: m[0], validFrom: m[1], validUntil: m[2], version: Number(m[3]), state: Number(m[4]), autoLimit: m[5], budgetLeft: m[6], reserveFloor: m[7], recipients: m[8] }));
+        const rs: SpendRequest[] = rRaw.map((r, k) => ({ id: rIds[k], mandateId: r[0], delegate: r[1], recipient: r[2], memoHash: r[3], createdAt: r[4], state: Number(r[5]), amount: r[6], decision: r[7], blockedReason: r[8] }));
         // TEE resolution status for pending requests
         const pending = rs.filter((r) => r.state === 1);
         if (pending.length) {
@@ -239,6 +268,15 @@ export function App() {
   // demo accounts sign locally on Sepolia — the injected wallet's chain is irrelevant
   const chainOk = demoRole ? true : chainId === CHAIN_ID;
   const noRole = !!account && !isAdmin && !isOwner && !isDelegate && !isAuditor;
+
+  // if the current tab is a role workspace the account no longer holds, fall back
+  useEffect(() => {
+    const allowed: Record<string, boolean> = {
+      Delegate: isDelegate || (!!account && !isAdmin && !isOwner && !isAuditor),
+      Admin: isAdmin, Signer: isOwner, Auditor: isAuditor,
+    };
+    if (tab in allowed && !allowed[tab]) setTab('Dashboard');
+  }, [tab, account, isDelegate, isAdmin, isOwner, isAuditor]);
 
   const roleChips = useMemo(() => {
     const roles: string[] = [];
@@ -283,19 +321,21 @@ export function App() {
   if (stage === 'landing') {
     return (
       <AppCtx.Provider value={ctx}>
+        <WaveField />
+        <div className="page-scrim" />
         <div className="wrap">
           <div className="topbar">
             <div>
-              <div className="logo">VEIL<span>GUARD</span></div>
+              <Logo />
               <div className="tagline">Confidential spending policies for Safe treasuries · Ethereum Sepolia · powered by iExec Nox</div>
             </div>
             <div className="row">
-              <button className="btn ghost" onClick={() => setTryOpen(true)}>⚡ Try a role</button>
-              <button className="btn ghost" onClick={() => launch(false)}>Open app</button>
-              <button className="btn primary" onClick={() => launch(true)}>▶ Guided demo</button>
+              <button className="btn ghost" onClick={() => launch(false, 'Verify')}>Verify on-chain</button>
+              <button className="btn primary" onClick={() => launch(true)}>▶ Start interactive demo</button>
             </div>
           </div>
-          <Landing onLaunch={() => launch(true)} onTry={() => setTryOpen(true)} />
+          <Landing onLaunch={() => launch(true)} onVerify={() => launch(false, 'Verify')}
+            onConnect={() => { launch(false); connect(); }} />
           <footer>
             <div>VEILGUARD — confidential treasury controls on <a href="https://safe.global" target="_blank" rel="noopener">Safe</a> · powered by <a href="https://docs.noxprotocol.io" target="_blank" rel="noopener">iExec Nox</a></div>
             <div>Ethereum Sepolia · testnet prototype — not audited</div>
@@ -306,96 +346,120 @@ export function App() {
     );
   }
 
+  // Task-first navigation: only show role workspaces the current account holds.
+  // (Delegate stays visible for any connected wallet — it's the onboarding path.)
+  const NAV: { tab: (typeof TABS)[number]; label?: string; icon: string; group: string; hasRole?: boolean; show: boolean }[] = [
+    { tab: 'Dashboard', label: 'Overview', icon: '📊', group: 'Overview', show: true },
+    { tab: 'Verify', label: 'Verify on-chain', icon: '🧾', group: 'Overview', show: true },
+    { tab: 'Delegate', label: 'New payment', icon: '🧑‍💼', group: 'My work', hasRole: isDelegate, show: isDelegate || (!!account && !isAdmin && !isOwner && !isAuditor) },
+    { tab: 'Admin', label: 'Policies', icon: '👔', group: 'My work', hasRole: isAdmin, show: isAdmin },
+    { tab: 'Signer', label: 'Approvals', icon: '🔐', group: 'My work', hasRole: isOwner, show: isOwner },
+    { tab: 'Auditor', label: 'Disclosure', icon: '🕵️', group: 'My work', hasRole: isAuditor, show: isAuditor },
+    { tab: 'Get Funds', icon: '💧', group: 'Tools', show: true },
+  ];
+  const groups = ['Overview', 'My work', 'Tools'].filter((g) => NAV.some((n) => n.group === g && n.show));
+  const showTryHint = !NAV.some((n) => n.group === 'My work' && n.show);
+
   return (
     <AppCtx.Provider value={ctx}>
-      <div className="wrap">
-        <div className="topbar">
-          <div className="row" style={{ gap: 14 }}>
-            <button className="logolink" onClick={() => { window.location.hash = ''; setStage('landing'); }} title="Back to overview">
-              <span className="logo">VEIL<span>GUARD</span></span>
-            </button>
-            {!tour.active && <button className="btn small ghost" onClick={tour.start}>✦ Guided demo</button>}
+      <WaveField />
+      <div className="page-scrim" />
+      <div className="shell">
+        <aside className="sidebar">
+          <button className="side-logo" onClick={() => { window.location.hash = ''; setStage('landing'); }} title="Back to overview">
+            <Logo />
+          </button>
+          <nav className="side-nav">
+            {groups.map((g) => (
+              <div key={g} className="side-group">
+                <div className="side-group-label">{g}</div>
+                {NAV.filter((n) => n.group === g && n.show).map((n) => (
+                  <button key={n.tab} className={`side-item ${tab === n.tab ? 'active' : ''}`} onClick={() => setTab(n.tab)}>
+                    <span className="side-ico">{n.icon}</span>{n.label ?? n.tab}
+                    {n.hasRole && <span className="side-dot" title="you hold this role" />}
+                  </button>
+                ))}
+                {g === 'Overview' && showTryHint && (
+                  <button className="side-item" onClick={() => setTryOpen(true)}>
+                    <span className="side-ico">⚡</span>Try a role
+                  </button>
+                )}
+              </div>
+            ))}
+          </nav>
+          <div className="side-foot">
+            {!tour.active && <button className="btn small ghost wide" onClick={tour.start}>✦ Guided demo</button>}
+            <div className="side-status mono">
+              {lastUpdated ? `synced ${Math.round((Date.now() - lastUpdated) / 1000)}s ago`
+                : loadError ? <span style={{ color: 'var(--warn)' }}>⚠ connecting…</span> : 'loading…'}
+            </div>
           </div>
-          <div className="row">
-            {paused && <span className="pill bad">PAUSED</span>}
-            {!demoRole && <button className="btn small trybtn" onClick={() => setTryOpen(true)}>⚡ Try a role</button>}
-            <button className="btn small faucetbtn" onClick={() => setTab('Get Funds')}>💧 Get test funds</button>
-            <WalletMenu
-              account={account}
-              roleChips={demoRole ? [`DEMO · ${DEMO_ROLES[demoRole].label.toUpperCase()}`] : roleChips}
-              chainOk={chainOk}
-              wallet={walletInfo}
-              isDemo={!!demoRole}
-              onConnect={connect}
-              onSwitchChain={switchChain}
-              onSwitchAccount={demoRole ? () => setTryOpen(true) : switchAccount}
-              onDisconnect={demoRole ? exitDemo : disconnect}
-            />
+        </aside>
+
+        <main className="main">
+          <div className="main-top">
+            <div className="crumb"><span className="crumb-page">{tab}</span></div>
+            <div className="row">
+              {paused && <span className="pill bad">PAUSED</span>}
+              {!demoRole && <button className="btn small trybtn" onClick={() => setTryOpen(true)}>⚡ Try a role</button>}
+              <button className="btn small faucetbtn" onClick={() => setTab('Get Funds')}>💧 Funds</button>
+              <WalletMenu
+                account={account}
+                roleChips={demoRole ? [`DEMO · ${DEMO_ROLES[demoRole].label.toUpperCase()}`] : roleChips}
+                chainOk={chainOk}
+                wallet={walletInfo}
+                isDemo={!!demoRole}
+                onConnect={connect}
+                onSwitchChain={switchChain}
+                onSwitchAccount={demoRole ? () => setTryOpen(true) : switchAccount}
+                onDisconnect={demoRole ? exitDemo : disconnect}
+              />
+            </div>
           </div>
-        </div>
 
-        {tour.active && (
-          <GuidedTour
-            step={tour.step}
-            setStep={tour.setStep}
-            onGoToTab={(t: TabName) => setTab(t)}
-            onClose={tour.close}
-          />
-        )}
+          <div className="main-body">
+            {tour.active && (
+              <GuidedTour step={tour.step} setStep={tour.setStep} onGoToTab={(t: TabName) => setTab(t)} onClose={tour.close}
+                requests={requests} demoRole={demoRole} startDemo={enterDemo} />
+            )}
 
-        <div className="tabs">
-          {TABS.map((t) => (
-            <button key={t} className={`tab ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)}>
-              {t}
-              {t === 'Delegate' && isDelegate && <span className="rolechip">●</span>}
-              {t === 'Admin' && isAdmin && <span className="rolechip">●</span>}
-              {t === 'Signer' && isOwner && <span className="rolechip">●</span>}
-              {t === 'Auditor' && isAuditor && <span className="rolechip">●</span>}
-            </button>
-          ))}
-        </div>
+            {busy && <div className="notice"><span className="spin" /> &nbsp;<b>{busy}</b> — {demoRole ? 'signing locally, waiting for the chain…' : 'follow any wallet prompt · waiting for the chain…'}</div>}
 
-        {busy && <div className="notice"><span className="spin" /> &nbsp;<b>{busy}</b> — {demoRole ? 'signing locally, waiting for the chain…' : 'confirm in your wallet / waiting for the chain…'}</div>}
+            {demoRole && (
+              <div className="demobar">
+                <span>{DEMO_ROLES[demoRole].icon} You are the <b>{DEMO_ROLES[demoRole].label}</b> (shared pre-funded demo account) — {DEMO_ROLES[demoRole].blurb}</span>
+                <button className="btn small ghost" onClick={() => setTryOpen(true)}>switch role</button>
+              </div>
+            )}
 
-        {demoRole && (
-          <div className="demobar">
-            <span>{DEMO_ROLES[demoRole].icon} You are the <b>{DEMO_ROLES[demoRole].label}</b> (shared pre-funded demo account) — {DEMO_ROLES[demoRole].blurb}</span>
-            <button className="btn small ghost" onClick={() => setTryOpen(true)}>switch role</button>
+            {noRole && !demoRole && (
+              <div className="notice">
+                <b>Your wallet holds no role in this treasury</b> — that's by design: every number is gated by
+                on-chain ACLs. You can still <b>finalize</b> pending requests and use the 💧 faucet.
+                To experience the full loop, <button className="btn small primary" style={{ margin: '0 6px' }}
+                  onClick={() => setTryOpen(true)}>⚡ try a demo role</button> — no setup needed.
+              </div>
+            )}
+
+            {tab === 'Dashboard' && <PublicView />}
+            {tab === 'Delegate' && <DelegateView />}
+            {tab === 'Admin' && <AdminView />}
+            {tab === 'Signer' && <SignerView />}
+            {tab === 'Auditor' && <AuditorView />}
+            {tab === 'Verify' && <VerifyView />}
+            {tab === 'Get Funds' && <FaucetView />}
+
+            <footer>
+              <div>VEILGUARD — confidential treasury controls on <a href="https://safe.global" target="_blank" rel="noopener">Safe</a> · powered by <a href="https://docs.noxprotocol.io" target="_blank" rel="noopener">iExec Nox</a></div>
+              <div>
+                <a href="https://github.com/a252937166/veilguard" target="_blank" rel="noopener">GitHub ↗</a> ·
+                {' '}<a href={`https://sepolia.etherscan.io/address/${ADDR.VeilGuardModule}`} target="_blank" rel="noopener">Module ↗</a> ·
+                {' '}<a href={`https://sepolia.etherscan.io/address/${ADDR.Safe}`} target="_blank" rel="noopener">Safe ↗</a> ·
+                {' '}<span className="mono">ui {__UI_BUILD_SHA__}</span> · <span className="mono">evidence {EVIDENCE_COMMIT}</span> · not audited
+              </div>
+            </footer>
           </div>
-        )}
-
-        {noRole && !demoRole && (
-          <div className="notice">
-            <b>Your wallet holds no role in this treasury</b> — that's by design: every number is gated by
-            on-chain ACLs. You can still <b>finalize</b> pending requests and use the 💧 faucet.
-            To experience the full loop, <button className="btn small primary" style={{ margin: '0 6px' }}
-              onClick={() => setTryOpen(true)}>⚡ try a demo role</button> — no setup needed.
-          </div>
-        )}
-
-        {tab === 'Dashboard' && <PublicView />}
-        {tab === 'Delegate' && <DelegateView />}
-        {tab === 'Admin' && <AdminView />}
-        {tab === 'Signer' && <SignerView />}
-        {tab === 'Auditor' && <AuditorView />}
-        {tab === 'Get Funds' && <FaucetView />}
-
-        <footer>
-          <div>
-            VEILGUARD — confidential treasury controls on <a href="https://safe.global" target="_blank" rel="noopener">Safe</a> · powered by <a href="https://docs.noxprotocol.io" target="_blank" rel="noopener">iExec Nox</a>
-            <br />
-            <span className="mono" style={{ fontSize: 11.5 }}>
-              {loadError ? <span style={{ color: 'var(--warn)' }}>⚠ chain read failing — showing last known state</span>
-                : lastUpdated ? `chain synced ${Math.round((Date.now() - lastUpdated) / 1000)}s ago` : 'loading…'}
-            </span>
-          </div>
-          <div>
-            <a href="https://github.com/a252937166/veilguard" target="_blank" rel="noopener">GitHub ↗</a> ·
-            {' '}<a href={`https://sepolia.etherscan.io/address/${ADDR.VeilGuardModule}`} target="_blank" rel="noopener">Module ↗</a> ·
-            {' '}<a href={`https://sepolia.etherscan.io/address/${ADDR.Safe}`} target="_blank" rel="noopener">Safe ↗</a> ·
-            {' '}<span className="mono">{EVIDENCE_COMMIT}</span> · Testnet prototype — not audited
-          </div>
-        </footer>
+        </main>
       </div>
       {tryModal}
       {connectOpen && <ConnectModal onPick={connectWallet} onClose={() => setConnectOpen(false)} onDemo={() => setTryOpen(true)} />}
