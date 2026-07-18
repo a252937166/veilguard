@@ -6,11 +6,12 @@ import { useApp } from '../App';
 import { Decrypt, NoRole, RequestPill } from '../ui';
 
 export function DelegateView() {
-  const { account, mandates, requests, run, busy, refresh, toast } = useApp();
+  const { account, mandates, requests, run, busy, refresh, toast, goTab, startDemo } = useApp();
   const [amount, setAmount] = useState('25');
   const [recipient, setRecipient] = useState('');
   const [memo, setMemo] = useState('');
   const [trackId, setTrackId] = useState<bigint | null>(null);
+  const [flow, setFlow] = useState<string | null>(null);
   const resultRef = useRef<HTMLDivElement>(null);
 
   const myMandate = useMemo(
@@ -49,32 +50,43 @@ export function DelegateView() {
     return e?.shortMessage ?? e?.message ?? 'transaction reverted';
   };
 
+  const isDemo = account?.toLowerCase() === '0x17ee5ad7e4b40cadafad27c5f68f74d02c7fd532';
   const submit = () =>
     run(`Request ${amount} cUSDC`, async () => {
       if (!account || !myMandate) throw new Error('no active mandate for this account');
       if (blockingPending) throw new Error('PendingRequestExists');
       const to = (recipient || myMandate.recipients[0]) as `0x${string}`;
-      const client = await handleClientFor(account);
-      const enc = await client.encryptInput(parseUsdc(amount), 'uint256', ADDR.VeilGuardModule);
-      const wallet = makeWalletClient(account);
-      let hash: `0x${string}`;
       try {
-        hash = await wallet.writeContract({
-          address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'requestSpend',
-          args: [myMandate.id, to, enc.handle, enc.handleProof,
-            keccak256(stringToBytes(memo || 'veilguard'))],
-          chain: wallet.chain, account: wallet.account!,
-        });
-      } catch (e: any) {
-        throw new Error(explainRevert(e));
+        // 1/2 — encrypt: real wallets pop a SIGNATURE request here
+        setFlow(isDemo ? 'Encrypting your amount…' : '① Check your wallet — approve the signature to encrypt your amount');
+        const client = await handleClientFor(account);
+        const enc = await client.encryptInput(parseUsdc(amount), 'uint256', ADDR.VeilGuardModule);
+
+        // 2/2 — submit: real wallets pop a TRANSACTION confirmation here
+        setFlow(isDemo ? 'Submitting the request…' : '② Now confirm the transaction in your wallet');
+        const wallet = makeWalletClient(account);
+        let hash: `0x${string}`;
+        try {
+          hash = await wallet.writeContract({
+            address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'requestSpend',
+            args: [myMandate.id, to, enc.handle, enc.handleProof,
+              keccak256(stringToBytes(memo || 'veilguard'))],
+            chain: wallet.chain, account: wallet.account!,
+          });
+        } catch (e: any) {
+          throw new Error(explainRevert(e));
+        }
+        setFlow('Waiting for the chain to confirm…');
+        await publicClient.waitForTransactionReceipt({ hash });
+        const nextId = (await publicClient.readContract({
+          address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'nextRequestId',
+        })) as bigint;
+        setTrackId(nextId - 1n);
+        toast('Encrypted & submitted ✓  Watch the live status below — the TEE decides in a few seconds.');
+        setTimeout(() => resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 300);
+      } finally {
+        setFlow(null);
       }
-      await publicClient.waitForTransactionReceipt({ hash });
-      const nextId = (await publicClient.readContract({
-        address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'nextRequestId',
-      })) as bigint;
-      setTrackId(nextId - 1n);
-      toast('Encrypted & submitted ✓  Watch the live status below — the TEE decides in a few seconds.');
-      setTimeout(() => resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 300);
     });
 
   const finalize = (id: bigint, decisionHandle: `0x${string}`) =>
@@ -105,7 +117,16 @@ export function DelegateView() {
       <div className="notice">
         You hold mandate <b>#{String(myMandate.id)}</b>. You never see the full policy — only your own
         requests and their outcomes. The policy itself stays encrypted.
+        {!isDemo && <> With your own wallet this takes <b>two approvals</b>: a signature to encrypt, then the transaction.</>}
       </div>
+
+      {flow && (
+        <div className="flowbar">
+          <span className="spin" /> <b>{flow}</b>
+          {!isDemo && flow.startsWith('①') && <span className="muted"> — your wallet should be asking you to sign a message; approve it to continue.</span>}
+          {!isDemo && flow.startsWith('②') && <span className="muted"> — your wallet should be asking you to confirm a transaction.</span>}
+        </div>
+      )}
 
       {blockingPending && (!latest || latest.id !== blockingPending.id) && (
         <div className="latest" style={{ borderColor: 'var(--warn)' }}>
@@ -130,25 +151,51 @@ export function DelegateView() {
         <div className={`jstep ${stage === 3 ? 'active done' : ''}`}><b><span className="jn">4</span>Outcome</b>executed / escalated / blocked</div>
       </div>
 
-      {latest && (
+      {latest && stage < 3 && (
         <div className="latest" ref={resultRef}>
           <h4>
             {stage === 1 && <><span className="spin" /> Request #{String(latest.id)} — the TEE is deciding…</>}
             {stage === 2 && <>⚡ Request #{String(latest.id)} — decision ready</>}
-            {stage === 3 && <>Request #{String(latest.id)} — done</>}
           </h4>
           <div className="lrow">
             <span className="muted" style={{ fontSize: 13 }}>
               {stage === 1 && 'Your amount stays encrypted; only a coarse outcome will ever be public.'}
               {stage === 2 && 'The gateway can prove the decision. Finalize to execute it on-chain and reveal the (still coarse) outcome.'}
-              {stage === 3 && latest.state === 2 && 'Within the mandate — funds moved as a confidential transfer.'}
-              {stage === 3 && latest.state === 3 && 'Above the auto-limit — held in escrow for the Safe 2-of-2 to approve.'}
-              {stage === 3 && latest.state === 4 && 'Blocked — no funds moved. Decrypt the coarse reason below; a 10-minute cooldown is now active.'}
             </span>
             <div className="row">
               {stage === 2 && <button className="btn primary small" disabled={!!busy} onClick={() => finalize(latest.id, latest.decision)}>Finalize &amp; reveal →</button>}
-              {stage === 3 && <RequestPill state={latest.state} />}
-              {stage === 3 && latest.state === 4 && <Decrypt handle={latest.blockedReason} unit="" label="Why?" />}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {latest && stage === 3 && (
+        <div className="outcome-panel" ref={resultRef}>
+          <div className="op-head">
+            <span className={`op-badge ${latest.state === 2 ? 'ok' : latest.state === 3 ? 'warn' : 'bad'}`}>
+              {latest.state === 2 ? '✓ EXECUTED' : latest.state === 3 ? '⏸ APPROVAL REQUIRED' : '⛔ BLOCKED'}
+            </span>
+            <b>Request #{String(latest.id)} complete</b>
+          </div>
+          <p className="op-desc">
+            {latest.state === 2 && <>The payment was within your secret policy, so it executed immediately as a confidential ERC-7984 transfer — the amount stayed encrypted end to end. Nobody watching the chain learned how much moved.</>}
+            {latest.state === 3 && <>The amount was above the secret auto-limit, so it's held in escrow for the Safe 2-of-2 to approve. Signers (only signers) can decrypt it. Watch it in the Signer tab.</>}
+            {latest.state === 4 && <>The request violated the secret policy — no funds moved, your budget is untouched, and a 10-minute cooldown is now active. You can decrypt a coarse reason, never the exact limit.</>}
+          </p>
+          {latest.state === 4 && (
+            <div className="row" style={{ marginBottom: 12 }}>
+              <span className="muted" style={{ fontSize: 13 }}>Coarse reason (private to you):</span>
+              <Decrypt handle={latest.blockedReason} unit="" label="Decrypt reason" />
+            </div>
+          )}
+          <div className="op-next">
+            <span className="op-next-label">What next?</span>
+            <div className="row">
+              {latest.state !== 3 && <button className="btn small" onClick={() => { setAmount('60'); setTrackId(null); }}>Try 60 → see escalation</button>}
+              {latest.state !== 4 && <button className="btn small" onClick={() => { setAmount('600'); setTrackId(null); }}>Try 600 → see it blocked</button>}
+              {latest.state === 2 && <button className="btn small" onClick={() => { setAmount('25'); setTrackId(null); }}>Send another</button>}
+              <button className="btn small ghost" onClick={() => goTab('Dashboard')}>See it in the evidence table →</button>
+              <button className="btn small ghost" onClick={() => startDemo('auditor')}>Switch to the Auditor role →</button>
             </div>
           </div>
         </div>

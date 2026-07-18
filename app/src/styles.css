@@ -193,3 +193,21 @@ footer{margin:36px 0 44px;padding-top:18px;border-top:1px solid var(--line);colo
 /* ---------- no-role dead-end ---------- */
 .norole{background:linear-gradient(180deg,rgba(124,92,255,.07),var(--panel));border:1px solid #2c3850;border-radius:14px;padding:26px 24px;text-align:left}
 .norole h3{font-size:18px;margin-bottom:8px}
+
+/* ---------- staged flow banner ---------- */
+.flowbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;background:linear-gradient(90deg,rgba(124,92,255,.14),rgba(77,214,193,.06));border:1px solid #3a3f6e;border-radius:11px;padding:12px 16px;font-size:14px;margin-bottom:14px}
+
+/* ---------- try-modal connect + outcome panel ---------- */
+.btn.wide{width:100%;justify-content:center;padding:11px}
+.try-divider{display:flex;align-items:center;gap:12px;margin:16px 0 12px;color:var(--muted);font-size:12px}
+.try-divider::before,.try-divider::after{content:'';flex:1;height:1px;background:var(--line)}
+.outcome-panel{border:1px solid #34406a;background:linear-gradient(180deg,rgba(62,207,142,.06),var(--panel));border-radius:13px;padding:18px 20px;margin-bottom:16px}
+.op-head{display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap}
+.op-head b{font-size:15.5px}
+.op-badge{font:800 12.5px var(--mono);letter-spacing:.05em;padding:4px 11px;border-radius:999px}
+.op-badge.ok{background:rgba(62,207,142,.14);color:var(--ok);border:1px solid rgba(62,207,142,.4)}
+.op-badge.warn{background:rgba(245,184,61,.14);color:var(--warn);border:1px solid rgba(245,184,61,.4)}
+.op-badge.bad{background:rgba(255,107,107,.14);color:var(--bad);border:1px solid rgba(255,107,107,.4)}
+.op-desc{font-size:14px;color:#d4dcea;max-width:820px;margin-bottom:14px}
+.op-next{border-top:1px solid var(--line);padding-top:14px}
+.op-next-label{display:block;font:700 11px var(--mono);letter-spacing:.08em;color:var(--veil2);margin-bottom:9px}

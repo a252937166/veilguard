@@ -44,6 +44,7 @@ type Ctx = {
   demoRole: DemoRole | null;
   startDemo: (role: DemoRole) => void;
   openRolePicker: () => void;
+  goTab: (tab: string) => void;
 };
 const AppCtx = createContext<Ctx>(null as any);
 export const useApp = () => useContext(AppCtx);
@@ -248,7 +249,7 @@ export function App() {
     return roles.length ? roles : ['OBSERVER'];
   }, [isAdmin, isOwner, isDelegate, isAuditor]);
 
-  const ctx: Ctx = { account, chainOk, owners, paused, mandates, requests, refresh, toast, run, busy, demoRole, startDemo: enterDemo, openRolePicker: () => setTryOpen(true) };
+  const ctx: Ctx = { account, chainOk, owners, paused, mandates, requests, refresh, toast, run, busy, demoRole, startDemo: enterDemo, openRolePicker: () => setTryOpen(true), goTab: (t) => setTab(t as any) };
 
   const tryModal = tryOpen && (
     <div className="modal-back" onClick={() => setTryOpen(false)}>
@@ -268,12 +269,13 @@ export function App() {
             </span>
           </button>
         ))}
-        <div className="row" style={{ justifyContent: 'space-between', marginTop: 14 }}>
-          <span className="muted" style={{ fontSize: 12.5 }}>Have your own wallet?</span>
-          <button className="btn small" onClick={() => { setTryOpen(false); if (stage === 'landing') launch(false); connect(); }}>
-            Connect MetaMask instead
-          </button>
-        </div>
+        <div className="try-divider"><span>or use your own wallet</span></div>
+        <button className="btn primary wide" onClick={() => { setTryOpen(false); if (stage === 'landing') launch(false); connect(); }}>
+          🔗 Connect my wallet
+        </button>
+        <p className="muted" style={{ fontSize: 12, marginTop: 8, textAlign: 'center' }}>
+          MetaMask, OKX, Rabby, Coinbase… — you'll be able to get your wallet provisioned as a delegate and sign with it yourself.
+        </p>
       </div>
     </div>
   );
