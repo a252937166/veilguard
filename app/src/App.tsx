@@ -68,7 +68,7 @@ export function App() {
     setDemoRole(role);
     setAccount(demoAddress(role));
     setTryOpen(false);
-    setTab(role === 'delegate' ? 'Delegate' : 'Auditor');
+    setTab(role === 'delegate' ? 'Delegate' : role === 'signer' ? 'Signer' : 'Auditor');
   }, []);
 
   const exitDemo = useCallback(() => {

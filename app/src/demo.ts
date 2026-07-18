@@ -25,6 +25,16 @@ export const DEMO_ROLES = {
     blurb: 'Submit encrypted spend requests and watch the TEE decide. You hold the real key — the policy is what stops you overspending.',
     key: '0x542fe27a6c79622ecf81ed14b4440a16eba591229c028a47021d6850340ff5d0' as `0x${string}`,
   },
+  signer: {
+    label: 'Signer (Safe owner A)',
+    icon: '🔐',
+    blurb: 'Operate the treasury committee: activate policies and approve escalations with a REAL in-browser 2-of-2 (you sign as owner A; owner B co-signs governance-only, server-side).',
+    // Owner A of the Safe (also the finance admin). Alone it CANNOT reach the
+    // Safe threshold — owner B only co-signs bounded governance calls server-side
+    // — so this key cannot drain or brick the Safe. Intentionally public testnet
+    // demo committee key.
+    key: '0xefb387e3b31f8832aaa03a457f8d903935d547546dc9b0bf6bf3543cd52c6c83' as `0x${string}`,
+  },
   auditor: {
     label: 'Auditor',
     icon: '🕵️',
