@@ -11,6 +11,14 @@ import { sepolia } from 'viem/chains';
 import { createViemHandleClient, type HandleClient } from '@iexec-nox/handle';
 import { GATEWAY, RPC_URL } from './config';
 import { demoWalletByAddress } from './demo';
+import type { Eip1193Provider } from './wallet';
+
+/** The injected provider chosen at connect time (EIP-6963), or the legacy default. */
+let activeProvider: Eip1193Provider | undefined;
+export function setActiveProvider(p: Eip1193Provider | undefined) { activeProvider = p; }
+export function getActiveProvider(): Eip1193Provider | undefined {
+  return activeProvider ?? (window as any).ethereum;
+}
 
 const RPCS = [
   RPC_URL,
@@ -31,7 +39,7 @@ export function makeWalletClient(account: `0x${string}`): WalletClient {
   return createWalletClient({
     account,
     chain: sepolia,
-    transport: custom((window as any).ethereum),
+    transport: custom(getActiveProvider() as any),
   });
 }
 
