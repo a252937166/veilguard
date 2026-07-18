@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { keccak256, stringToBytes } from 'viem';
+import { keccak256, parseEventLogs, stringToBytes } from 'viem';
 import { ADDR, FINALIZE_API, PROVISION_API, moduleAbi, parseUsdc, scanTx, short, vendorName } from '../config';
 import { handleClientFor, publicClient } from '../nox';
 import { walletWrite } from '../walletTx';
 import { fetchRequestTxs, type RequestTxs } from '../txlog';
 import { useApp, type SpendRequest } from '../App';
 import { NoRole, RequestPill } from '../ui';
-import { VIOLATION_DELEGATE, demoWalletByAddress } from '../demo';
+import { FREEPLAY_DELEGATE, VIOLATION_DELEGATE, demoWalletByAddress } from '../demo';
 import { MISSIONS, completeMission, loadMissions, type MissionKey, type MissionState } from '../missions';
 
 const REASONS: Record<number, string> = {
@@ -14,6 +14,13 @@ const REASONS: Record<number, string> = {
   2: 'treasury balance too low',
   3: 'would breach the reserve floor',
 };
+
+type Track = { id: string; mission: MissionKey | 'free'; amount: string; tx?: `0x${string}`; at: number };
+const loadTrack = (): Track | null => { try { return JSON.parse(sessionStorage.getItem('vg_track') ?? 'null'); } catch { return null; } };
+const saveTrack = (t: Track | null) => { try { t ? sessionStorage.setItem('vg_track', JSON.stringify(t)) : sessionStorage.removeItem('vg_track'); } catch { /* ignore */ } };
+
+const MAIN_DEMO = '0x17ee5ad7e4b40cadafad27c5f68f74d02c7fd532';
+const isDemoAddr = (a?: string) => !!a && [MAIN_DEMO, VIOLATION_DELEGATE.address.toLowerCase(), FREEPLAY_DELEGATE.address.toLowerCase()].includes(a.toLowerCase());
 
 function mmss(sec: number): string {
   const m = Math.floor(sec / 60), s = sec % 60;
@@ -33,7 +40,7 @@ export function DelegateView() {
   const [reasonBusy, setReasonBusy] = useState(false);
   const [missions, setMissions] = useState<MissionState>(loadMissions);
   const [txs, setTxs] = useState<Map<string, RequestTxs>>(new Map());
-  const [cool, setCool] = useState<{ main: number; violation: number }>({ main: 0, violation: 0 });
+  const [cool, setCool] = useState<{ main: number; violation: number; freeplay: number }>({ main: 0, violation: 0, freeplay: 0 });
 
   // Rich progress state: label + started + expected duration + optional tx link.
   type Flow = { label: string; startedAt: number; expect?: number; tx?: `0x${string}` };
@@ -47,11 +54,12 @@ export function DelegateView() {
     }));
   const [, forceTick] = useState(0);
   useEffect(() => {
-    const need = !!flow || cool.main > Math.floor(Date.now() / 1000) || cool.violation > Math.floor(Date.now() / 1000);
+    const need = !!flow || Object.values(cool).some((t) => t > Math.floor(Date.now() / 1000))
+      || (trackId != null && requests.find((r) => r.id === trackId)?.state === 3);
     if (!need) return;
     const iv = setInterval(() => forceTick((t) => t + 1), 500);
     return () => clearInterval(iv);
-  }, [flow?.label, cool.main, cool.violation]);
+  }, [flow?.label, cool.main, cool.violation, cool.freeplay, trackId, requests]);
 
   const freeFormRef = useRef<HTMLDivElement>(null);
   const amountRef = useRef<HTMLInputElement>(null);
@@ -66,9 +74,12 @@ export function DelegateView() {
     () => mandates.find((m) => m.state === 2 && m.delegate.toLowerCase() === VIOLATION_DELEGATE.address.toLowerCase()),
     [mandates],
   );
+  const freeplayMandate = useMemo(
+    () => mandates.find((m) => m.state === 2 && m.delegate.toLowerCase() === FREEPLAY_DELEGATE.address.toLowerCase()),
+    [mandates],
+  );
   const myRequests = useMemo(() => {
-    const mine = (d: string) => d.toLowerCase() === account?.toLowerCase()
-      || (isDemo && d.toLowerCase() === VIOLATION_DELEGATE.address.toLowerCase());
+    const mine = (d: string) => d.toLowerCase() === account?.toLowerCase() || (isDemo && isDemoAddr(d));
     return [...requests].filter((r) => mine(r.delegate)).reverse();
   }, [requests, account, isDemo]);
   const latest = useMemo(() => (trackId != null ? requests.find((r) => r.id === trackId) : undefined), [requests, trackId]);
@@ -79,11 +90,23 @@ export function DelegateView() {
     () => (myMandate ? requests.find((r) => r.mandateId === myMandate.id && (r.state === 1 || r.state === 3)) : undefined),
     [requests, myMandate],
   );
-  // adopt an untracked in-flight request (e.g. left over from a previous visit)
+  const freeplayBlocking = useMemo(
+    () => (freeplayMandate ? requests.find((r) => r.mandateId === freeplayMandate.id && (r.state === 1 || r.state === 3)) : undefined),
+    [requests, freeplayMandate],
+  );
+
+  // restore the tracked payment after a refresh (mission attribution survives),
+  // else adopt an untracked in-flight request left over from a previous visit
   useEffect(() => {
-    if (trackId == null && blockingRequest) { setTrackId(blockingRequest.id); setMissionOf(null); }
+    if (trackId != null) return;
+    const t = loadTrack();
+    if (t && requests.some((r) => String(r.id) === t.id)) {
+      setTrackId(BigInt(t.id)); setMissionOf(t.mission); setLastAmount(t.amount); if (t.tx) setLastTx(t.tx);
+      return;
+    }
+    if (blockingRequest) { setTrackId(blockingRequest.id); setMissionOf(null); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [blockingRequest?.id]);
+  }, [blockingRequest?.id, requests.length]);
 
   // fast-poll while a request is in flight
   useEffect(() => {
@@ -99,11 +122,12 @@ export function DelegateView() {
     let stop = false;
     const load = async () => {
       try {
-        const [a, b] = await Promise.all([
+        const [a, b, c] = await Promise.all([
           publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'cooldownUntil', args: [account] }) as Promise<bigint>,
           publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'cooldownUntil', args: [VIOLATION_DELEGATE.address] }) as Promise<bigint>,
+          publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'cooldownUntil', args: [FREEPLAY_DELEGATE.address] }) as Promise<bigint>,
         ]);
-        if (!stop) setCool({ main: Number(a), violation: Number(b) });
+        if (!stop) setCool({ main: Number(a), violation: Number(b), freeplay: Number(c) });
       } catch { /* transient */ }
     };
     load();
@@ -113,6 +137,7 @@ export function DelegateView() {
   const nowSec = Math.floor(Date.now() / 1000);
   const mainCoolLeft = Math.max(0, cool.main - nowSec);
   const violationCoolLeft = Math.max(0, cool.violation - nowSec);
+  const freeplayCoolLeft = Math.max(0, cool.freeplay - nowSec);
 
   // mission bookkeeping on outcome transitions
   const seenTerminal = useRef<string | null>(null);
@@ -123,6 +148,7 @@ export function DelegateView() {
     seenTerminal.current = key;
     if (latest.state === 2 && missionOf === 'routine') setMissions(completeMission('routine'));
     if (latest.state === 2 && missionOf === 'approval') { setMissions(completeMission('approval')); fetchRequestTxs(true).then(setTxs).catch(() => {}); }
+    saveTrack(null);
     setTimeout(() => receiptRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 250);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [latest?.state, latest?.id]);
@@ -194,18 +220,14 @@ export function DelegateView() {
           throw new Error(explainRevert(e));
         }
         setFlow('Sepolia is including your transaction…', 13, hash);
-        await publicClient.waitForTransactionReceipt({ hash, pollingInterval: 1_200 });
-        // find our request id (scan back a little — other visitors may interleave)
-        const nextId = (await publicClient.readContract({
-          address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'nextRequestId',
-        })) as bigint;
-        let id = nextId - 1n;
-        for (let i = nextId - 1n; i > 0n && i > nextId - 5n; i--) {
-          const r = (await publicClient.readContract({
-            address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'getRequest', args: [i],
-          })) as any[];
-          if ((r[1] as string).toLowerCase() === who.toLowerCase()) { id = i; break; }
-        }
+        const receipt = await publicClient.waitForTransactionReceipt({ hash, pollingInterval: 1_200 });
+        // exact request id from OUR receipt's SpendRequested event — immune to
+        // concurrent visitors interleaving requests
+        const evs = parseEventLogs({ abi: moduleAbi as any, logs: receipt.logs, eventName: 'SpendRequested' }) as any[];
+        const ev = evs.find((e) => (e.args?.delegate as string)?.toLowerCase() === who.toLowerCase()) ?? evs[0];
+        if (!ev) throw new Error('transaction confirmed but no SpendRequested event found');
+        const id = ev.args.requestId as bigint;
+        saveTrack({ id: String(id), mission, amount: amt, tx: hash, at: Date.now() });
         setReasonVal(null); setLastAmount(amt); setLastTx(hash); setMissionOf(mission); setTrackId(id);
       } finally { setFlow(null); }
     });
@@ -245,17 +267,35 @@ export function DelegateView() {
     toast(`${label} loaded — press Submit to run it with your wallet.`);
   };
 
-  const runScenario = (key: MissionKey) => {
+  /** Ask the server whether a demo delegate is truly ready (mandate/slot/cooldown/gas/budget). */
+  const ensureReady = async (delegate: string): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/demo-ready', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ delegate }),
+      });
+      const d = await res.json();
+      if (d?.ready === false) {
+        toast(d.cooldownLeft ? `${d.reason} — ${mmss(d.cooldownLeft)} left` : (d.reason ?? 'demo treasury not ready — retry shortly'), true);
+        return false;
+      }
+      return true;
+    } catch { return true; /* probe unreachable → let the tx itself decide */ }
+  };
+
+  const runScenario = async (key: MissionKey) => {
     if (!myMandate || busy) return;
     if (blockingRequest) { toast('A payment is still in flight — it clears in under a minute.', true); return; }
     if (key === 'routine' || key === 'approval') {
       const amt = key === 'routine' ? '25' : '60';
       if (!isDemo) { loadScenario(amt, key === 'routine' ? 'Routine payment' : 'Approval challenge'); return; }
+      if (!(await ensureReady(account!))) return;
       submitCore(account!, myMandate.id, vendorOf(myMandate), amt, key);
       return;
     }
     // violation: use the dedicated delegate so the main one never enters cooldown
     if (isDemo && violationMandate && violationCoolLeft <= 0) {
+      if (!(await ensureReady(VIOLATION_DELEGATE.address))) return;
       submitCore(VIOLATION_DELEGATE.address, violationMandate.id, vendorOf(violationMandate), '600', 'violation');
       return;
     }
@@ -372,11 +412,25 @@ export function DelegateView() {
               <div className="r-row"><span>Publicly visible</span><span>outcome only — never the number</span></div>
             </div>
 
-            {escalated && (
-              <div className="committee-live">
-                <span className="spin" /> <b>Treasury committee reviewing…</b> approves with a real 2-of-2 within ~1 minute — this card updates by itself.
-              </div>
-            )}
+            {escalated && (() => {
+              const demoReq = isDemoAddr(latest.delegate);
+              const age = Math.max(0, Math.floor(Date.now() / 1000) - Number(latest.createdAt));
+              return (
+                <div className="committee-live stages">
+                  <div className="cl-row done"><span className="cl-dot">✓</span><span>Funds reserved in escrow</span></div>
+                  <div className="cl-row active"><span className="cl-dot"><span className="spin" /></span>
+                    <span>{demoReq ? 'Committee review' : 'Awaiting the Safe owners'}</span>
+                    {demoReq && <span className="mono muted cl-age">{age}s · ~20s window</span>}
+                  </div>
+                  <div className="cl-row"><span className="cl-dot">○</span><span>2-of-2 execTransaction on Sepolia</span></div>
+                  <div className="cl-note muted">
+                    {demoReq
+                      ? 'The demo treasury committee signs a REAL Safe 2-of-2 — this card flips by itself.'
+                      : 'This public demo\u2019s committee only signs demo-treasury requests. Your escalation stays reserved until a Safe owner signs; if unapproved for ~30 minutes it is returned (cancelled) and the escrow released.'}
+                  </div>
+                </div>
+              );
+            })()}
 
             {!escalated && (
               <div className="r-cta">
@@ -415,7 +469,7 @@ export function DelegateView() {
               const locked = !unlocked[m.key];
               return (
                 <div key={m.key} className={`scen-card ${done ? 'done' : ''} ${locked ? 'locked' : ''}`}
-                  data-tour={i === 0 ? 'scenario-routine' : undefined}>
+                  data-tour={`scenario-${m.key}`}>
                   <div className="sc-head">
                     <b>{i + 1} · {m.title}</b>
                     {done ? <span className="pill ok">COLLECTED</span> : locked ? <span className="pill dim">🔒 finish the previous one</span> : <span className="pill tee">{m.outcome}</span>}
@@ -436,13 +490,19 @@ export function DelegateView() {
           </div>
         </div>
 
-        {/* ---- free play ---- */}
-        <div className="card" data-tour="submit" ref={freeFormRef}>
-          <h3>Free play <small>your own amount — the outcome is unknown until the TEE evaluates it</small></h3>
-          {mainCoolLeft > 0 && (
+        {/* ---- free play (demo: own sandboxed delegate; collapsed until missions done) ---- */}
+        <details className="card prog-acc" data-tour="submit" ref={freeFormRef as any}
+          {...(!isDemo || allCollected ? { open: true } : {})}>
+          <summary><h3 style={{ display: 'inline' }}>Free play <small>your own amount — the outcome is unknown until the TEE evaluates it</small></h3></summary>
+          {isDemo && (
+            <p className="muted" style={{ fontSize: 12.5, margin: '6px 0 10px' }}>
+              Free play runs on its own sandboxed delegate — experiment freely, the guided missions can never be frozen by it.
+            </p>
+          )}
+          {(isDemo ? freeplayCoolLeft : mainCoolLeft) > 0 && (
             <div className="cooldown-bar">
               ⏳ <b>Anti-probing cooldown</b> — a blocked payment freezes this delegate for 10 minutes so the
-              secret limits can't be binary-searched. Ready in <b className="mono">{mmss(mainCoolLeft)}</b>.
+              secret limits can't be binary-searched. Ready in <b className="mono">{mmss(isDemo ? freeplayCoolLeft : mainCoolLeft)}</b>.
             </div>
           )}
           <label>Pay to</label>
@@ -462,16 +522,22 @@ export function DelegateView() {
           <label>Memo (only its hash goes on-chain)</label>
           <input value={memo} onChange={(e) => setMemo(e.target.value)} placeholder="invoice #… (optional)" />
           <div style={{ marginTop: 14 }}>
-            <button className="btn primary" disabled={!!busy || !amount || !!blockingRequest || mainCoolLeft > 0}
-              onClick={() => submitCore(account, myMandate.id, (recipient || vendorOf(myMandate)) as `0x${string}`, amount, 'free')}>
+            <button className="btn primary"
+              disabled={!!busy || !amount || (isDemo ? (!!freeplayBlocking || freeplayCoolLeft > 0) : (!!blockingRequest || mainCoolLeft > 0))}
+              onClick={async () => {
+                if (!isDemo) { submitCore(account, myMandate.id, (recipient || vendorOf(myMandate)) as `0x${string}`, amount, 'free'); return; }
+                if (!freeplayMandate) { toast('Free-play treasury is being provisioned — try again in ~2 min.', true); return; }
+                if (!(await ensureReady(FREEPLAY_DELEGATE.address))) return;
+                submitCore(FREEPLAY_DELEGATE.address, freeplayMandate.id, vendorOf(freeplayMandate), amount, 'free');
+              }}>
               🔒 Submit confidential payment
             </button>
-            {blockingRequest && <p className="muted" style={{ fontSize: 12, marginTop: 7 }}>A payment is in flight — it clears automatically in under a minute.</p>}
+            {(isDemo ? freeplayBlocking : blockingRequest) && <p className="muted" style={{ fontSize: 12, marginTop: 7 }}>A payment is in flight — it clears automatically in under a minute.</p>}
           </div>
-        </div>
+        </details>
 
-        <div className="card">
-          <h3>My payments</h3>
+        <details className="card prog-acc" {...(!isDemo || allCollected ? { open: true } : {})}>
+          <summary><h3 style={{ display: 'inline' }}>My payments</h3></summary>
           <div className="tbl"><table>
             <thead><tr><th>ID</th><th>To</th><th>Outcome</th><th>Reason</th></tr></thead>
             <tbody>
@@ -486,7 +552,7 @@ export function DelegateView() {
               {!myRequests.length && <tr><td colSpan={4} className="muted">No payments yet — run the first scenario above.</td></tr>}
             </tbody>
           </table></div>
-        </div>
+        </details>
       </div>
 
       {/* ---------------- mission panel ---------------- */}

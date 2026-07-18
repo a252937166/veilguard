@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { SpendRequest } from './App';
 import type { DemoRole } from './demo';
 import { demoAddress } from './demo';
+import { loadMissions, type MissionKey } from './missions';
 
 export type TabName = 'Dashboard' | 'Delegate' | 'Admin' | 'Signer' | 'Auditor' | 'Verify' | 'Get Funds';
 
@@ -18,52 +19,55 @@ type Step = {
   tab: TabName;
   role?: DemoRole;          // demo role to auto-enter on this step
   target?: string;          // [data-tour=…] element to highlight & scroll to
-  auto?: 'submitted' | 'settled';  // auto-advance condition
+  auto?: 'submitted' | 'settled';  // auto-advance on raw request progress
+  mission?: MissionKey;     // auto-advance when this mission completes
   nextLabel?: string;
-  waiting?: string;         // spinner label while waiting for `auto`
+  waiting?: string;         // spinner label while waiting for `auto`/`mission`
 };
 
 const STEPS: Step[] = [
   {
     title: "You're the Delegate now",
     tab: 'Delegate', role: 'delegate',
-    body: "We put you in the shoes of a real spender: a shared, pre-funded demo account that holds an encrypted mandate. You never see the policy — it decides for you. Let's send a confidential payment.",
+    body: "We put you in the shoes of a real spender: a shared, pre-funded demo account that holds an encrypted mandate. You never see the policy — it decides for you. Your mission: collect all three outcomes.",
     hint: 'No wallet needed — the demo key signs locally. The policy, not key custody, is what contains you.',
-    nextLabel: "Let's pay someone →",
+    nextLabel: 'Start mission 1 →',
   },
   {
-    title: 'Run the first scenario',
-    tab: 'Delegate', target: 'scenario-routine',
-    body: 'Press ▶ Run scenario on the Routine payment card. Your amount is encrypted in the browser before it leaves — the chain will only ever see a ciphertext handle.',
-    auto: 'submitted',
-    waiting: 'waiting for you to run it…',
-    nextLabel: 'I ran it',
+    title: 'Mission 1 · Routine payment',
+    tab: 'Delegate', target: 'scenario-routine', mission: 'routine',
+    body: 'Press ▶ Run scenario on the Routine payment card. The amount is encrypted in your browser, the TEE checks it against the secret policy, and a keeper publishes the result — it auto-executes.',
+    waiting: 'run it — this step completes by itself…',
+    nextLabel: 'Skip ahead',
   },
   {
-    title: 'The TEE is deciding',
-    tab: 'Delegate',
-    body: 'Your encrypted amount is being checked against the encrypted policy inside a Trusted Execution Environment — budget, balance and reserve rules, all on ciphertext. A keeper then publishes the signed decision proof on-chain. Nothing to do; the outcome appears by itself.',
-    auto: 'settled',
-    waiting: 'TEE computing → keeper publishing the proof…',
-    nextLabel: 'Skip the wait',
+    title: 'Mission 2 · Approval challenge',
+    tab: 'Delegate', target: 'scenario-approval', mission: 'approval',
+    body: 'Now run the Approval challenge. This payment is above the secret auto-limit, so funds go to escrow while the treasury committee reviews (~20s) and approves with a REAL Safe 2-of-2 — watch the stages tick.',
+    hint: 'Owner keys never touch the browser — the committee signs server-side, on-chain, verifiably.',
+    waiting: 'escrow → committee review → 2-of-2 execution…',
+    nextLabel: 'Skip ahead',
   },
   {
-    title: 'Outcome revealed — amount still secret',
-    tab: 'Delegate', target: 'outcome',
-    body: 'The chain learned exactly one of three words: EXECUTED, APPROVAL REQUIRED, or BLOCKED — never the number. 25 auto-executes; try 60 to watch the treasury committee approve a real 2-of-2, or 600 to get blocked with a private reason.',
-    hint: 'Escalations are approved server-side by the real committee within ~1 min — owner keys are never in the browser.',
-    nextLabel: 'Continue as the Auditor →',
+    title: 'Mission 3 · Policy violation',
+    tab: 'Delegate', target: 'scenario-violation', mission: 'violation',
+    body: 'Run the Policy violation and try to overspend. The TEE blocks it — no funds move — and you finish the mission by pressing 🔓 Decrypt the private reason on the receipt. Only you can read it.',
+    hint: 'This scenario runs on its own sandboxed delegate, so the block never freezes the other missions.',
+    waiting: 'waiting for the block + your decrypt…',
+    nextLabel: 'Skip ahead',
   },
   {
-    title: "Now you're the Auditor",
+    title: "Final mission · You're the Auditor",
     tab: 'Auditor', role: 'auditor', target: 'packets',
-    body: 'The finance admin granted this account an immutable disclosure snapshot: one policy version plus chosen requests. Open a packet and press Decrypt — you can read exactly those values, forever, and nothing else. Selective disclosure instead of all-or-nothing transparency.',
-    nextLabel: 'Almost done →',
+    body: 'The finance admin granted this account an immutable disclosure snapshot. Press 🔓 Decrypt this packet — you read exactly those values, forever, and nothing else. Selective disclosure instead of all-or-nothing transparency.',
+    mission: 'audit',
+    waiting: 'waiting for your decrypt…',
+    nextLabel: 'Skip ahead',
   },
   {
-    title: 'Believe none of it — verify',
+    title: 'Demo complete — believe none of it, verify',
     tab: 'Verify',
-    body: 'Everything you just did is on Sepolia: request txs, proof-gated finalizations, real 2-of-2 governance executions. This page links every hash. That is the point — confidential numbers, publicly verifiable process.',
+    body: 'Everything you just did is on Sepolia: request txs, proof-gated finalizations, real 2-of-2 governance executions. This page links every hash. Confidential numbers, publicly verifiable process.',
     nextLabel: 'Explore freely ✓',
   },
 ];
@@ -105,9 +109,19 @@ export function GuidedTour({
     return () => { clearTimeout(t); document.querySelectorAll('.tour-target').forEach((el) => el.classList.remove('tour-target')); };
   }, [step, s.target]);
 
-  // auto-advance on real on-chain progress
+  // auto-advance on real on-chain progress OR mission completion
   const demoDelegate = demoAddress('delegate').toLowerCase();
+  const [missionTick, setMissionTick] = useState(0);
   useEffect(() => {
+    const on = () => setMissionTick((t) => t + 1);
+    window.addEventListener('vg-missions', on);
+    return () => window.removeEventListener('vg-missions', on);
+  }, []);
+  useEffect(() => {
+    if (s.mission) {
+      if (loadMissions()[s.mission]) { setWaited(true); setTimeout(() => setStep(step + 1), 900); }
+      return;
+    }
     if (!s.auto) return;
     const mine = requests.filter((r) => r.delegate.toLowerCase() === demoDelegate);
     if (s.auto === 'submitted') {
@@ -117,7 +131,7 @@ export function GuidedTour({
       if (newest && newest.state !== 1) { setWaited(true); setTimeout(() => setStep(step + 1), 600); }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [requests, step]);
+  }, [requests, step, missionTick]);
 
   return (
     <div className="tour">
@@ -137,9 +151,9 @@ export function GuidedTour({
       </div>
       <div className="tour-nav">
         <button className="btn small ghost" disabled={step === 0} onClick={() => setStep(step - 1)}>← Back</button>
-        {s.auto && !waited && <span className="muted tour-wait"><span className="spin" /> {s.waiting}</span>}
+        {(s.auto || s.mission) && !waited && <span className="muted tour-wait"><span className="spin" /> {s.waiting}</span>}
         {step < STEPS.length - 1
-          ? <button className={`btn small ${s.auto ? 'ghost' : 'primary'}`} onClick={() => setStep(step + 1)}>{s.nextLabel ?? 'Next →'}</button>
+          ? <button className={`btn small ${(s.auto || s.mission) ? 'ghost' : 'primary'}`} onClick={() => setStep(step + 1)}>{s.nextLabel ?? 'Next →'}</button>
           : <button className="btn small primary" onClick={onClose}>{s.nextLabel ?? 'Done ✓'}</button>}
       </div>
     </div>

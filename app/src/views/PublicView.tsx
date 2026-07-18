@@ -1,6 +1,7 @@
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ADDR, FINALIZE_API, scan, short } from '../config';
 import { useApp } from '../App';
+import { handlesResolved } from '../nox';
 import { MandatePill, RequestPill } from '../ui';
 import { Donut } from '../Donut';
 
@@ -55,7 +56,31 @@ const A = (addr: string) => (
 );
 
 export function PublicView() {
-  const { mandates, requests, run, busy, refresh } = useApp();
+  const { mandates, requests, run, busy, refresh, lastUpdated, loadError } = useApp();
+
+  // Real health, not decoration: keeper/provisioner via /api/health, TEE gateway
+  // via a live handle-status probe, RPC/module from the app's own poll results.
+  const [health, setHealth] = useState<{ keeper: boolean | null; gateway: boolean | null }>({ keeper: null, gateway: null });
+  useEffect(() => {
+    let stop = false;
+    const probe = async () => {
+      let keeper: boolean | null = null;
+      try {
+        const h = await fetch('/api/health').then((r) => r.json());
+        keeper = !!h?.ok && h?.sweep !== false;
+      } catch { keeper = false; }
+      let gateway: boolean | null = null;
+      try {
+        const handle = requests.find((r) => r.decision && r.decision !== `0x${'00'.repeat(32)}`)?.decision;
+        gateway = handle ? await handlesResolved([handle]).then(() => true).catch(() => false) : null;
+      } catch { gateway = false; }
+      if (!stop) setHealth({ keeper, gateway });
+    };
+    probe();
+    const iv = setInterval(probe, 30_000);
+    return () => { stop = true; clearInterval(iv); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requests.length]);
 
   const stats = useMemo(() => {
     const active = mandates.filter((m) => m.state === 2).length;
@@ -176,14 +201,35 @@ export function PublicView() {
 
       <div className="dash-grid">
         <div className="card">
-          <h3>System status</h3>
+          <h3>System status <small>live checks, refreshed every 30s</small></h3>
           <div className="sysstat">
-            <div className="sys-banner"><span className="netdot ok" /> All systems operational</div>
-            <div className="sys-row"><span>VeilGuard module</span><span className="sys-ok">● live</span></div>
-            <div className="sys-row"><span>Nox TEE gateway</span><span className="sys-ok">● reachable</span></div>
-            <div className="sys-row"><span>Safe (2-of-2)</span><span className="sys-ok">● enabled</span></div>
-            <div className="sys-row"><span>RPC connection</span><span className="sys-ok">● connected</span></div>
-            <div className="sys-row"><span>Chain indexed</span><span className="mono muted">{lastSync}</span></div>
+            {(() => {
+              const rpcOk = !loadError && !!lastUpdated;
+              const moduleOk = mandates.length > 0 || requests.length > 0;
+              const rows: [string, boolean | null][] = [
+                ['VeilGuard module', moduleOk],
+                ['Nox TEE gateway', health.gateway],
+                ['Keeper & committee', health.keeper],
+                ['RPC connection', rpcOk],
+              ];
+              const anyBad = rows.some(([, ok]) => ok === false);
+              const S = ({ ok, yes, no }: { ok: boolean | null; yes: string; no: string }) =>
+                ok === null ? <span className="mono muted">checking…</span>
+                  : ok ? <span className="sys-ok">● {yes}</span>
+                    : <span className="sys-ok" style={{ color: 'var(--warn)' }}>● {no}</span>;
+              return (
+                <>
+                  <div className="sys-banner" style={anyBad ? { color: 'var(--warn)' } : undefined}>
+                    <span className={`netdot ${anyBad ? 'bad' : 'ok'}`} /> {anyBad ? 'Degraded — one or more checks failing' : 'All systems operational'}
+                  </div>
+                  <div className="sys-row"><span>VeilGuard module</span><S ok={moduleOk} yes="live" no="unreachable" /></div>
+                  <div className="sys-row"><span>Nox TEE gateway</span><S ok={health.gateway} yes="reachable" no="unreachable" /></div>
+                  <div className="sys-row"><span>Keeper & committee</span><S ok={health.keeper} yes="sweeping" no="offline" /></div>
+                  <div className="sys-row"><span>RPC connection</span><S ok={rpcOk} yes="connected" no="degraded" /></div>
+                  <div className="sys-row"><span>Chain indexed</span><span className="mono muted">{lastUpdated ? `${Math.max(0, Math.round((Date.now() - lastUpdated) / 1000))}s ago` : lastSync}</span></div>
+                </>
+              );
+            })()}
           </div>
         </div>
         <div className="card">
