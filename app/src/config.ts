@@ -4,6 +4,7 @@ import moduleAbiJson from './module-abi.json';
 export const RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com';
 export const GATEWAY = 'https://gateway-testnets.noxprotocol.dev';
 export const CHAIN_ID = 11155111;
+export const PROVISION_API = '/api/provision';
 
 export const ADDR = deployments.contracts as {
   TestUSDC: `0x${string}`;

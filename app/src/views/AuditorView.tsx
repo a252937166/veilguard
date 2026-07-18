@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { ADDR, moduleAbi, short } from '../config';
 import { publicClient } from '../nox';
 import { useApp } from '../App';
-import { Decrypt } from '../ui';
+import { Decrypt, NoRole } from '../ui';
 
 type Packet = {
   id: bigint; auditor: `0x${string}`; mandateId: bigint; policyVersion: number;
@@ -31,7 +31,9 @@ export function AuditorView() {
     })();
   }, [account]);
 
-  if (!account) return <div className="notice">Connect the auditor wallet to read disclosure packets.</div>;
+  if (!account)
+    return <NoRole demo="auditor" title="Act as an Auditor"
+      body="An auditor decrypts the scoped, immutable disclosure snapshots the finance admin granted — and nothing else. Try the demo auditor account to decrypt a real packet's policy values, request amounts and coarse reasons." />;
   const mine = packets.filter((p) => p.auditor.toLowerCase() === account.toLowerCase());
 
   return (

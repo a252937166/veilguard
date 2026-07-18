@@ -101,4 +101,12 @@ export function walletByUuid(uuid: string): WalletInfo | undefined {
   return listWallets().find((w) => w.uuid === uuid);
 }
 
-export const isEmojiIcon = (icon: string) => !icon.startsWith('data:') && !icon.startsWith('http');
+/** True when the icon is a renderable image reference (data URI / URL / svg). */
+export function isImageIcon(icon?: string): boolean {
+  const s = (icon ?? '').trim();
+  return /^(data:|https?:|ipfs:|blob:|\/|<svg)/i.test(s);
+}
+/** True when the icon should be rendered as a short text glyph (emoji). */
+export const isEmojiIcon = (icon?: string) => !isImageIcon(icon);
+/** Cleaned image src (some wallets pad the string with whitespace/newlines). */
+export const iconSrc = (icon?: string) => (icon ?? '').trim();

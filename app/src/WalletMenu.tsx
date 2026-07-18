@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { formatEther } from 'viem';
 import { ADDR, erc20Abi, fmt, scan, short } from './config';
 import { publicClient } from './nox';
-import { isEmojiIcon, type WalletInfo } from './wallet';
+import { iconSrc, isImageIcon, type WalletInfo } from './wallet';
 
 export function WalletMenu({
   account, roleChips, chainOk, wallet, isDemo, onConnect, onSwitchChain, onSwitchAccount, onDisconnect,
@@ -63,8 +63,8 @@ export function WalletMenu({
       {!chainOk && <button className="btn small wrongnet" onClick={onSwitchChain}>⚠ Wrong network — switch to Sepolia</button>}
       <button className={`wallet-btn ${open ? 'open' : ''}`} onClick={() => setOpen((o) => !o)}>
         <span className="wallet-ico">
-          {walletIcon && isEmojiIcon(walletIcon) ? walletIcon
-            : walletIcon ? <img src={walletIcon} alt="" width={16} height={16} />
+          {isImageIcon(walletIcon) ? <img src={iconSrc(walletIcon)} alt="" width={16} height={16} />
+            : walletIcon ? walletIcon
             : <span className={`netdot ${chainOk ? 'ok' : 'bad'}`} />}
         </span>
         <span className="wallet-eth">{eth !== undefined ? `${Number(formatEther(eth)).toFixed(3)} ETH` : '…'}</span>
@@ -76,8 +76,8 @@ export function WalletMenu({
         <div className="wallet-pop">
           <div className="wp-wallet">
             <span className="wp-wallet-ico">
-              {walletIcon && isEmojiIcon(walletIcon) ? walletIcon
-                : walletIcon ? <img src={walletIcon} alt="" width={20} height={20} /> : '👛'}
+              {isImageIcon(walletIcon) ? <img src={iconSrc(walletIcon)} alt="" width={20} height={20} />
+                : walletIcon ? walletIcon : '👛'}
             </span>
             <span className="wp-wallet-name">{walletName}</span>
             <span className={`wp-net ${chainOk ? 'ok' : 'bad'}`}>{chainOk ? '● Sepolia' : '● wrong network'}</span>

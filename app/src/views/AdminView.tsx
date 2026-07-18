@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { ADDR, ROLES, isAddress, moduleAbi, parseUsdc } from '../config';
 import { handleClientFor, makeWalletClient, publicClient } from '../nox';
 import { useApp } from '../App';
-import { Decrypt, MandatePill } from '../ui';
+import { Decrypt, MandatePill, NoRole } from '../ui';
 
 export function AdminView() {
   const { account, mandates, requests, run, busy, paused } = useApp();
@@ -17,9 +17,9 @@ export function AdminView() {
   const [auditReqs, setAuditReqs] = useState('');
 
   const isAdmin = account?.toLowerCase() === ROLES.financeAdmin.toLowerCase();
-  if (!account) return <div className="notice">Connect the finance-admin wallet to manage policies.</div>;
   if (!isAdmin)
-    return <div className="notice">The connected account is not the finance admin (<span className="mono">{ROLES.financeAdmin}</span>). Views are role-gated by on-chain ACLs — decryption would be refused anyway.</div>;
+    return <NoRole title="Finance Admin — restricted"
+      body="The finance admin proposes encrypted policies and can pause the module. It is deliberately NOT a public demo role (it can create disclosure packets and pause spending), so it isn't offered as a one-click account. You can watch what the admin did in the Dashboard evidence table, or try the Delegate / Auditor roles to experience the confidential flow." />;
 
   const wallet = () => makeWalletClient(account);
 

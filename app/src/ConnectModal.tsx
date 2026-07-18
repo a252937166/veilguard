@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { isEmojiIcon, listWallets, type WalletInfo } from './wallet';
+import { iconSrc, isImageIcon, listWallets, type WalletInfo } from './wallet';
 
 /** Wallet chooser (EIP-6963) — lists every detected injected wallet by its real
  *  name + icon so we never mislabel OKX as MetaMask. */
@@ -30,7 +30,9 @@ export function ConnectModal({
         {wallets.map((w) => (
           <button key={w.uuid} className="walletcard" onClick={() => onPick(w)}>
             <span className="walletcard-icon">
-              {isEmojiIcon(w.icon) ? w.icon : <img src={w.icon} alt="" width={26} height={26} />}
+              {isImageIcon(w.icon)
+                ? <img src={iconSrc(w.icon)} alt="" width={26} height={26} onError={(e) => { (e.currentTarget.style.display = 'none'); }} />
+                : <span>{w.icon || '👛'}</span>}
             </span>
             <span className="walletcard-name">{w.name}</span>
             <span className="walletcard-cta">Connect →</span>

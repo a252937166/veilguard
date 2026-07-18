@@ -41,6 +41,9 @@ type Ctx = {
   toast: (msg: string, err?: boolean) => void;
   run: (label: string, fn: () => Promise<void>) => Promise<void>;
   busy: string | null;
+  demoRole: DemoRole | null;
+  startDemo: (role: DemoRole) => void;
+  openRolePicker: () => void;
 };
 const AppCtx = createContext<Ctx>(null as any);
 export const useApp = () => useContext(AppCtx);
@@ -245,7 +248,7 @@ export function App() {
     return roles.length ? roles : ['OBSERVER'];
   }, [isAdmin, isOwner, isDelegate, isAuditor]);
 
-  const ctx: Ctx = { account, chainOk, owners, paused, mandates, requests, refresh, toast, run, busy };
+  const ctx: Ctx = { account, chainOk, owners, paused, mandates, requests, refresh, toast, run, busy, demoRole, startDemo: enterDemo, openRolePicker: () => setTryOpen(true) };
 
   const tryModal = tryOpen && (
     <div className="modal-back" onClick={() => setTryOpen(false)}>
