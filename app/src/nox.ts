@@ -78,6 +78,7 @@ export async function handlesResolved(handles: string[]): Promise<boolean> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ handles }),
+      signal: AbortSignal.timeout(6_000),
     });
     if (!res.ok) return false;
     const data = await res.json();

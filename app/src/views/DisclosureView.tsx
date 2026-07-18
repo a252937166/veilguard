@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { DEMO_SCENARIOS } from '../demo-scenarios';
 import { loadDemoSession } from '../demo-session';
 import { completeMission } from '../missions';
@@ -29,6 +29,7 @@ export function DisclosureView() {
   const [session, setSession] = useState(loadDemoSession);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const createLock = useRef(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState<PacketResult | null>(null);
 
@@ -70,7 +71,8 @@ export function DisclosureView() {
   };
 
   const create = async () => {
-    if (!session || !allSelected || !allTerminal) return;
+    if (!session || !allSelected || !allTerminal || createLock.current) return;
+    createLock.current = true;
     setBusy(true);
     setError('');
     try {
@@ -81,6 +83,7 @@ export function DisclosureView() {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(body),
+          signal: AbortSignal.timeout(30_000),
         });
         const data = await response.json().catch(() => ({}));
         if (response.status === 202) { await sleep(2_000); continue; }
@@ -101,6 +104,7 @@ export function DisclosureView() {
       setError(reason?.message ?? String(reason));
     } finally {
       setBusy(false);
+      createLock.current = false;
     }
   };
 

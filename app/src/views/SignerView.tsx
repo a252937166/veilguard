@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ADDR, scan, scanTx, short, vendorName } from '../config';
 import { makeWalletClient } from '../nox';
@@ -27,6 +27,7 @@ export function SignerView() {
   const isDemoDelegate = demoRole === 'delegate';
   const [step, setStep] = useState<string | null>(null);
   const [decisionBusy, setDecisionBusy] = useState<'approve' | 'reject' | null>(null);
+  const decisionLock = useRef(false);
   const [txs, setTxs] = useState<Map<string, RequestTxs>>(new Map());
 
   const queue = useMemo(() => requests
@@ -41,6 +42,7 @@ export function SignerView() {
   const selectedEvidence = selected ? txs.get(String(selected.id)) : undefined;
   const safeDecisionTx = selectedEvidence?.approval ?? selectedEvidence?.cancellation;
   const safeAction = selectedEvidence?.safeAction;
+  const queueIsEmpty = queue.length === 0 && history.length === 0;
 
   useEffect(() => { fetchRequestTxs().then(setTxs).catch(() => {}); }, []);
 
@@ -61,7 +63,8 @@ export function SignerView() {
   });
 
   const demoDecision = async (action: 'approve' | 'reject') => {
-    if (!selected) return;
+    if (!selected || decisionLock.current) return;
+    decisionLock.current = true;
     setDecisionBusy(action);
     try {
       const runId = getActiveDemoRunId();
@@ -70,6 +73,7 @@ export function SignerView() {
         const response = await fetch('/api/demo-decision', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ runId, requestId: String(selected.id), action }),
+          signal: AbortSignal.timeout(15_000),
         });
         result = await response.json().catch(() => ({}));
         if (response.status === 202) {
@@ -95,7 +99,7 @@ export function SignerView() {
       fetchRequestTxs(true).then(setTxs).catch(() => {});
     } catch (error: any) {
       toast(`Decision not completed: ${error?.message ?? error}. Refresh and resume from this request.`, true);
-    } finally { setDecisionBusy(null); }
+    } finally { setDecisionBusy(null); decisionLock.current = false; }
   };
 
   return (
@@ -107,7 +111,7 @@ export function SignerView() {
 
       {step && <div className="flowbar" role="status"><span className="spin" /><b>{step}</b></div>}
 
-      <section className={`workbench approval-workbench ${isDetailRoute ? 'workbench-route-detail' : 'workbench-route-list'}`}>
+      <section className={`workbench approval-workbench ${queueIsEmpty ? 'workbench-empty' : ''} ${isDetailRoute ? 'workbench-route-detail' : 'workbench-route-list'}`}>
         <aside className="workbench-list" aria-label="Approval requests">
           <div className="object-list-head"><div><h2>Pending approvals</h2><p>{queue.length} awaiting decision</p></div><span className="object-count">{queue.length}</span></div>
           {[...queue, ...history].map((request) => (
@@ -117,7 +121,7 @@ export function SignerView() {
               <RequestPill state={request.state} />
             </button>
           ))}
-          {!queue.length && !history.length && <div className="empty-state"><b>No approvals yet</b><span>Submit the ShieldOps invoice from Payment Inbox.</span></div>}
+          {queueIsEmpty && <div className="empty-state queue-empty-copy"><b>No approvals yet</b><span>Submit the ShieldOps invoice from Payment Inbox.</span></div>}
         </aside>
 
         <article className="workbench-detail">
@@ -166,14 +170,24 @@ export function SignerView() {
               {isDemoDelegate && <div className="inline-alert">Your click selects a strictly validated demo action. It is not represented as your signature; both Safe owner keys remain server-side.</div>}
             </>
           ) : (
-            <div className="workbench-empty-detail empty-state" role={isDetailRoute ? 'alert' : 'status'}>
+            <div className="workbench-empty-detail" role={isDetailRoute ? 'alert' : 'status'}>
               {isDetailRoute && (
                 <button type="button" className="mobile-detail-back" onClick={backToApprovals}>
                   <span aria-hidden="true">←</span> Pending approvals
                 </button>
               )}
-              <b>{isDetailRoute ? 'Approval request not found' : 'Select a request'}</b>
-              <span>{isDetailRoute ? 'This request is not in the current pending or recent ShieldOps queue.' : 'Pending and recent committee decisions appear here.'}</span>
+              <header className="workbench-detail-head empty-detail-head">
+                <div>
+                  <span className="workbench-kicker">Committee workspace</span>
+                  <h2>{isDetailRoute ? 'Approval request not found' : queueIsEmpty ? 'Queue ready for ShieldOps' : 'Select a request'}</h2>
+                  <p>{isDetailRoute ? 'This request is not in the current pending or recent ShieldOps queue.' : queueIsEmpty ? 'The next reserved exception will appear here with its real Safe timeline.' : 'Pending and recent committee decisions appear here.'}</p>
+                </div>
+              </header>
+              <div className="empty-detail-body">
+                <b>{queueIsEmpty ? 'Create the approval task from Payment Inbox' : 'Choose a request from the queue'}</b>
+                <span>{queueIsEmpty ? 'Submit the 60 cUSDC ShieldOps invoice; once the TEE reserves escrow, this workspace exposes Approve and Reject.' : 'The detail view keeps the escrow, disclosure and transaction evidence together.'}</span>
+                {queueIsEmpty && <button type="button" className="btn primary" onClick={() => navigate(formatAppRoute({ page: 'payment-inbox' }).slice(1))}>Open Payment Inbox</button>}
+              </div>
             </div>
           )}
         </article>

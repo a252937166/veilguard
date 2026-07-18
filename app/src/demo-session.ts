@@ -261,12 +261,20 @@ export function demoSessionReducer(state: DemoSessionV2, action: DemoSessionActi
       next = updateMission(state, action.mission, {
         requestId: action.requestId,
         status: 'active',
-        ...(action.mission === 'approval' ? {
+        ...(action.mission === 'routine' ? {
+          outcome: undefined,
+          compatibilityComplete: false,
+        } : action.mission === 'approval' ? {
           decision: undefined,
           decisionConfirmed: false,
           decisionTx: undefined,
           outcome: undefined,
-        } : {}),
+          compatibilityComplete: false,
+        } : {
+          outcome: undefined,
+          reasonDecrypted: false,
+          compatibilityComplete: false,
+        }),
       }, at);
       break;
     case 'ROUTINE_EXECUTED':

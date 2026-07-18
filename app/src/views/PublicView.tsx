@@ -35,7 +35,7 @@ export function PublicView() {
     const probe = async () => {
       let keeper = false;
       try {
-        const response = await fetch('/api/health');
+        const response = await fetch('/api/health', { signal: AbortSignal.timeout(6_000) });
         const result = await response.json();
         keeper = response.ok && result?.ok && result?.sweep !== false;
       } catch { keeper = false; }

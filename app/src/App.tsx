@@ -34,6 +34,8 @@ import {
 import { Icon, type IconName } from './icons';
 import { ModalDialog } from './components/ModalDialog';
 import { runBoundScenarioRequests } from './demo-scenarios';
+import { reconcileRunBoundMissionEvidence } from './mission-recovery';
+import { acquireOperationLock, releaseOperationLock } from './operation-lock';
 
 const EVIDENCE_COMMIT = evidence.commit;
 
@@ -152,6 +154,7 @@ export function App() {
     // the one-time startup recovery check as handled before navigation so the
     // route effect cannot mistake this newly saved session for stale work.
     startupChecked.current = true;
+    try { sessionStorage.removeItem('vg_track'); } catch { /* ignore */ }
     const next = createDemoSession({ route: { page: 'payment-inbox' }, role: 'delegate', tourActive: true });
     saveDemoSession(next);
     setDemoSession(next);
@@ -194,20 +197,28 @@ export function App() {
   const [paused, setPaused] = useState(false);
   const [toastMsg, setToastMsg] = useState<{ msg: string; err: boolean } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [tick, setTick] = useState(0);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [loadError, setLoadError] = useState(false);
   const toastTimer = useRef<any>(null);
+  const operationLock = useRef(false);
+  const lastToast = useRef<{ msg: string; at: number } | null>(null);
+  const chainRefresh = useRef<(() => void) | null>(null);
 
   const toast = useCallback((msg: string, err = false) => {
+    const now = Date.now();
+    if (lastToast.current?.msg === msg && now - lastToast.current.at < 1_500) return;
+    lastToast.current = { msg, at: now };
     setToastMsg({ msg, err });
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToastMsg(null), err ? 9000 : 5000);
   }, []);
 
-  const refresh = useCallback(() => setTick((t) => t + 1), []);
+  const refresh = useCallback(() => chainRefresh.current?.(), []);
 
   const run = useCallback(async (label: string, fn: () => Promise<void>) => {
+    // React state updates are asynchronous; a ref closes the same-frame window
+    // where a second click could start the same transaction again.
+    if (!acquireOperationLock(operationLock)) return;
     setBusy(label);
     try {
       await fn();
@@ -217,6 +228,7 @@ export function App() {
       toast(`${label} failed: ${e?.shortMessage ?? e?.message ?? e}`, true);
     } finally {
       setBusy(null);
+      releaseOperationLock(operationLock);
     }
   }, [refresh, toast]);
 
@@ -328,38 +340,62 @@ export function App() {
   // chain polling
   useEffect(() => {
     let stop = false;
+    let loading = false;
+    let queued = false;
     const load = async () => {
-      try {
-        const [nextM, nextR, own, isPaused] = await Promise.all([
-          publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'nextMandateId' }) as Promise<bigint>,
-          publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'nextRequestId' }) as Promise<bigint>,
-          publicClient.readContract({ address: ADDR.Safe, abi: safeAbi, functionName: 'getOwners' }) as Promise<`0x${string}`[]>,
-          publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'paused' }) as Promise<boolean>,
-        ]);
-        // Fire all reads concurrently so viem's Multicall3 batching collapses them
-        // into a single aggregate eth_call (keeps free-tier RPCs from rate-limiting).
-        const mIds = Array.from({ length: Math.max(0, Number(nextM) - 1) }, (_, k) => BigInt(k + 1));
-        const rIds = Array.from({ length: Math.max(0, Number(nextR) - 1) }, (_, k) => BigInt(k + 1));
-        const [mRaw, rRaw] = await Promise.all([
-          Promise.all(mIds.map((i) => publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'getMandate', args: [i] }) as Promise<any[]>)),
-          Promise.all(rIds.map((i) => publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'getRequest', args: [i] }) as Promise<any[]>)),
-        ]);
-        const ms: Mandate[] = mRaw.map((m, k) => ({ id: mIds[k], delegate: m[0], validFrom: m[1], validUntil: m[2], version: Number(m[3]), state: Number(m[4]), autoLimit: m[5], budgetLeft: m[6], reserveFloor: m[7], recipients: m[8] }));
-        const rs: SpendRequest[] = rRaw.map((r, k) => ({ id: rIds[k], mandateId: r[0], delegate: r[1], recipient: r[2], memoHash: r[3], createdAt: r[4], state: Number(r[5]), amount: r[6], decision: r[7], blockedReason: r[8] }));
-        // TEE resolution status for pending requests
-        const pending = rs.filter((r) => r.state === 1);
-        if (pending.length) {
-          await Promise.all(pending.map(async (r) => {
-            r.decisionReady = await handlesResolved([r.decision]);
-          }));
-        }
-        if (!stop) { setMandates(ms); setRequests(rs); setOwners(own); setPaused(isPaused); setLastUpdated(Date.now()); setLoadError(false); }
-      } catch (e) { console.error('poll', e); if (!stop) setLoadError(true); }
+      if (loading) { queued = true; return; }
+      loading = true;
+      do {
+        queued = false;
+        try {
+          const [nextM, nextR, own, isPaused] = await Promise.all([
+            publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'nextMandateId' }) as Promise<bigint>,
+            publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'nextRequestId' }) as Promise<bigint>,
+            publicClient.readContract({ address: ADDR.Safe, abi: safeAbi, functionName: 'getOwners' }) as Promise<`0x${string}`[]>,
+            publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'paused' }) as Promise<boolean>,
+          ]);
+          // Fire all reads concurrently so viem's Multicall3 batching collapses them
+          // into a single aggregate eth_call (keeps free-tier RPCs from rate-limiting).
+          const mIds = Array.from({ length: Math.max(0, Number(nextM) - 1) }, (_, k) => BigInt(k + 1));
+          const rIds = Array.from({ length: Math.max(0, Number(nextR) - 1) }, (_, k) => BigInt(k + 1));
+          const [mRaw, rRaw] = await Promise.all([
+            Promise.all(mIds.map((i) => publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'getMandate', args: [i] }) as Promise<any[]>)),
+            Promise.all(rIds.map((i) => publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'getRequest', args: [i] }) as Promise<any[]>)),
+          ]);
+          const ms: Mandate[] = mRaw.map((m, k) => ({ id: mIds[k], delegate: m[0], validFrom: m[1], validUntil: m[2], version: Number(m[3]), state: Number(m[4]), autoLimit: m[5], budgetLeft: m[6], reserveFloor: m[7], recipients: m[8] }));
+          const rs: SpendRequest[] = rRaw.map((r, k) => ({ id: rIds[k], mandateId: r[0], delegate: r[1], recipient: r[2], memoHash: r[3], createdAt: r[4], state: Number(r[5]), amount: r[6], decision: r[7], blockedReason: r[8] }));
+          // TEE resolution status for pending requests
+          const pending = rs.filter((r) => r.state === 1);
+          if (pending.length) {
+            await Promise.all(pending.map(async (r) => {
+              r.decisionReady = await handlesResolved([r.decision]);
+            }));
+          }
+          if (!stop) { setMandates(ms); setRequests(rs); setOwners(own); setPaused(isPaused); setLastUpdated(Date.now()); setLoadError(false); }
+        } catch (e) { console.error('poll', e); if (!stop) setLoadError(true); }
+      } while (!stop && queued);
+      loading = false;
     };
-    load();
-    const iv = setInterval(load, 10_000);
-    return () => { stop = true; clearInterval(iv); };
-  }, [tick]);
+    chainRefresh.current = () => { void load(); };
+    void load();
+    const iv = setInterval(() => { void load(); }, 10_000);
+    return () => {
+      stop = true;
+      clearInterval(iv);
+      chainRefresh.current = null;
+    };
+  }, []);
+
+  // A receipt can become terminal before DelegateView has mounted or restored
+  // its local tracking state. Reconcile the run-bound memo on every chain
+  // snapshot so refresh/back navigation cannot leave the mission drawer stuck.
+  useEffect(() => {
+    if (!demoSession || !requests.length) return;
+    const reconciled = reconcileRunBoundMissionEvidence(demoSession, requests);
+    if (reconciled === demoSession) return;
+    saveDemoSession(reconciled);
+    setDemoSession(reconciled);
+  }, [demoSession, requests]);
 
   const lc = account?.toLowerCase();
   const isAdmin = lc === ROLES.financeAdmin.toLowerCase();
@@ -465,6 +501,7 @@ export function App() {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ runId: current.runId, requestId: pending, action: 'reject' }),
+          signal: AbortSignal.timeout(15_000),
         });
         const payload = await response.json().catch(() => ({}));
         if (!response.ok && response.status !== 410) throw new Error(payload.error ?? `cleanup returned ${response.status}`);
@@ -488,6 +525,7 @@ export function App() {
       const restarted = demoSessionReducer(current, {
         type: 'CONFIRM_RESTART', runId: current.runId,
       });
+      try { sessionStorage.removeItem('vg_track'); } catch { /* ignore */ }
       saveDemoSession(restarted);
       setDemoSession(restarted);
       setResumeOpen(false);
@@ -600,6 +638,8 @@ export function App() {
   return (
     <AppCtx.Provider value={ctx}>
       <a className="skip-link" href="#main-content">Skip to workspace</a>
+      <WaveField />
+      <div className="page-scrim page-scrim-workspace" />
       <div className="shell">
         <aside className="sidebar">
           <button className="side-logo" onClick={() => navigate('/')} title="Back to product introduction" aria-label="Back to product introduction">
@@ -673,7 +713,7 @@ export function App() {
 
             <Suspense fallback={<div className="card workspace-skeleton" role="status"><span className="skeleton-line wide" /><span className="skeleton-line" /><span className="skeleton-panel" /><span className="sr-only">Loading workspace</span></div>}>
               {route.page === 'overview' && <PublicView />}
-              {['payment-inbox', 'new-payment', 'payment-detail'].includes(route.page) && <DelegateView />}
+              {['payment-inbox', 'new-payment', 'payment-detail'].includes(route.page) && <DelegateView key={demoSession?.runId ?? 'no-demo-run'} />}
               {['policies', 'policy-detail'].includes(route.page) && <PoliciesView />}
               {['approvals', 'approval-detail'].includes(route.page) && <SignerView />}
               {route.page === 'disclosure-builder' && <DisclosureView />}
@@ -706,6 +746,7 @@ export function App() {
             if (role && role !== demoRole) enterDemo(role);
             goRoute(target);
           }}
+          onRefresh={refresh}
           onClose={() => undefined}
         />
       )}

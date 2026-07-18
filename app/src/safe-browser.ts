@@ -46,6 +46,7 @@ export async function governance2of2(
   const res = await fetch('/api/governance-execute', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ to, data, nonce: nonce.toString(), signer: ownerAAddr, signature: sigA }),
+    signal: AbortSignal.timeout(45_000),
   });
   const executed = await res.json();
   if (!res.ok) throw new Error(executed.error ?? 'governance execution refused');

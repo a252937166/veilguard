@@ -12,6 +12,8 @@ import { DEMO_SCENARIOS, demoMemoHash, scenarioByKey, scenarioByRecipient, type 
 import { loadDemoSession } from '../demo-session';
 import { formatAppRoute, parseAppHash } from '../routes';
 import { PrivacyLens } from '../components/PrivacyLens';
+import { PaymentProgress, PAYMENT_PHASE_INDEX, type PaymentFlow, type PaymentPhase } from '../components/PaymentProgress';
+import { acquireOperationLock, releaseOperationLock } from '../operation-lock';
 
 const REASONS: Record<number, string> = {
   1: 'over the delegated budget',
@@ -19,7 +21,7 @@ const REASONS: Record<number, string> = {
   3: 'would breach the reserve floor',
 };
 
-type Track = { id: string; mission: MissionKey | 'free'; amount: string; tx?: `0x${string}`; at: number; runId?: string };
+type Track = { id?: string; mission: MissionKey | 'free'; amount: string; tx?: `0x${string}`; delegate?: `0x${string}`; at: number; runId?: string };
 const loadTrack = (): Track | null => { try { return JSON.parse(sessionStorage.getItem('vg_track') ?? 'null'); } catch { return null; } };
 const saveTrack = (t: Track | null) => { try { t ? sessionStorage.setItem('vg_track', JSON.stringify(t)) : sessionStorage.removeItem('vg_track'); } catch { /* ignore */ } };
 
@@ -36,7 +38,7 @@ function mmss(sec: number): string {
 }
 
 export function DelegateView() {
-  const { account, mandates, requests, run, busy, refresh, toast, goTab, startDemo } = useApp();
+  const { account, mandates, requests, run, busy, refresh, toast, goTab, startDemo, lastUpdated, loadError } = useApp();
   const [amount, setAmount] = useState('25');
   const [recipient, setRecipient] = useState('');
   const [memo, setMemo] = useState('');
@@ -52,17 +54,20 @@ export function DelegateView() {
   const [selectedScenario, setSelectedScenario] = useState<DemoScenarioKey>('routine');
   const [decisionBusy, setDecisionBusy] = useState<'approve' | 'reject' | null>(null);
   const [decisionError, setDecisionError] = useState<string | null>(null);
+  const decisionLock = useRef(false);
 
-  // Rich progress state: label + started + expected duration + optional tx link.
-  type Flow = { label: string; startedAt: number; expect?: number; tx?: `0x${string}` };
-  const [flow, setFlowState] = useState<Flow | null>(null);
-  const setFlow = (label: string | null, expect?: number, tx?: `0x${string}`) =>
-    setFlowState((f) => label === null ? null : ({
+  const [flow, setFlowState] = useState<PaymentFlow | null>(null);
+  const setFlow = (phase: PaymentPhase, label: string, expect?: number, tx?: `0x${string}`) =>
+    setFlowState((f) => ({
+      phase,
       label,
       startedAt: f && f.label === label ? f.startedAt : Date.now(),
       expect: expect ?? (f && f.label === label ? f.expect : undefined),
       tx: tx ?? f?.tx,
     }));
+  const clearFlow = () => setFlowState(null);
+  const submissionLock = useRef(false);
+  const [submittingScenario, setSubmittingScenario] = useState<MissionKey | 'free' | null>(null);
   const [, forceTick] = useState(0);
   useEffect(() => {
     const need = !!flow || Object.values(cool).some((t) => t > Math.floor(Date.now() / 1000))
@@ -126,22 +131,107 @@ export function DelegateView() {
   // else adopt an untracked in-flight request left over from a previous visit
   useEffect(() => {
     if (trackId != null) return;
-    const t = loadTrack();
-    if (t && requests.some((r) => String(r.id) === t.id)) {
+    const session = loadDemoSession();
+    let t = loadTrack();
+    if (t && session && t.runId !== session.runId) {
+      saveTrack(null);
+      t = null;
+    }
+    if (t?.id && requests.some((r) => String(r.id) === t.id)) {
       setTrackId(BigInt(t.id)); setMissionOf(t.mission); setLastAmount(t.amount); if (t.tx) setLastTx(t.tx);
+      return;
+    }
+    if (t && !t.id) {
+      setMissionOf(t.mission); setLastAmount(t.amount); if (t.tx) setLastTx(t.tx);
+      if (t.tx) setFlow('recovering', 'Recovering the broadcast request from Sepolia…', 30, t.tx);
+    }
+    const boundMission = session && (['routine', 'approval', 'violation'] as const)
+      .find((mission) => {
+        const requestId = session.missions[mission].requestId;
+        return requestId && requests.some((request) => String(request.id) === requestId);
+      });
+    if (boundMission) {
+      const requestId = session!.missions[boundMission].requestId!;
+      setTrackId(BigInt(requestId));
+      setMissionOf(boundMission);
       return;
     }
     if (blockingRequest) { setTrackId(blockingRequest.id); setMissionOf(null); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [blockingRequest?.id, requests.length]);
 
+  // Recover the exact request id from a broadcast transaction when the first
+  // receipt wait timed out. This also covers free play, whose memo is
+  // intentionally not run-bound and therefore cannot use mission reconciliation.
+  useEffect(() => {
+    if (flow?.phase !== 'recovering') return;
+    const initial = loadTrack();
+    if (!initial?.tx || initial.id) return;
+    let stopped = false;
+    let checking = false;
+    const recoverReceipt = async () => {
+      if (stopped || checking) return;
+      const tracked = loadTrack();
+      if (!tracked?.tx || tracked.tx !== initial.tx || tracked.id) return;
+      checking = true;
+      try {
+        const receipt = await publicClient.waitForTransactionReceipt({
+          hash: tracked.tx,
+          pollingInterval: 1_200,
+          timeout: 12_000,
+        });
+        if (stopped) return;
+        if (receipt.status !== 'success') {
+          saveTrack(null);
+          clearFlow();
+          setSubmittingScenario(null);
+          stopped = true;
+          toast(`Transaction ${short(tracked.tx)} reverted before a request was created. It is safe to retry.`, true);
+          return;
+        }
+        const events = parseEventLogs({ abi: moduleAbi as any, logs: receipt.logs, eventName: 'SpendRequested' }) as any[];
+        const event = tracked.delegate
+          ? events.find((candidate) => (candidate.args?.delegate as string)?.toLowerCase() === tracked.delegate!.toLowerCase())
+          : events[0];
+        if (!event?.args?.requestId) {
+          saveTrack(null);
+          clearFlow();
+          setSubmittingScenario(null);
+          stopped = true;
+          toast('The confirmed transaction created no VeilGuard request. It is safe to retry.', true);
+          return;
+        }
+        const id = event.args.requestId as bigint;
+        const runId = tracked.runId ?? activeRunId();
+        saveTrack({ ...tracked, id: String(id), at: Date.now(), runId });
+        if (tracked.mission !== 'free' && tracked.mission !== 'audit') bindMissionRequest(tracked.mission, id, runId);
+        setReasonVal(null);
+        setLastAmount(tracked.amount);
+        setLastTx(tracked.tx);
+        setMissionOf(tracked.mission);
+        setTrackId(id);
+        setFlow('evaluating', `Request #${id} recovered · Nox is evaluating three private rules…`, 30, tracked.tx);
+        stopped = true;
+        refresh();
+      } catch {
+        // Still pending or the RPC is temporarily unavailable. The next
+        // bounded attempt reuses the same hash and never creates a duplicate.
+      } finally {
+        checking = false;
+      }
+    };
+    void recoverReceipt();
+    const interval = setInterval(() => { void recoverReceipt(); }, 15_000);
+    return () => { stopped = true; clearInterval(interval); };
+  }, [flow?.phase, requests.length, trackId, refresh, toast]);
+
   // fast-poll while a request is in flight
   useEffect(() => {
-    if (trackId == null) return;
+    if (!(latest && (latest.state === 1 || latest.state === 3)) && flow?.phase !== 'recovering') return;
     const iv = setInterval(refresh, 3000);
     const stop = setTimeout(() => clearInterval(iv), 60_000);
     return () => { clearInterval(iv); clearTimeout(stop); };
-  }, [trackId, refresh]);
+  }, [latest?.id, latest?.state, flow?.phase, refresh]);
 
   // anti-probing cooldown clocks for both demo identities
   useEffect(() => {
@@ -166,19 +256,34 @@ export function DelegateView() {
   const violationCoolLeft = Math.max(0, cool.violation - nowSec);
   const freeplayCoolLeft = Math.max(0, cool.freeplay - nowSec);
 
-  // mission bookkeeping on outcome transitions
-  const seenTerminal = useRef<string | null>(null);
+  // Mission bookkeeping remains idempotent and uses the persisted run binding;
+  // attribution may arrive one render after the terminal request snapshot.
   useEffect(() => {
     if (!latest || latest.state === 1 || latest.state === 3) return;
-    const key = `${latest.id}:${latest.state}`;
-    if (seenTerminal.current === key) return;
-    seenTerminal.current = key;
     const tracked = loadTrack();
-    const runId = tracked?.runId ?? activeRunId();
-    if (latest.state === 2 && missionOf === 'routine') {
-      setMissions(completeMission('routine', { requestId: latest.id, outcome: 'executed', runId }));
+    const session = loadDemoSession();
+    const persistedMission = session && (['routine', 'approval', 'violation'] as const)
+      .find((mission) => session.missions[mission].requestId === String(latest.id));
+    if (tracked && session && tracked.runId !== session.runId) return;
+    // A newly broadcast request may not have a receipt/id yet while `latest`
+    // still points at the preceding terminal request. Never let that stale
+    // object clear the new request's recovery pointer or progress surface.
+    if (tracked) {
+      const tracksLatest = tracked.id === String(latest.id)
+        || (!tracked.id
+          && !!persistedMission
+          && tracked.mission === persistedMission
+          && (!tracked.runId || tracked.runId === session?.runId));
+      if (!tracksLatest) return;
     }
-    if ((latest.state === 2 || latest.state === 5) && missionOf === 'approval') {
+    const attributedMission = persistedMission ?? missionOf ?? (tracked?.id === String(latest.id) ? tracked.mission : null);
+    const runId = persistedMission ? session!.runId : tracked?.runId ?? session?.runId ?? activeRunId();
+    let completed = false;
+    if (latest.state === 2 && attributedMission === 'routine') {
+      setMissions(completeMission('routine', { requestId: latest.id, outcome: 'executed', runId }));
+      completed = true;
+    }
+    if ((latest.state === 2 || latest.state === 5) && attributedMission === 'approval') {
       setMissions(completeMission('approval', {
         requestId: latest.id,
         outcome: latest.state === 5 ? 'cancelled' : 'executed',
@@ -186,17 +291,35 @@ export function DelegateView() {
         runId,
       }));
       fetchRequestTxs(true).then(setTxs).catch(() => {});
+      completed = session?.missions.approval.decisionConfirmed === true;
     }
-    saveTrack(null);
+    if (attributedMission === 'free' || completed) saveTrack(null);
+    clearFlow();
     setTimeout(() => receiptRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 250);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [latest?.state, latest?.id]);
+  }, [latest?.state, latest?.id, missionOf]);
   useEffect(() => { fetchRequestTxs().then(setTxs).catch(() => {}); }, []);
   useEffect(() => {
-    const on = () => setMissions(loadMissions());
+    const on = () => {
+      setMissions(loadMissions());
+      if (trackId != null) return;
+      const session = loadDemoSession();
+      const mission = session && (['routine', 'approval', 'violation'] as const)
+        .find((key) => {
+          const requestId = session.missions[key].requestId;
+          return requestId && requests.some((request) => String(request.id) === requestId);
+        });
+      if (!mission) return;
+      setMissionOf(mission);
+      setTrackId(BigInt(session!.missions[mission].requestId!));
+    };
     window.addEventListener('vg-missions', on);
-    return () => window.removeEventListener('vg-missions', on);
-  }, []);
+    window.addEventListener('vg-demo-session', on);
+    return () => {
+      window.removeEventListener('vg-missions', on);
+      window.removeEventListener('vg-demo-session', on);
+    };
+  }, [requests, trackId]);
   useEffect(() => {
     const next = DEMO_SCENARIOS.find((scenario) => !missions[scenario.key]);
     if (next) setSelectedScenario(next.key);
@@ -236,13 +359,16 @@ export function DelegateView() {
   };
 
   /** Shared submit pipeline — works for the page identity AND the hidden violation delegate. */
-  const submitCore = (who: `0x${string}`, mandateId: bigint, recipient: `0x${string}`, amt: string, mission: MissionKey | 'free') =>
-    run(`Pay ${amt} cUSDC`, async () => {
+  const submitCore = async (who: `0x${string}`, mandateId: bigint, recipient: `0x${string}`, amt: string, mission: MissionKey | 'free'): Promise<'bound' | 'recovering' | 'failed'> => {
+    let requestBound = false;
+    let recoveryPending = false;
+    await run(`Pay ${amt} cUSDC`, async () => {
       const local = !!demoWalletByAddress(who);
       const runId = activeRunId();
       try {
-        setFlow(local ? 'Encrypting the amount in-browser…' : '① Check your wallet — approve the signature to encrypt your amount', local ? 6 : undefined);
+        setFlow('encrypting', local ? 'Encrypting the amount in-browser…' : '① Check your wallet — approve the signature to encrypt your amount', local ? 6 : undefined);
         const sigHint = !local && setTimeout(() => setFlow(
+          'encrypting',
           '① No signature popup? Click the wallet (🦊) icon in your toolbar — the request is queued there without auto-opening.',
         ), 12_000);
         let enc;
@@ -251,7 +377,7 @@ export function DelegateView() {
           enc = await client.encryptInput(parseUsdc(amt), 'uint256', ADDR.VeilGuardModule);
         } finally { if (sigHint) clearTimeout(sigHint); }
 
-        setFlow(local ? 'Broadcasting the encrypted payment…' : '② Now confirm the transaction in your wallet', local ? 4 : undefined);
+        setFlow('broadcasting', local ? 'Broadcasting the encrypted payment…' : '② Now confirm the transaction in your wallet', local ? 4 : undefined);
         let hash: `0x${string}`;
         try {
           hash = await walletWrite({
@@ -260,44 +386,84 @@ export function DelegateView() {
               local && mission !== 'free' && mission !== 'audit'
                 ? demoMemoHash(runId, mission as DemoScenarioKey, mandateId, who)
                 : keccak256(stringToBytes(memo || 'veilguard'))],
-            onHint: setFlow, injected: !local,
+            onHint: (message) => setFlow('broadcasting', message), injected: !local,
           });
         } catch (e: any) {
           if (e?.code === 4001 || /User rejected|denied/i.test(`${e?.message}`)) throw new Error('you rejected the transaction in the wallet');
           throw new Error(explainRevert(e));
         }
-        setFlow('Sepolia is including your transaction…', 13, hash);
-        const receipt = await publicClient.waitForTransactionReceipt({ hash, pollingInterval: 1_200 });
+        // Persist at broadcast time, not receipt time. A slow RPC can no longer
+        // erase the only recovery pointer after the transaction is already live.
+        saveTrack({ mission, amount: amt, tx: hash, delegate: who, at: Date.now(), runId });
+        setLastAmount(amt); setLastTx(hash); setMissionOf(mission);
+        setFlow('confirming', 'Sepolia is including your transaction…', 13, hash);
+        let receipt;
+        try {
+          receipt = await publicClient.waitForTransactionReceipt({ hash, pollingInterval: 1_200, timeout: 60_000 });
+        } catch {
+          recoveryPending = true;
+          setFlow('recovering', 'Receipt is delayed — recovering the request from chain state…', 30, hash);
+          return;
+        }
+        if (receipt.status !== 'success') {
+          saveTrack(null);
+          throw new Error(`transaction ${short(hash)} reverted before a request was created; it is safe to retry`);
+        }
         // exact request id from OUR receipt's SpendRequested event — immune to
         // concurrent visitors interleaving requests
         const evs = parseEventLogs({ abi: moduleAbi as any, logs: receipt.logs, eventName: 'SpendRequested' }) as any[];
         const ev = evs.find((e) => (e.args?.delegate as string)?.toLowerCase() === who.toLowerCase()) ?? evs[0];
-        if (!ev) throw new Error('transaction confirmed but no SpendRequested event found');
+        if (!ev) {
+          saveTrack(null);
+          throw new Error('transaction confirmed without a SpendRequested event; no request was created and it is safe to retry');
+        }
         const id = ev.args.requestId as bigint;
-        saveTrack({ id: String(id), mission, amount: amt, tx: hash, at: Date.now(), runId });
+        saveTrack({ id: String(id), mission, amount: amt, tx: hash, delegate: who, at: Date.now(), runId });
         if (mission !== 'free' && mission !== 'audit') bindMissionRequest(mission, id, runId);
         setReasonVal(null); setLastAmount(amt); setLastTx(hash); setMissionOf(mission); setTrackId(id);
-      } finally { setFlow(null); }
+        requestBound = true;
+        setFlow('evaluating', `Request #${id} submitted · Nox is evaluating three private rules…`, 30, hash);
+      } finally {
+        if (!requestBound && !recoveryPending) clearFlow();
+      }
     });
+    return requestBound ? 'bound' : recoveryPending ? 'recovering' : 'failed';
+  };
 
-  const finalizingRef = useRef<bigint | null>(null);
+  const finalizingRef = useRef<{ id: bigint; startedAt: number } | null>(null);
+  const finalizeRetryAt = useRef(0);
   useEffect(() => {
-    if (!latest || latest.state !== 1 || !latest.decisionReady) return;
-    if (finalizingRef.current === latest.id || busy) return;
-    finalizingRef.current = latest.id;
+    if (!latest || latest.state !== 1 || !latest.decisionReady) {
+      if (latest && finalizingRef.current?.id === latest.id) finalizingRef.current = null;
+      return;
+    }
+    const activeFinalize = finalizingRef.current;
+    if ((activeFinalize?.id === latest.id && Date.now() - activeFinalize.startedAt < 60_000)
+      || busy || Date.now() < finalizeRetryAt.current) return;
     run('Publishing the result', async () => {
-      setFlow('The decision is ready — the keeper is publishing the TEE proof on-chain…', 22);
+      // Set the lock only after App.run accepted this operation. If another
+      // action owned the global lock in the same render frame, the next chain
+      // poll can still retry instead of leaving this request stuck forever.
+      finalizingRef.current = { id: latest.id, startedAt: Date.now() };
+      setFlow('finalizing', 'The decision is ready — the keeper is publishing the TEE proof on-chain…', 22, lastTx ?? undefined);
       try {
         const res = await fetch(FINALIZE_API, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ requestId: Number(latest.id) }),
+          signal: AbortSignal.timeout(20_000),
         });
         if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d?.error ?? 'finalize failed'); }
         for (let k = 0; k < 6; k++) { await new Promise((r) => setTimeout(r, 1500)); refresh(); }
-      } finally { setFlow(null); }
+      } catch (error) {
+        finalizingRef.current = null;
+        finalizeRetryAt.current = Date.now() + 5_000;
+        throw error;
+      } finally { clearFlow(); }
     });
+    // `requests` retries a transient failure on the next bounded chain poll;
+    // `busy` ensures a decision that became ready during submission is not lost.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [latest?.id, latest?.decisionReady]);
+  }, [latest?.id, latest?.state, latest?.decisionReady, busy, requests]);
 
   // ---------------- scenario engine ----------------
   const unlocked: Record<MissionKey, boolean> = {
@@ -321,6 +487,7 @@ export function DelegateView() {
       const res = await fetch('/api/demo-ready', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ delegate }),
+        signal: AbortSignal.timeout(8_000),
       });
       const d = await res.json();
       if (d?.ready === false) {
@@ -328,33 +495,61 @@ export function DelegateView() {
         return false;
       }
       return true;
-    } catch { return true; /* probe unreachable → let the tx itself decide */ }
+    } catch {
+      toast('Demo readiness check timed out. No transaction was sent; retry when the connection is stable.', true);
+      return false;
+    }
+  };
+
+  const beginSubmission = (mission: MissionKey | 'free', label: string) => {
+    if (busy || !acquireOperationLock(submissionLock)) return false;
+    setSubmittingScenario(mission);
+    setFlow('preflight', label, 4);
+    return true;
+  };
+
+  const finishSubmission = (result: 'bound' | 'recovering' | 'failed') => {
+    releaseOperationLock(submissionLock);
+    setSubmittingScenario(null);
+    if (result === 'failed') clearFlow();
   };
 
   const runScenario = async (key: MissionKey) => {
-    if (!myMandate || busy) return;
+    if (!myMandate || busy || submissionLock.current) return;
     if (blockingRequest) { toast('A payment is still in flight — it clears in under a minute.', true); return; }
     if (key === 'routine' || key === 'approval') {
       const scenario = scenarioByKey(key);
       const amt = scenario.amount;
       if (!isDemo) { loadScenario(amt, scenario.vendor, scenario.recipient); return; }
-      if (!(await ensureReady(account!))) return;
-      if (!myMandate.recipients.some((r) => r.toLowerCase() === scenario.recipient.toLowerCase())) {
-        toast('The demo treasury is refreshing its recipient policy. Try again in about two minutes.', true);
-        return;
+      if (!beginSubmission(key, `Checking ${scenario.vendor} payment readiness…`)) return;
+      let result: 'bound' | 'recovering' | 'failed' = 'failed';
+      try {
+        if (!(await ensureReady(account!))) return;
+        if (!myMandate.recipients.some((r) => r.toLowerCase() === scenario.recipient.toLowerCase())) {
+          toast('The demo treasury is refreshing its recipient policy. Try again in about two minutes.', true);
+          return;
+        }
+        result = await submitCore(account!, myMandate.id, scenario.recipient, amt, key);
+      } finally {
+        finishSubmission(result);
       }
-      submitCore(account!, myMandate.id, scenario.recipient, amt, key);
       return;
     }
     // violation: use the dedicated delegate so the main one never enters cooldown
     if (isDemo && violationMandate && violationCoolLeft <= 0) {
-      if (!(await ensureReady(VIOLATION_DELEGATE.address))) return;
       const scenario = scenarioByKey('violation');
-      if (!violationMandate.recipients.some((r) => r.toLowerCase() === scenario.recipient.toLowerCase())) {
-        toast('The isolated demo mandate is refreshing its recipient policy. Try again shortly.', true);
-        return;
+      if (!beginSubmission('violation', `Checking ${scenario.vendor} payment readiness…`)) return;
+      let result: 'bound' | 'recovering' | 'failed' = 'failed';
+      try {
+        if (!(await ensureReady(VIOLATION_DELEGATE.address))) return;
+        if (!violationMandate.recipients.some((r) => r.toLowerCase() === scenario.recipient.toLowerCase())) {
+          toast('The isolated demo mandate is refreshing its recipient policy. Try again shortly.', true);
+          return;
+        }
+        result = await submitCore(VIOLATION_DELEGATE.address, violationMandate.id, scenario.recipient, scenario.amount, 'violation');
+      } finally {
+        finishSubmission(result);
       }
-      submitCore(VIOLATION_DELEGATE.address, violationMandate.id, scenario.recipient, scenario.amount, 'violation');
       return;
     }
     if (isDemo && violationMandate) {
@@ -373,6 +568,27 @@ export function DelegateView() {
     // own wallet (or setup missing): run it on the caller's own mandate
     const scenario = scenarioByKey('violation');
     loadScenario(scenario.amount, scenario.vendor, scenario.recipient);
+  };
+
+  const runFreePlay = async () => {
+    if (!amount || submissionLock.current || busy) return;
+    if (isDemo ? (freeplayBlocking || freeplayCoolLeft > 0) : (blockingRequest || mainCoolLeft > 0)) return;
+    if (!beginSubmission('free', 'Checking confidential payment readiness…')) return;
+    let result: 'bound' | 'recovering' | 'failed' = 'failed';
+    try {
+      if (!isDemo) {
+        result = await submitCore(account!, myMandate!.id, (recipient || vendorOf(myMandate)) as `0x${string}`, amount, 'free');
+        return;
+      }
+      if (!freeplayMandate) {
+        toast('Free-play treasury is being provisioned — try again in ~2 min.', true);
+        return;
+      }
+      if (!(await ensureReady(FREEPLAY_DELEGATE.address))) return;
+      result = await submitCore(FREEPLAY_DELEGATE.address, freeplayMandate.id, vendorOf(freeplayMandate), amount, 'free');
+    } finally {
+      finishSubmission(result);
+    }
   };
 
   const decryptReason = async () => {
@@ -404,7 +620,7 @@ export function DelegateView() {
   };
 
   const decideEscalation = async (action: 'approve' | 'reject') => {
-    if (!latest || latest.state !== 3) return;
+    if (!latest || latest.state !== 3 || !acquireOperationLock(decisionLock)) return;
     setDecisionBusy(action);
     setDecisionError(null);
     try {
@@ -416,6 +632,7 @@ export function DelegateView() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ runId, requestId: String(latest.id), action }),
+          signal: AbortSignal.timeout(15_000),
         });
         data = await res.json().catch(() => ({}));
         if (res.status === 202) {
@@ -450,12 +667,21 @@ export function DelegateView() {
       toast(`Decision not completed: ${message}. Your request remains recoverable from this page.`, true);
     } finally {
       setDecisionBusy(null);
+      releaseOperationLock(decisionLock);
     }
   };
 
   if (!account)
     return <NoRole demo="delegate" title="Act as a Delegate"
       body="A delegate submits encrypted spend requests and watches the TEE decide. Connect your own wallet and get it provisioned as a delegate (below), or jump into the shared demo delegate to try the flow instantly." />;
+  if (!myMandate && !lastUpdated)
+    return (
+      <section className="card workspace-loading" role="status" aria-live="polite">
+        <h2>Payment Inbox</h2>
+        <p className="muted">{loadError ? 'Sepolia state is temporarily unavailable. No provisioning action is shown until the current mandate registry is known.' : 'Loading the current mandate and run-bound request evidence from Sepolia…'}</p>
+        {loadError ? <button type="button" className="btn" onClick={refresh}>Retry chain state</button> : <div className="operation-track loading-track" aria-hidden="true"><span className="active" /><span /><span /><span /><span /></div>}
+      </section>
+    );
   if (!myMandate)
     return <ProvisionMe account={account} />;
 
@@ -463,7 +689,7 @@ export function DelegateView() {
   const latestStory = scenarioByRecipient(latest?.recipient) ?? (missionOf && missionOf !== 'free' && missionOf !== 'audit' ? scenarioByKey(missionOf as DemoScenarioKey) : undefined);
   const vendor = (latest?.recipient ?? selectedStory.recipient) as `0x${string}`;
   const vName = latestStory?.vendor ?? vendorName(vendor) ?? short(vendor);
-  const stage = !latest ? (busy ? 1 : 0) : latest.state === 1 ? 2 : 3;
+  const stage = !latest ? (flow ? (PAYMENT_PHASE_INDEX[flow.phase] >= 3 ? 2 : 1) : busy ? 1 : 0) : latest.state === 1 ? 2 : 3;
   const inFlight = stage === 1 || stage === 2;
   const terminal = latest && latest.state !== 1 && latest.state !== 3;
   const escalated = latest?.state === 3;
@@ -474,6 +700,10 @@ export function DelegateView() {
     && sessionSnapshot.missions.approval.decisionConfirmed === true
     ? sessionSnapshot.missions.approval.decision
     : undefined;
+  const selectedOperationActive = !!flow
+    && (submittingScenario === selectedStory.key || missionOf === selectedStory.key);
+  const freePlayOperationActive = !!flow
+    && (submittingScenario === 'free' || missionOf === 'free');
 
   const primaryNext = () => {
     if (!missions.routine) return { label: '▶ Run: Routine payment', act: () => runScenario('routine') };
@@ -489,26 +719,6 @@ export function DelegateView() {
   return (
     <div className="paygrid">
       <div className="paymain">
-        {flow && (() => {
-          const elapsed = Math.floor((Date.now() - flow.startedAt) / 1000);
-          const slow = flow.expect ? elapsed > flow.expect * 2 : false;
-          return (
-            <div className="flowbar rich" role="status" aria-live="polite">
-              <div className="fb-row">
-                <span className="spin" /> <b>{flow.label}</b>
-                <span className="fb-elapsed mono">{elapsed}s elapsed{flow.expect ? ` · usually ${flow.expect}–${flow.expect * 2}s` : ''}</span>
-                {flow.tx && <a className="alink mono" href={scanTx(flow.tx)} target="_blank" rel="noopener">view tx ↗</a>}
-              </div>
-              <div className="progress-status" aria-label="Payment processing stages">
-                <span className="done">Encrypted</span><span className="active">TEE evaluation</span><span>On-chain finalization</span>
-              </div>
-              {!isDemo && flow.label.startsWith('①') && <div className="fb-note">Your wallet should be asking you to sign a message — approve it to continue.</div>}
-              {!isDemo && flow.label.startsWith('②') && <div className="fb-note">Your wallet should be asking you to confirm a transaction.</div>}
-              {slow && <div className="fb-note">Taking longer than usual. You can leave this page and resume from Payment Inbox; the request id and transaction are saved.</div>}
-            </div>
-          );
-        })()}
-
         {/* 3-step strip — only while something is actually processing */}
         {inFlight && (
           <div className="journey three">
@@ -687,13 +897,21 @@ export function DelegateView() {
               </div>
             </div>
 
+            {selectedOperationActive && flow && <PaymentProgress flow={flow} isDemo={isDemo} />}
+
             <div className="detail-actions">
               {!unlocked[selectedStory.key] ? (
                 <div className="inline-alert">Complete the previous invoice before submitting this one.</div>
               ) : (
-                <button className="btn primary" disabled={!!busy || (!!blockingRequest && selectedStory.key !== 'violation')}
-                  onClick={() => runScenario(selectedStory.key)}>
-                  {missions[selectedStory.key] ? 'Run this invoice again' : 'Submit confidential payment'}
+                <button
+                  className={`btn primary ${selectedOperationActive ? 'is-busy' : ''}`}
+                  disabled={!!busy || submissionLock.current || !!flow || (!!blockingRequest && selectedStory.key !== 'violation')}
+                  aria-busy={selectedOperationActive}
+                  onClick={() => void runScenario(selectedStory.key)}
+                >
+                  {selectedOperationActive
+                    ? <><span className="spin" aria-hidden="true" /> {flow?.phase === 'preflight' ? 'Checking readiness…' : flow?.phase === 'encrypting' ? 'Encrypting payment…' : flow?.phase === 'recovering' ? 'Recovering request…' : 'Payment in progress…'}</>
+                    : missions[selectedStory.key] ? 'Run this invoice again' : 'Submit confidential payment'}
                 </button>
               )}
               <span className="muted">Review first, then submit. The policy never reveals its thresholds.</span>
@@ -735,16 +953,15 @@ export function DelegateView() {
           <input ref={amountRef} value={amount} onChange={(e) => setAmount(e.target.value)} type="number" min="0" step="0.01" />
           <label>Memo (only its hash goes on-chain)</label>
           <input value={memo} onChange={(e) => setMemo(e.target.value)} placeholder="invoice #… (optional)" />
+          {freePlayOperationActive && flow && <PaymentProgress flow={flow} isDemo={isDemo} />}
           <div style={{ marginTop: 14 }}>
-            <button className="btn primary"
-              disabled={!!busy || !amount || (isDemo ? (!!freeplayBlocking || freeplayCoolLeft > 0) : (!!blockingRequest || mainCoolLeft > 0))}
-              onClick={async () => {
-                if (!isDemo) { submitCore(account, myMandate.id, (recipient || vendorOf(myMandate)) as `0x${string}`, amount, 'free'); return; }
-                if (!freeplayMandate) { toast('Free-play treasury is being provisioned — try again in ~2 min.', true); return; }
-                if (!(await ensureReady(FREEPLAY_DELEGATE.address))) return;
-                submitCore(FREEPLAY_DELEGATE.address, freeplayMandate.id, vendorOf(freeplayMandate), amount, 'free');
-              }}>
-              🔒 Submit confidential payment
+            <button
+              className={`btn primary ${freePlayOperationActive ? 'is-busy' : ''}`}
+              disabled={!!busy || submissionLock.current || !!flow || !amount || (isDemo ? (!!freeplayBlocking || freeplayCoolLeft > 0) : (!!blockingRequest || mainCoolLeft > 0))}
+              aria-busy={freePlayOperationActive}
+              onClick={() => void runFreePlay()}
+            >
+              {freePlayOperationActive ? <><span className="spin" aria-hidden="true" /> Payment in progress…</> : 'Submit confidential payment'}
             </button>
             {(isDemo ? freeplayBlocking : blockingRequest) && <p className="muted" style={{ fontSize: 12, marginTop: 7 }}>A payment is in flight — it clears automatically in under a minute.</p>}
           </div>
@@ -864,6 +1081,7 @@ function ProvisionMe({ account }: { account: `0x${string}` }) {
       const res = await fetch(PROVISION_API, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ address: account }),
+        signal: AbortSignal.timeout(120_000),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'provisioning failed');
