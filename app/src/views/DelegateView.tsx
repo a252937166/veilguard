@@ -133,6 +133,28 @@ export function DelegateView() {
     return () => window.removeEventListener('vg-missions', on);
   }, []);
 
+  // flash table rows whose outcome just changed (skip the initial load)
+  const prevStates = useRef<Map<string, number>>(new Map());
+  const primed = useRef(false);
+  const [flashIds, setFlashIds] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const changed = new Set<string>();
+    for (const r of requests) {
+      const k = String(r.id);
+      const prev = prevStates.current.get(k);
+      if (prev === undefined) { if (primed.current) changed.add(k); }
+      else if (prev !== r.state) changed.add(k);
+      prevStates.current.set(k, r.state);
+    }
+    primed.current = true;
+    if (!changed.size) return;
+    setFlashIds((old) => new Set([...old, ...changed]));
+    const t = setTimeout(() => setFlashIds((old) => {
+      const n = new Set(old); changed.forEach((c) => n.delete(c)); return n;
+    }), 2600);
+    return () => clearTimeout(t);
+  }, [requests]);
+
   const explainRevert = (e: any): string => {
     const s = `${e?.metaMessages?.join(' ') ?? ''} ${e?.shortMessage ?? ''} ${e?.message ?? ''}`;
     if (/PendingRequestExists/.test(s)) return 'a previous request is still in flight — it resolves automatically in under a minute';
@@ -454,7 +476,7 @@ export function DelegateView() {
             <thead><tr><th>ID</th><th>To</th><th>Outcome</th><th>Reason</th></tr></thead>
             <tbody>
               {myRequests.slice(0, 10).map((r) => (
-                <tr key={String(r.id)}>
+                <tr key={String(r.id)} className={flashIds.has(String(r.id)) ? 'row-flash' : ''}>
                   <td className="mono">#{String(r.id)}</td>
                   <td>{vendorName(r.recipient) ?? short(r.recipient)}</td>
                   <td><RequestPill state={r.state} decisionReady={r.decisionReady} /></td>

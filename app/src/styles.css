@@ -519,3 +519,19 @@ textarea:focus{outline:none;border-color:var(--veil)}
 .wavefield,.page-scrim{mask-image:linear-gradient(to bottom, black 0, black 340px, rgba(0,0,0,.25) 720px, rgba(0,0,0,.12) 100%);-webkit-mask-image:linear-gradient(to bottom, black 0, black 340px, rgba(0,0,0,.25) 720px, rgba(0,0,0,.12) 100%)}
 .card,.tile,.donutcard{background:rgba(15,20,30,.92);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
 .feat,.lcard{background:rgba(15,20,30,.5);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+
+/* ---------- state-change emphasis in tables ---------- */
+@keyframes rowflash{0%{background:rgba(124,92,255,.24)}70%{background:rgba(124,92,255,.07)}100%{background:transparent}}
+.row-flash td{animation:rowflash 2.4s ease-out}
+@keyframes pillpop{0%{transform:scale(.55);box-shadow:0 0 0 10px rgba(124,92,255,.28)}55%{transform:scale(1.18)}100%{transform:scale(1);box-shadow:0 0 0 0 rgba(124,92,255,0)}}
+.row-flash .pill{display:inline-block;animation:pillpop .6s cubic-bezier(.2,1.5,.4,1)}
+
+/* ---------- REAL translucency pass (user: boxes must read as glass) ---------- */
+.wavefield,.page-scrim{mask-image:linear-gradient(to bottom, black 0, black 340px, rgba(0,0,0,.55) 720px, rgba(0,0,0,.35) 100%);-webkit-mask-image:linear-gradient(to bottom, black 0, black 340px, rgba(0,0,0,.55) 720px, rgba(0,0,0,.35) 100%)}
+.card,.tile,.donutcard{background:rgba(15,20,30,.58);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+.receipt{background:rgba(14,19,29,.72);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+.scen-card{background:rgba(14,19,32,.45)}
+.vendor-card{background:rgba(14,19,32,.45)}
+.notice{background:rgba(14,19,32,.5)}
+.mission-panel .card{background:rgba(15,20,30,.55)}
+.feat,.lcard{background:rgba(15,20,30,.4)}

@@ -2,7 +2,7 @@
 export function FlowDiagram() {
   const P = '#7c5cff', T = '#4dd6c1', LINE = '#2c3850', TXT = '#e8edf6', MUT = '#8b96ab';
   const OK = '#3ecf8e', WARN = '#f5b83d', BAD = '#ff6b6b';
-  const box = { fill: '#111621', stroke: LINE, rx: 12 } as const;
+  const box = { fill: 'rgba(17,22,33,.5)', stroke: LINE, rx: 12 } as const;
 
   return (
     <div className="flowsvg">
@@ -25,7 +25,7 @@ export function FlowDiagram() {
         <text x="130" y="50" textAnchor="middle" fill={TXT} fontSize="15" fontWeight="700">👔 Finance Admin</text>
         <text x="130" y="72" textAnchor="middle" fill={MUT} fontSize="11">proposes · can only tighten</text>
 
-        <rect x="420" y="24" width="200" height="64" fill="#111621" stroke={P} strokeWidth="1.6" rx="12" />
+        <rect x="420" y="24" width="200" height="64" fill="rgba(17,22,33,.5)" stroke={P} strokeWidth="1.6" rx="12" />
         <text x="520" y="50" textAnchor="middle" fill={TXT} fontSize="15" fontWeight="700">🛡 VeilGuardModule</text>
         <text x="520" y="72" textAnchor="middle" fill={MUT} fontSize="11">Safe Module · holds escrow</text>
 
@@ -63,7 +63,7 @@ export function FlowDiagram() {
           ['decision', 'nested select → 1·2·3'],
         ].map(([label, code], i) => (
           <g key={label}>
-            <rect x="362" y={236 + i * 46} width="316" height="36" fill="#0e1320" stroke={LINE} rx="8" />
+            <rect x="362" y={236 + i * 46} width="316" height="36" fill="rgba(14,19,32,.55)" stroke={LINE} rx="8" />
             <text x="376" y={259 + i * 46} fill={TXT} fontSize="12.5">{label}</text>
             <text x="664" y={259 + i * 46} textAnchor="end" fill={T} fontSize="10.5" fontFamily="monospace">{code}</text>
           </g>
@@ -100,7 +100,7 @@ export function FlowDiagram() {
         ].map(({ x, w, c, t, s }) => (
           <g key={t}>
             <line x1={x} y1="522" x2={x} y2="540" stroke={MUT} strokeWidth="1.2" markerEnd="url(#arr)" />
-            <rect x={x - w / 2} y="544" width={w} height="58" fill="#111621" stroke={c} strokeWidth="1.5" rx="12" />
+            <rect x={x - w / 2} y="544" width={w} height="58" fill="rgba(17,22,33,.5)" stroke={c} strokeWidth="1.5" rx="12" />
             <text x={x} y="568" textAnchor="middle" fill={c} fontSize="13.5" fontWeight="800" fontFamily="monospace">{t}</text>
             <text x={x} y="588" textAnchor="middle" fill={MUT} fontSize="10.8">{s}</text>
           </g>
