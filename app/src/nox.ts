@@ -9,6 +9,7 @@ import {
 import { sepolia } from 'viem/chains';
 import { createViemHandleClient, type HandleClient } from '@iexec-nox/handle';
 import { GATEWAY, RPC_URL } from './config';
+import { demoWalletByAddress } from './demo';
 
 export const publicClient: PublicClient = createPublicClient({
   chain: sepolia,
@@ -16,6 +17,10 @@ export const publicClient: PublicClient = createPublicClient({
 }) as PublicClient;
 
 export function makeWalletClient(account: `0x${string}`): WalletClient {
+  // Demo-mode accounts sign locally (no wallet popups); everyone else goes
+  // through the injected EIP-1193 provider.
+  const demo = demoWalletByAddress(account);
+  if (demo) return demo;
   return createWalletClient({
     account,
     chain: sepolia,

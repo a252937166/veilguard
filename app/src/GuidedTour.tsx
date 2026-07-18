@@ -46,9 +46,9 @@ export const STEPS: Step[] = [
   },
   {
     title: 'Your turn',
-    tab: 'Get Funds',
-    body: 'Want to drive it yourself? Grab a little Sepolia ETH for gas from the faucets, claim demo TestUSDC in one click, then act as a delegate and submit your own request. Watch the TEE decide in real time.',
-    hint: 'The demo role accounts are listed in the repo if you want to play every part.',
+    tab: 'Delegate',
+    body: 'Now drive it yourself: hit "⚡ Try a role" in the top bar and act as the Delegate — a shared, gas-sponsored demo account. Submit an encrypted amount and watch the TEE decide in real time. Small amounts execute, big ones escalate, oversized ones get blocked. The delegate key is public on purpose: the policy, not key custody, is what contains you.',
+    hint: 'No wallet needed. You can also switch to the Auditor role to decrypt the disclosure snapshots.',
   },
 ];
 

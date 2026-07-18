@@ -1,6 +1,7 @@
 import { ADDR, scan, short } from '../config';
+import { FlowDiagram } from '../FlowDiagram';
 
-export function Landing({ onLaunch }: { onLaunch: () => void }) {
+export function Landing({ onLaunch, onTry }: { onLaunch: () => void; onTry: () => void }) {
   return (
     <div className="landing">
       <section className="lhero">
@@ -12,7 +13,8 @@ export function Landing({ onLaunch }: { onLaunch: () => void }) {
           ever learns <b>execute&nbsp;/&nbsp;escalate&nbsp;/&nbsp;blocked</b>, never the numbers.
         </p>
         <div className="lcta">
-          <button className="btn primary big" onClick={onLaunch}>▶ Launch the live demo</button>
+          <button className="btn primary big" onClick={onLaunch}>▶ Guided live demo</button>
+          <button className="btn big trybtn" onClick={onTry}>⚡ Try a role — no wallet needed</button>
           <a className="btn big ghost" href="#how">How it works</a>
         </div>
         <div className="lstrip">
@@ -67,16 +69,8 @@ export function Landing({ onLaunch }: { onLaunch: () => void }) {
 
       <section className="lsec" id="how">
         <h2>How it works</h2>
-        <pre className="lflow">{`Finance Admin ──proposeMandate(encrypted limits)──▶ VeilGuardModule ◀──activate── Safe multisig
-
-Delegate ──requestSpend(encrypted amount)──▶ evaluated ON CIPHERTEXT in the Nox TEE
-   ├─ budget check ── safeSub          │ against the Safe's REAL confidential balance
-   ├─ reserve check ─ safeSub + ge     │ (the Safe lends the module transient access)
-   ├─ auto-limit ──── le               │
-   └─ decision = nested select ──▶ funds ATOMICALLY RESERVED (encrypted zero when blocked)
-
-anyone ──finalize(decryptionProof)──▶ proof verified on-chain ──▶ execute / escalate / block
-Auditor ◀── scoped IMMUTABLE snapshot handles — never live state, never future versions`}</pre>
+        <p className="llead">One confidential loop, four roles. The policy is proposed encrypted, evaluated on ciphertext inside the TEE against the Safe's real balance, and enforced through proof-gated on-chain execution.</p>
+        <FlowDiagram />
       </section>
 
       <section className="lsec">

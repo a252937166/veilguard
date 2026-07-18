@@ -144,3 +144,19 @@ footer{margin:36px 0 44px;padding-top:18px;border-top:1px solid var(--line);colo
 .enc{font:600 12px var(--mono);color:#7d88a0;background:rgba(139,150,171,.08);border:1px dashed #333f57;border-radius:6px;padding:2px 8px;white-space:nowrap}
 .alink{color:#a7b2c8}
 .alink:hover{color:var(--veil2)}
+
+/* ---------- flow diagram ---------- */
+.flowsvg{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:18px 10px}
+.flowsvg svg{width:100%;height:auto;display:block}
+
+/* ---------- demo mode ---------- */
+.trybtn{border-color:rgba(124,92,255,.5);background:rgba(124,92,255,.1);color:#b6a8ff}
+.demobar{display:flex;align-items:center;justify-content:space-between;gap:12px;background:linear-gradient(90deg,rgba(124,92,255,.14),rgba(77,214,193,.08));border:1px solid #3a3f6e;border-radius:11px;padding:11px 15px;font-size:13.5px;margin-bottom:14px;flex-wrap:wrap}
+.modal-back{position:fixed;inset:0;background:rgba(4,6,10,.72);display:grid;place-items:center;z-index:100;padding:20px}
+.modal{width:min(480px,94vw);background:#141b28;border:1px solid #34406a;border-radius:16px;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.modal h3{font-size:18px;margin-bottom:8px}
+.rolecard{display:flex;gap:14px;align-items:flex-start;width:100%;text-align:left;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:10px;cursor:pointer;color:var(--text)}
+.rolecard:hover{border-color:var(--veil);background:rgba(124,92,255,.07)}
+.rolecard-icon{font-size:24px}
+.rolecard b{display:block;font-size:14.5px;margin-bottom:3px}
+.rolecard small{display:block;color:var(--muted);font-size:12.5px;line-height:1.5}

@@ -10,6 +10,7 @@ import { FaucetView } from './views/FaucetView';
 import { Landing } from './views/Landing';
 import { GuidedTour, useTour, type TabName } from './GuidedTour';
 import { WalletMenu } from './WalletMenu';
+import { DEMO_ROLES, demoAddress, type DemoRole } from './demo';
 
 export type Mandate = {
   id: bigint; delegate: `0x${string}`; validFrom: bigint; validUntil: bigint;
@@ -47,7 +48,21 @@ export function App() {
   const [account, setAccount] = useState<`0x${string}`>();
   const [chainId, setChainId] = useState<number>();
   const [tab, setTab] = useState<(typeof TABS)[number]>('Dashboard');
+  const [demoRole, setDemoRole] = useState<DemoRole | null>(null);
+  const [tryOpen, setTryOpen] = useState(false);
   const tour = useTour();
+
+  const enterDemo = useCallback((role: DemoRole) => {
+    setDemoRole(role);
+    setAccount(demoAddress(role));
+    setTryOpen(false);
+    setTab(role === 'delegate' ? 'Delegate' : 'Auditor');
+  }, []);
+
+  const exitDemo = useCallback(() => {
+    setDemoRole(null);
+    setAccount(undefined);
+  }, []);
 
   const launch = useCallback((withTour: boolean) => {
     window.location.hash = '#app';
@@ -87,11 +102,12 @@ export function App() {
   // wallet
   const connect = useCallback(async () => {
     const eth = (window as any).ethereum;
-    if (!eth) { toast('No EIP-1193 wallet found — install MetaMask.', true); return; }
+    if (!eth) { setTryOpen(true); return; } // no wallet → offer demo mode
+    setDemoRole(null);
     const [acct] = await eth.request({ method: 'eth_requestAccounts' });
     setAccount(acct);
     setChainId(Number(await eth.request({ method: 'eth_chainId' })));
-  }, [toast]);
+  }, []);
 
   const switchChain = useCallback(async () => {
     const eth = (window as any).ethereum;
@@ -135,7 +151,10 @@ export function App() {
     if (!eth) return;
     eth.request({ method: 'eth_accounts' }).then((a: string[]) => a[0] && setAccount(a[0] as `0x${string}`));
     eth.request({ method: 'eth_chainId' }).then((c: string) => setChainId(Number(c)));
-    const onAcct = (a: string[]) => setAccount(a[0] as `0x${string}` | undefined);
+    const onAcct = (a: string[]) => {
+      // don't let MetaMask events clobber an active demo session
+      setDemoRole((dr) => { if (!dr) setAccount(a[0] as `0x${string}` | undefined); return dr; });
+    };
     const onChain = (c: string) => setChainId(Number(c));
     eth.on?.('accountsChanged', onAcct);
     eth.on?.('chainChanged', onChain);
@@ -187,7 +206,9 @@ export function App() {
   const isOwner = owners.some((o) => o.toLowerCase() === lc);
   const isDelegate = mandates.some((m) => m.delegate.toLowerCase() === lc);
   const isAuditor = lc === ROLES.auditor.toLowerCase();
-  const chainOk = chainId === CHAIN_ID;
+  // demo accounts sign locally on Sepolia — the injected wallet's chain is irrelevant
+  const chainOk = demoRole ? true : chainId === CHAIN_ID;
+  const noRole = !!account && !isAdmin && !isOwner && !isDelegate && !isAuditor;
 
   const roleChips = useMemo(() => {
     const roles: string[] = [];
@@ -200,6 +221,34 @@ export function App() {
 
   const ctx: Ctx = { account, chainOk, owners, paused, mandates, requests, refresh, toast, run, busy };
 
+  const tryModal = tryOpen && (
+    <div className="modal-back" onClick={() => setTryOpen(false)}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h3>⚡ Try VeilGuard instantly</h3>
+        <p className="muted" style={{ fontSize: 13.5, marginBottom: 14 }}>
+          Pick a demo role — a shared, gas-sponsored testnet account with that role's on-chain
+          permissions. No wallet, no setup. (The powerful roles — finance admin and Safe signer —
+          are deliberately not public.)
+        </p>
+        {(Object.keys(DEMO_ROLES) as DemoRole[]).map((r) => (
+          <button key={r} className="rolecard" onClick={() => { if (stage === 'landing') launch(false); enterDemo(r); }}>
+            <span className="rolecard-icon">{DEMO_ROLES[r].icon}</span>
+            <span>
+              <b>Act as {DEMO_ROLES[r].label}</b>
+              <small>{DEMO_ROLES[r].blurb}</small>
+            </span>
+          </button>
+        ))}
+        <div className="row" style={{ justifyContent: 'space-between', marginTop: 14 }}>
+          <span className="muted" style={{ fontSize: 12.5 }}>Have your own wallet?</span>
+          <button className="btn small" onClick={() => { setTryOpen(false); if (stage === 'landing') launch(false); connect(); }}>
+            Connect MetaMask instead
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   if (stage === 'landing') {
     return (
       <AppCtx.Provider value={ctx}>
@@ -210,16 +259,18 @@ export function App() {
               <div className="tagline">Confidential spending policies for Safe treasuries · Ethereum Sepolia · powered by iExec Nox</div>
             </div>
             <div className="row">
+              <button className="btn ghost" onClick={() => setTryOpen(true)}>⚡ Try a role</button>
               <button className="btn ghost" onClick={() => launch(false)}>Open app</button>
               <button className="btn primary" onClick={() => launch(true)}>▶ Guided demo</button>
             </div>
           </div>
-          <Landing onLaunch={() => launch(true)} />
+          <Landing onLaunch={() => launch(true)} onTry={() => setTryOpen(true)} />
           <footer>
             <div>VEILGUARD — confidential treasury controls on <a href="https://safe.global" target="_blank" rel="noopener">Safe</a> · powered by <a href="https://docs.noxprotocol.io" target="_blank" rel="noopener">iExec Nox</a></div>
             <div>Ethereum Sepolia · testnet prototype — not audited</div>
           </footer>
         </div>
+        {tryModal}
       </AppCtx.Provider>
     );
   }
@@ -236,15 +287,16 @@ export function App() {
           </div>
           <div className="row">
             {paused && <span className="pill bad">PAUSED</span>}
+            {!demoRole && <button className="btn small trybtn" onClick={() => setTryOpen(true)}>⚡ Try a role</button>}
             <button className="btn small faucetbtn" onClick={() => setTab('Get Funds')}>💧 Get test funds</button>
             <WalletMenu
               account={account}
-              roleChips={roleChips}
+              roleChips={demoRole ? [`DEMO · ${DEMO_ROLES[demoRole].label.toUpperCase()}`] : roleChips}
               chainOk={chainOk}
               onConnect={connect}
               onSwitchChain={switchChain}
-              onSwitchAccount={switchAccount}
-              onDisconnect={disconnect}
+              onSwitchAccount={demoRole ? () => setTryOpen(true) : switchAccount}
+              onDisconnect={demoRole ? exitDemo : disconnect}
             />
           </div>
         </div>
@@ -270,7 +322,23 @@ export function App() {
           ))}
         </div>
 
-        {busy && <div className="notice"><span className="spin" /> &nbsp;<b>{busy}</b> — confirm in your wallet / waiting for the chain…</div>}
+        {busy && <div className="notice"><span className="spin" /> &nbsp;<b>{busy}</b> — {demoRole ? 'signing locally, waiting for the chain…' : 'confirm in your wallet / waiting for the chain…'}</div>}
+
+        {demoRole && (
+          <div className="demobar">
+            <span>{DEMO_ROLES[demoRole].icon} You are the <b>{DEMO_ROLES[demoRole].label}</b> (shared demo account, gas sponsored) — {DEMO_ROLES[demoRole].blurb}</span>
+            <button className="btn small ghost" onClick={() => setTryOpen(true)}>switch role</button>
+          </div>
+        )}
+
+        {noRole && !demoRole && (
+          <div className="notice">
+            <b>Your wallet holds no role in this treasury</b> — that's by design: every number is gated by
+            on-chain ACLs. You can still <b>finalize</b> pending requests and use the 💧 faucet.
+            To experience the full loop, <button className="btn small primary" style={{ margin: '0 6px' }}
+              onClick={() => setTryOpen(true)}>⚡ try a demo role</button> — no setup needed.
+          </div>
+        )}
 
         {tab === 'Dashboard' && <PublicView />}
         {tab === 'Delegate' && <DelegateView />}
@@ -284,6 +352,7 @@ export function App() {
           <div><a href={`https://sepolia.etherscan.io/address/${ADDR.VeilGuardModule}`} target="_blank" rel="noopener">Module ↗</a> · <a href={`https://sepolia.etherscan.io/address/${ADDR.Safe}`} target="_blank" rel="noopener">Safe ↗</a> · Testnet prototype — not audited</div>
         </footer>
       </div>
+      {tryModal}
       {toastMsg && <div className={`toast ${toastMsg.err ? 'err' : ''}`}>{toastMsg.msg}</div>}
     </AppCtx.Provider>
   );
