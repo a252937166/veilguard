@@ -132,6 +132,22 @@ KEEPER_LOOP=1 npx hardhat run scripts/keeper.ts --network sepolia   # loop
 ```
 Systemd/cron templates: [`scripts/keeper.service.example`](./scripts/keeper.service.example).
 
+## Interactive 2-of-2 & the demo committee
+
+The Signer tab performs a **real in-browser 2-of-2**: you sign as **owner A** (the
+demo committee key, intentionally public on testnet) and **owner B is co-signed
+server-side** — but the co-signer refuses anything that is not a bounded
+governance call (`activateMandate` / `executeEscalated` / `cancelEscalated` /
+`retireMandate` / `unpauseAll`). Consequently owner A alone can never reach the
+Safe threshold for a raw transfer, so the public owner-A key cannot drain or
+brick the Safe. Both signatures are genuine EIP-712; `execTransaction` runs
+on-chain. This is a demo committee, not separate human approvers.
+
+The self-service provisioner (`/api/provision`) is likewise hardened: idempotent
+per address, a global daily cap, a `PROVISION_ENABLED` kill switch, and CORS
+locked to the app origin. Owner B's key (`/api/cosign`, `/api/provision`) stays
+server-side only.
+
 ## Security & trust model
 
 VeilGuard provides **confidentiality, not anonymity**. Public by design:

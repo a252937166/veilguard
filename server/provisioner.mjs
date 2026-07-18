@@ -17,7 +17,7 @@
 import http from 'node:http';
 import {
   createPublicClient, createWalletClient, http as viemHttp,
-  encodeFunctionData, hashTypedData, isAddress, parseSignature,
+  encodeFunctionData, hashTypedData, isAddress, parseSignature, toFunctionSelector,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
@@ -95,6 +95,41 @@ async function safeExec2of2(to, data) {
   return hash;
 }
 
+// ---- Owner-B co-signature for GOVERNANCE-ONLY Safe txs ----
+// signerB (Safe owner B) stays server-side. It will only co-sign a SafeTx whose
+// target is the module and whose call is a bounded governance action. This is
+// what makes the browser 2-of-2 safe: possessing owner A alone can never reach
+// threshold, and owner B refuses anything that could drain or brick the Safe.
+const GOV_SELECTORS = new Set([
+  toFunctionSelector('function activateMandate(uint256)'),
+  toFunctionSelector('function executeEscalated(uint256)'),
+  toFunctionSelector('function cancelEscalated(uint256)'),
+  toFunctionSelector('function retireMandate(uint256)'),
+  toFunctionSelector('function unpauseAll()'),
+]);
+
+const SAFE_TX_TYPES = {
+  SafeTx: [
+    { name: 'to', type: 'address' }, { name: 'value', type: 'uint256' },
+    { name: 'data', type: 'bytes' }, { name: 'operation', type: 'uint8' },
+    { name: 'safeTxGas', type: 'uint256' }, { name: 'baseGas', type: 'uint256' },
+    { name: 'gasPrice', type: 'uint256' }, { name: 'gasToken', type: 'address' },
+    { name: 'refundReceiver', type: 'address' }, { name: 'nonce', type: 'uint256' },
+  ],
+};
+
+async function cosignGovernance(to, data, nonce) {
+  if (to.toLowerCase() !== MODULE.toLowerCase()) throw new Error('co-sign refused: target is not the module');
+  const selector = data.slice(0, 10).toLowerCase();
+  if (!GOV_SELECTORS.has(selector)) throw new Error('co-sign refused: not a governance call');
+  const onchainNonce = await pub.readContract({ address: SAFE, abi: safeAbi, functionName: 'nonce' });
+  if (BigInt(nonce) !== onchainNonce) throw new Error('co-sign refused: stale nonce');
+  const domain = { chainId: 11155111, verifyingContract: SAFE };
+  const message = { to, value: 0n, data, operation: 0, safeTxGas: 0n, baseGas: 0n, gasPrice: 0n, gasToken: ZERO, refundReceiver: ZERO, nonce: onchainNonce };
+  const signature = await signerB.signTypedData({ domain, types: SAFE_TX_TYPES, primaryType: 'SafeTx', message });
+  return { signature, signer: signerB.address, nonce: Number(onchainNonce) };
+}
+
 let handleClient;
 async function getHandleClient() {
   if (!handleClient) {
@@ -152,6 +187,21 @@ const json = (res, code, obj) => {
 http.createServer((req, res) => {
   if (req.method === 'OPTIONS') return json(res, 204, {});
   if (req.url === '/api/health') return json(res, 200, { ok: true, enabled, module: MODULE, safe: SAFE, dayCount, dayCap });
+  if (req.method === 'POST' && req.url === '/api/cosign') {
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 4000) req.destroy(); });
+    req.on('end', async () => {
+      try {
+        const { to, data, nonce } = JSON.parse(body || '{}');
+        if (!isAddress(to) || typeof data !== 'string' || !data.startsWith('0x')) return json(res, 400, { error: 'bad request' });
+        const result = await cosignGovernance(to, data, nonce);
+        json(res, 200, { ok: true, ...result });
+      } catch (e) {
+        json(res, 400, { error: e?.shortMessage ?? e?.message ?? 'co-sign failed' });
+      }
+    });
+    return;
+  }
   if (req.method === 'POST' && req.url === '/api/provision') {
     if (!enabled) return json(res, 503, { error: 'self-service provisioning is currently disabled — use the shared demo Delegate/Auditor instead' });
     let body = '';
