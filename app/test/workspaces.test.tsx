@@ -15,15 +15,18 @@ test('Mission Drawer gates a mission on real evidence and returns from a paused 
   });
   const dispatch = vi.fn();
   const navigate = vi.fn();
+  const refresh = vi.fn();
   const { rerender } = render(
-    <MissionDrawer session={session} dispatch={dispatch} currentRoute={{ page: 'payment-inbox' }} currentRole="delegate" onNavigate={navigate} onClose={vi.fn()} />,
+    <MissionDrawer session={session} dispatch={dispatch} currentRoute={{ page: 'payment-inbox' }} currentRole="delegate" onNavigate={navigate} onRefresh={refresh} onClose={vi.fn()} />,
   );
   expect(screen.getByText(/Waiting for the executed request evidence/i)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /check chain state/i }));
+  expect(refresh).toHaveBeenCalledTimes(1);
   expect(screen.queryByRole('button', { name: /continue/i })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: /skip/i })).not.toBeInTheDocument();
 
   const paused = { ...session, tour: { ...session.tour, paused: true as const, pauseReason: 'navigation' as const } };
-  rerender(<MissionDrawer session={paused} dispatch={dispatch} currentRoute={{ page: 'funds' }} currentRole="delegate" onNavigate={navigate} onClose={vi.fn()} />);
+  rerender(<MissionDrawer session={paused} dispatch={dispatch} currentRoute={{ page: 'funds' }} currentRole="delegate" onNavigate={navigate} onRefresh={refresh} onClose={vi.fn()} />);
   fireEvent.click(screen.getByRole('button', { name: /return to current mission/i }));
   expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: 'RETURN_TO_MISSION', runId: 'launch-test' }));
   expect(navigate).toHaveBeenCalledWith({ route: { page: 'payment-inbox' }, role: undefined });

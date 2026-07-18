@@ -78,7 +78,8 @@ test('policy selection follows route history and the list route has no implicit 
   fireEvent.click(screen.getByRole('button', { name: 'Policy objects' }));
   await waitFor(() => expect(router.state.location.pathname).toBe('/policies'));
   expect(document.querySelector('.policy-workbench')).toHaveClass('workbench-route-list');
-  expect(screen.getByRole('status')).toHaveTextContent('Select a policy');
+  expect(screen.getByRole('status')).toHaveTextContent('Choose an on-chain mandate');
+  expect(screen.getByRole('button', { name: 'Open latest mandate' })).toBeInTheDocument();
   expect(document.querySelector('.object-list-item[aria-current="page"]')).toBeNull();
 });
 

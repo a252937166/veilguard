@@ -92,6 +92,7 @@ scripts/
   e2e-sepolia.ts             three-state + cancel + audit coverage
   keeper.ts                  untrusted finalize courier (one-shot or loop)
 app/                         Hash-routed React + viem + Nox SDK operations desk
+docs/DESIGN.md               canonical judge journey, visual and recovery contract
 server/provisioner.mjs       bounded decision, audit, governance and onboarding API
 feedback.md                  developer feedback on the Nox tooling
 ```
@@ -167,6 +168,13 @@ Launch Day run cannot skip ahead:
 be resumed. Restart is refused until any old pending escalation has been really
 cancelled and its escrow refund confirmed. The public view never receives
 plaintext amounts, policy values or blocked reasons.
+
+Payment submission acknowledges the first click immediately and reports the
+truthful Preflight → Encrypt → Broadcast → TEE → Finalize stages. The transaction
+hash is persisted at broadcast time; refresh recovery then matches only the
+current run's domain-separated memo and recipient. See
+[`docs/DESIGN.md`](./docs/DESIGN.md) for the canonical interaction and recovery
+contract.
 
 ## Real 2-of-2 demo committee
 

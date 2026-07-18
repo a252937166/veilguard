@@ -56,7 +56,7 @@ export function PoliciesView() {
         <span className={`pill ${paused ? 'bad' : 'ok'}`}>{paused ? 'EMERGENCY PAUSE' : 'MODULE ACTIVE'}</span>
       </div>
 
-      <Workbench className={`policy-workbench ${isDetailRoute ? 'workbench-route-detail' : 'workbench-route-list'}`}>
+      <Workbench className={`policy-workbench ${!policy ? 'workbench-no-selection' : ''} ${isDetailRoute ? 'workbench-route-detail' : 'workbench-route-list'}`}>
         <WorkbenchList title="Policy objects" description={`${sorted.length} mandate${sorted.length === 1 ? '' : 's'} on Sepolia`}>
           <div className="object-list">
             {sorted.map((item) => (
@@ -153,14 +153,27 @@ export function PoliciesView() {
             )}
             </div>
           </> : (
-            <div className="workbench-empty-detail empty-state" role={isDetailRoute ? 'alert' : 'status'}>
+            <div className="workbench-empty-detail" role={isDetailRoute ? 'alert' : 'status'}>
               {isDetailRoute && (
                 <button type="button" className="mobile-detail-back" onClick={backToPolicies}>
                   <span aria-hidden="true">←</span> Policy objects
                 </button>
               )}
-              <b>{isDetailRoute ? 'Policy not found' : 'Select a policy'}</b>
-              <span>{isDetailRoute ? 'This mandate is not present in the current Sepolia registry.' : 'Choose an on-chain mandate to inspect its encrypted parameters, requests and governance history.'}</span>
+              <header className="workbench-detail-head empty-detail-head">
+                <div>
+                  <span className="workbench-kicker">Policy registry</span>
+                  <h2>{isDetailRoute ? 'Policy not found' : 'Choose an on-chain mandate'}</h2>
+                  <p>{isDetailRoute ? 'This mandate is not present in the current Sepolia registry.' : 'Inspect encrypted parameters, governed requests and real governance state in one object view.'}</p>
+                </div>
+              </header>
+              <div className="empty-detail-body policy-empty-body">
+                <dl className="policy-empty-stats">
+                  <div><dt>Total objects</dt><dd>{sorted.length}</dd></div>
+                  <div><dt>Active</dt><dd>{sorted.filter((item) => item.state === 2).length}</dd></div>
+                  <div><dt>Draft or retired</dt><dd>{sorted.filter((item) => item.state !== 2).length}</dd></div>
+                </dl>
+                <button type="button" className="btn primary" onClick={() => selectPolicy(sorted[0].id)}>Open latest mandate</button>
+              </div>
             </div>
           )}
         </WorkbenchDetail>

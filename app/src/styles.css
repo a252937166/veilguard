@@ -342,7 +342,7 @@ textarea:focus{outline:none;border-color:var(--veil)}
 .brand{display:inline-flex;align-items:center;gap:11px;line-height:1}
 .brand-shield{height:34px;width:auto;display:block;filter:drop-shadow(0 2px 9px rgba(124,92,255,.4))}
 .brand-word{font-weight:800;font-size:21px;letter-spacing:-.01em;color:var(--text)}
-.brand-guard{color:#9e8bff}
+.brand-guard{background:linear-gradient(92deg,#a855f7,#7c5cff 45%,#5b8cff);-webkit-background-clip:text;background-clip:text;color:transparent}
 .side-logo .brand-shield{height:30px}
 .side-logo .brand-word{font-size:19px}
 

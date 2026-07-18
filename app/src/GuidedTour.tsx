@@ -87,14 +87,16 @@ type DrawerSurfaceProps = {
   step: number;
   paused: boolean;
   missionDone: boolean;
+  checking: boolean;
   onBack: () => void;
   onNext: () => void;
   onReturn: () => void;
+  onCheckEvidence: () => void;
   onClose: () => void;
 };
 
 function DrawerSurface({
-  step, paused, missionDone, onBack, onNext, onReturn, onClose,
+  step, paused, missionDone, checking, onBack, onNext, onReturn, onCheckEvidence, onClose,
 }: DrawerSurfaceProps) {
   const s = MISSION_STEPS[step];
   const gated = !!(s.mission || s.gate) && !missionDone;
@@ -149,6 +151,11 @@ function DrawerSurface({
                 <span className="spin" aria-hidden="true" /> {s.waiting ?? 'Waiting for on-chain evidence…'}
               </span>
             )}
+            {gated && (
+              <button className="btn small ghost tour-recheck" disabled={checking} onClick={onCheckEvidence}>
+                {checking ? <><span className="spin" aria-hidden="true" /> Checking chain…</> : 'Check chain state'}
+              </button>
+            )}
             {!gated && step < MISSION_STEPS.length - 1 && (
               <button className="btn small primary" onClick={onNext}>{s.nextLabel ?? 'Continue'}</button>
             )}
@@ -169,6 +176,7 @@ export type MissionDrawerProps = {
   currentRole: DemoRole | null;
   /** Route + role must be applied as one navigation intent by the App shell. */
   onNavigate: (target: { route: AppRoute; role?: DemoRole }) => void;
+  onRefresh: () => void;
   onClose: () => void;
 };
 
@@ -177,12 +185,14 @@ export type MissionDrawerProps = {
  * request/packet evidence and pauses after the user leaves an arrived target.
  */
 export function MissionDrawer({
-  session, dispatch, currentRoute, currentRole, onNavigate, onClose,
+  session, dispatch, currentRoute, currentRole, onNavigate, onRefresh, onClose,
 }: MissionDrawerProps) {
   const step = Math.min(Math.max(session.tour.step, 0), MISSION_STEPS.length - 1);
   const s = MISSION_STEPS[step];
   const arrived = useRef(false);
   const advanceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const checkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [checking, setChecking] = useState(false);
   const missionDone = s.mission
     ? isMissionComplete(session, s.mission, { strict: true })
     : s.gate === 'audit-packets-created'
@@ -221,6 +231,17 @@ export function MissionDrawer({
     return () => { if (advanceTimer.current) clearTimeout(advanceTimer.current); };
   }, [enterStep, missionDone, s.gate, s.mission, session.tour.paused, step]);
 
+  useEffect(() => () => {
+    if (checkTimer.current) clearTimeout(checkTimer.current);
+  }, []);
+
+  const checkEvidence = () => {
+    if (checking) return;
+    setChecking(true);
+    onRefresh();
+    checkTimer.current = setTimeout(() => setChecking(false), 1_500);
+  };
+
   const returnToMission = () => {
     dispatch({ type: 'RETURN_TO_MISSION', runId: session.runId });
     onNavigate({ route: s.route, role: s.role });
@@ -232,9 +253,11 @@ export function MissionDrawer({
       step={step}
       paused={session.tour.paused}
       missionDone={missionDone}
+      checking={checking}
       onBack={() => enterStep(step - 1)}
       onNext={() => enterStep(step + 1)}
       onReturn={returnToMission}
+      onCheckEvidence={checkEvidence}
       onClose={() => {
         dispatch({ type: 'CLOSE_TOUR', runId: session.runId });
         onClose();
@@ -338,9 +361,11 @@ export function GuidedTour({
       step={boundedStep}
       paused={paused}
       missionDone={missionDone}
+      checking={false}
       onBack={() => setStep(Math.max(0, boundedStep - 1))}
       onNext={() => setStep(Math.min(MISSION_STEPS.length - 1, boundedStep + 1))}
       onReturn={() => { setPaused(false); arrived.current = false; navigate(s); }}
+      onCheckEvidence={() => window.dispatchEvent(new CustomEvent('vg-refresh-requested'))}
       onClose={onClose}
     />
   );
