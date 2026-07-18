@@ -1,0 +1,32 @@
+# VeilGuard keeper — optional availability helper (systemd unit example).
+#
+# The keeper is UNTRUSTED: it only submits finalize(id, proof); the on-chain
+# proof determines the outcome. Losing the keeper only delays finalization —
+# users can always finalize from the dApp themselves.
+#
+# Install:
+#   cp scripts/keeper.service.example /etc/systemd/system/veilguard-keeper.service
+#   # edit WorkingDirectory + env below
+#   systemctl daemon-reload && systemctl enable --now veilguard-keeper
+#
+# Cron alternative (one-shot every minute):
+#   * * * * * cd /opt/veilguard && KEEPER_LOOP=0 /usr/local/bin/npx hardhat run scripts/keeper.ts --network sepolia >> /var/log/veilguard-keeper.log 2>&1
+
+[Unit]
+Description=VeilGuard keeper (finalize resolved spend requests)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/veilguard
+Environment=KEEPER_LOOP=1
+Environment=KEEPER_INTERVAL_MS=20000
+# Optional dedicated keeper key (else falls back to SEPOLIA_DEPLOYER_KEY in .env):
+# Environment=KEEPER_KEY=0x...
+ExecStart=/usr/local/bin/npx hardhat run scripts/keeper.ts --network sepolia
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
