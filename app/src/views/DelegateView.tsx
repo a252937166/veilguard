@@ -89,20 +89,38 @@ export function DelegateView() {
       }
     });
 
-  const finalize = (id: bigint, decisionHandle: `0x${string}`) =>
-    run(`Reveal outcome of #${id}`, async () => {
+  const finalizingRef = useRef<bigint | null>(null);
+  const finalize = (id: bigint, decisionHandle: `0x${string}`, auto = false) =>
+    run(auto ? 'Revealing the outcome' : `Reveal outcome of #${id}`, async () => {
       if (!account) return;
-      const client = await handleClientFor(account);
-      const { decryptionProof } = await client.publicDecrypt(decisionHandle as any);
-      const wallet = makeWalletClient(account);
-      const hash = await wallet.writeContract({
-        address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'finalize',
-        args: [id, decryptionProof], chain: wallet.chain, account: wallet.account!,
-      });
-      await publicClient.waitForTransactionReceipt({ hash });
+      try {
+        setFlow(isDemo ? 'Revealing the outcome…' : 'Confirm in your wallet to reveal the outcome');
+        const client = await handleClientFor(account);
+        const { decryptionProof } = await client.publicDecrypt(decisionHandle as any);
+        const wallet = makeWalletClient(account);
+        const hash = await wallet.writeContract({
+          address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'finalize',
+          args: [id, decryptionProof], chain: wallet.chain, account: wallet.account!,
+        });
+        setFlow('Waiting for the chain to confirm…');
+        await publicClient.waitForTransactionReceipt({ hash });
+      } finally {
+        setFlow(null);
+      }
     });
 
   const stage = !latest ? 0 : latest.state === 1 ? (latest.decisionReady ? 2 : 1) : 3;
+
+  // Auto-finalize: the moment the TEE decision is provable, submit the proof so
+  // the outcome just "appears" — the delegate never has to understand the
+  // two-step finalize. (Own wallets get one clear confirmation prompt.)
+  useEffect(() => {
+    if (!latest || latest.state !== 1 || !latest.decisionReady) return;
+    if (finalizingRef.current === latest.id || busy) return;
+    finalizingRef.current = latest.id;
+    finalize(latest.id, latest.decision, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [latest?.id, latest?.decisionReady]);
 
   if (!account)
     return <NoRole demo="delegate" title="Act as a Delegate"
@@ -147,23 +165,24 @@ export function DelegateView() {
       <div className="journey">
         <div className={`jstep ${stage >= 0 ? 'active' : ''} ${stage > 0 ? 'done' : ''}`}><b><span className="jn">1</span>Encrypt &amp; submit</b>your amount is encrypted in-browser, then sent</div>
         <div className={`jstep ${stage === 1 ? 'active' : ''} ${stage > 1 ? 'done' : ''}`}><b><span className="jn">2</span>TEE decides</b>the policy is evaluated on ciphertext (~2-6s)</div>
-        <div className={`jstep ${stage === 2 ? 'active' : ''} ${stage > 2 ? 'done' : ''}`}><b><span className="jn">3</span>Finalize</b>submit the proof to reveal the outcome on-chain</div>
+        <div className={`jstep ${stage === 2 ? 'active' : ''} ${stage > 2 ? 'done' : ''}`}><b><span className="jn">3</span>Reveal</b>the proof is submitted automatically to reveal the outcome</div>
         <div className={`jstep ${stage === 3 ? 'active done' : ''}`}><b><span className="jn">4</span>Outcome</b>executed / escalated / blocked</div>
       </div>
 
       {latest && stage < 3 && (
         <div className="latest" ref={resultRef}>
           <h4>
-            {stage === 1 && <><span className="spin" /> Request #{String(latest.id)} — the TEE is deciding…</>}
-            {stage === 2 && <>⚡ Request #{String(latest.id)} — decision ready</>}
+            <span className="spin" /> Request #{String(latest.id)} — {stage === 1 ? 'the TEE is deciding on your encrypted amount…' : 'decision ready — revealing the outcome…'}
           </h4>
           <div className="lrow">
             <span className="muted" style={{ fontSize: 13 }}>
-              {stage === 1 && 'Your amount stays encrypted; only a coarse outcome will ever be public.'}
-              {stage === 2 && 'The gateway can prove the decision. Finalize to execute it on-chain and reveal the (still coarse) outcome.'}
+              {stage === 1 && 'The policy is evaluated on ciphertext inside the TEE (a few seconds). Your amount stays encrypted; only a coarse outcome will ever be public.'}
+              {stage === 2 && (isDemo
+                ? 'Submitting the decryption proof on-chain to reveal the outcome — no action needed.'
+                : 'Your wallet will ask you to confirm one transaction to reveal the outcome. Approve it and the result appears here.')}
             </span>
             <div className="row">
-              {stage === 2 && <button className="btn primary small" disabled={!!busy} onClick={() => finalize(latest.id, latest.decision)}>Finalize &amp; reveal →</button>}
+              {stage === 2 && !busy && <button className="btn small" onClick={() => finalize(latest.id, latest.decision)}>Reveal manually</button>}
             </div>
           </div>
         </div>
