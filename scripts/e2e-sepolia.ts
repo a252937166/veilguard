@@ -198,7 +198,7 @@ await send('createAuditPacket', admin, {
 const packet = (await publicClient.readContract({
   address: VeilGuardModule, abi: moduleAbi, functionName: 'getAuditPacket', args: [1n],
 })) as any[];
-const snaps: `0x${string}`[] = packet[5];
+const snaps: `0x${string}`[] = packet[6];
 await waitResolved(snaps);
 const values = [];
 for (const s of snaps) values.push(Number((await auditorClient.decrypt(s)).value) / 1e6);

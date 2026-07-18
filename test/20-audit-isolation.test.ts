@@ -83,14 +83,14 @@ describe('20 audit packet isolation (gate G3)', { timeout: 1_200_000 }, () => {
     await safe.write.execTransaction([
       module.address,
       0n,
-      encodeFunctionData({ abi: module.abi, functionName: 'activateMandate', args: [1n, 0n] }),
+      encodeFunctionData({ abi: module.abi, functionName: 'activateMandate', args: [1n] }),
     ]);
   });
 
   it('auditor decrypts packet snapshots but neither computes on them nor sees live state', async () => {
     await module.write.createAuditPacket([auditor.account.address, 1n, []]);
     const packet = await module.read.getAuditPacket([1n]);
-    const snapshots: `0x${string}`[] = packet[5];
+    const snapshots: `0x${string}`[] = packet[6];
     assert.equal(snapshots.length, 3); // autoLimit, budgetLeft, reserveFloor
 
     await waitResolved(snapshots);

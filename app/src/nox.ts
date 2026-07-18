@@ -2,6 +2,7 @@ import {
   createPublicClient,
   createWalletClient,
   custom,
+  fallback,
   http,
   type PublicClient,
   type WalletClient,
@@ -11,9 +12,15 @@ import { createViemHandleClient, type HandleClient } from '@iexec-nox/handle';
 import { GATEWAY, RPC_URL } from './config';
 import { demoWalletByAddress } from './demo';
 
+const RPCS = [
+  RPC_URL,
+  'https://rpc.sepolia.org',
+  'https://1rpc.io/sepolia',
+];
+
 export const publicClient: PublicClient = createPublicClient({
   chain: sepolia,
-  transport: http(RPC_URL),
+  transport: fallback(RPCS.map((u) => http(u)), { rank: false }),
 }) as PublicClient;
 
 export function makeWalletClient(account: `0x${string}`): WalletClient {

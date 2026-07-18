@@ -19,7 +19,7 @@ export function Landing({ onLaunch, onTry }: { onLaunch: () => void; onTry: () =
         </div>
         <div className="lstrip">
           <div><span className="lnum">encrypted</span><span className="llabel">budgets · limits · reserve</span></div>
-          <div><span className="lnum">≈5s</span><span className="llabel">TEE decision on Sepolia</span></div>
+          <div><span className="lnum">5.4s</span><span className="llabel">TEE decision, one Sepolia run</span></div>
           <div><span className="lnum">3</span><span className="llabel">public outcomes, zero numbers</span></div>
           <div><span className="lnum">4</span><span className="llabel">roles, one confidential loop</span></div>
         </div>

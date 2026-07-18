@@ -3,6 +3,7 @@ import { ADDR, moduleAbi, scan, short } from '../config';
 import { handleClientFor, makeWalletClient, publicClient } from '../nox';
 import { useApp } from '../App';
 import { MandatePill, RequestPill } from '../ui';
+import { EvidenceMatrix } from './Evidence';
 
 function ago(ts: bigint): string {
   const s = Math.floor(Date.now() / 1000) - Number(ts);
@@ -63,6 +64,8 @@ export function PublicView() {
         coarse outcome. <b>Never</b> amounts, limits, budgets or reserve levels. Those live on-chain only as
         encrypted handles and are decrypted per-role through the Nox gateway.
       </div>
+
+      <EvidenceMatrix />
 
       <div className="card">
         <h3>Spending mandates <small>policy numbers are encrypted handles — decryptable only by authorised roles</small></h3>

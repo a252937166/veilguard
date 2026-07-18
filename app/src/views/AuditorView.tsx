@@ -6,10 +6,8 @@ import { Decrypt } from '../ui';
 
 type Packet = {
   id: bigint; auditor: `0x${string}`; mandateId: bigint; policyVersion: number;
-  manifestHash: `0x${string}`; createdAt: bigint; snapshotHandles: `0x${string}`[];
+  manifestHash: `0x${string}`; createdAt: bigint; requestIds: bigint[]; snapshotHandles: `0x${string}`[];
 };
-
-const SNAP_LABELS = ['Auto-limit', 'Budget left (at packet time)', 'Reserve floor'];
 
 export function AuditorView() {
   const { account } = useApp();
@@ -26,7 +24,7 @@ export function AuditorView() {
           const p = (await publicClient.readContract({
             address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'getAuditPacket', args: [i],
           })) as any[];
-          out.push({ id: i, auditor: p[0], mandateId: p[1], policyVersion: Number(p[2]), manifestHash: p[3], createdAt: p[4], snapshotHandles: p[5] });
+          out.push({ id: i, auditor: p[0], mandateId: p[1], policyVersion: Number(p[2]), manifestHash: p[3], createdAt: p[4], requestIds: p[5] as bigint[], snapshotHandles: p[6] as `0x${string}`[] });
         }
         setPackets(out);
       } catch (e) { console.error(e); }
@@ -39,9 +37,10 @@ export function AuditorView() {
   return (
     <>
       <div className="notice">
-        Audit packets are <b>scoped, immutable disclosure snapshots</b>: fresh ciphertext handles covering
-        exactly one policy version and a chosen set of requests. You can decrypt them forever — but you
-        never gain access to live state or future versions, and you cannot compute on the handles.
+        A packet is a <b>selective-disclosure snapshot</b>: fresh ciphertext handles covering one policy version
+        and a chosen set of terminal requests (each disclosing its amount and coarse reason). You can decrypt
+        them forever — but never gain access to live state, future versions, or the ability to compute on the
+        handles. This is scoped disclosure, <b>not</b> a standalone proof that every historical request complied.
       </div>
 
       {mine.map((p) => (
@@ -53,11 +52,14 @@ export function AuditorView() {
           <div className="tbl"><table>
             <thead><tr><th>Disclosure item</th><th>Value</th></tr></thead>
             <tbody>
-              {p.snapshotHandles.map((h, i) => (
-                <tr key={h}>
-                  <td>{SNAP_LABELS[i] ?? `Request amount #${i - 2}`}</td>
-                  <td><Decrypt handle={h} /></td>
-                </tr>
+              <tr><td>Auto-limit (policy)</td><td><Decrypt handle={p.snapshotHandles[0]} /></td></tr>
+              <tr><td>Budget left (at packet time)</td><td><Decrypt handle={p.snapshotHandles[1]} /></td></tr>
+              <tr><td>Reserve floor (policy)</td><td><Decrypt handle={p.snapshotHandles[2]} /></td></tr>
+              {p.requestIds.map((rid, k) => (
+                <>
+                  <tr key={`${rid}-amt`}><td>Request #{String(rid)} — amount</td><td><Decrypt handle={p.snapshotHandles[3 + k * 2]} /></td></tr>
+                  <tr key={`${rid}-reason`}><td>Request #{String(rid)} — blocked reason</td><td><Decrypt handle={p.snapshotHandles[4 + k * 2]} unit="" label="Reason (0=ok,1=budget,2=balance,3=reserve)" /></td></tr>
+                </>
               ))}
             </tbody>
           </table></div>
