@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { ADDR, moduleAbi, short } from '../config';
 import { publicClient } from '../nox';
 import { useApp } from '../App';
@@ -58,10 +58,10 @@ export function AuditorView() {
               <tr><td>Budget left (at packet time)</td><td><Decrypt handle={p.snapshotHandles[1]} /></td></tr>
               <tr><td>Reserve floor (policy)</td><td><Decrypt handle={p.snapshotHandles[2]} /></td></tr>
               {p.requestIds.map((rid, k) => (
-                <>
-                  <tr key={`${rid}-amt`}><td>Request #{String(rid)} — amount</td><td><Decrypt handle={p.snapshotHandles[3 + k * 2]} /></td></tr>
-                  <tr key={`${rid}-reason`}><td>Request #{String(rid)} — blocked reason</td><td><Decrypt handle={p.snapshotHandles[4 + k * 2]} unit="" label="Reason (0=ok,1=budget,2=balance,3=reserve)" /></td></tr>
-                </>
+                <Fragment key={String(rid)}>
+                  <tr><td>Request #{String(rid)} — amount</td><td><Decrypt handle={p.snapshotHandles[3 + k * 2]} /></td></tr>
+                  <tr><td>Request #{String(rid)} — blocked reason</td><td><Decrypt handle={p.snapshotHandles[4 + k * 2]} unit="" label="Reason (0=ok,1=budget,2=balance,3=reserve)" /></td></tr>
+                </Fragment>
               ))}
             </tbody>
           </table></div>

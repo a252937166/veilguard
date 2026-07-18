@@ -321,7 +321,7 @@ function ProvisionMe({ account }: { account: `0x${string}` }) {
         The module only accepts the delegate address fixed in a mandate — so to act as a delegate with{' '}
         <b>your own wallet</b> (<span className="mono">{short(account)}</span>), the treasury has to grant it one.
         Click below and the sponsored provisioner will propose an encrypted mandate for your address and activate
-        it with a <b>real 2-of-2 Safe multisig</b> — exactly how a treasury onboards a delegate. Then you submit
+        it with a <b>real 2-of-2 Safe multisig</b> (two distinct owner signatures, threshold 2 — produced here by the demo's own keys, not a multi-party approval queue). Then you submit
         requests yourself, signing with your own wallet.
       </p>
       <div className="row" style={{ marginTop: 14 }}>
@@ -331,7 +331,7 @@ function ProvisionMe({ account }: { account: `0x${string}` }) {
         <button className="btn" onClick={() => startDemo('delegate')}>or use the shared demo delegate</button>
       </div>
       <p className="muted" style={{ fontSize: 12, marginTop: 10 }}>
-        Sponsored (gas-free onboarding) · capped demo policy: auto-execute ≤ 40, budget 300, reserve 100 cUSDC ·
+        Onboarding is sponsored (the treasury pays the two governance txs); you then sign requests with your own wallet and gas. Capped demo policy: auto-execute ≤ 40, budget 300, reserve 100 cUSDC ·
         one per address per hour. You'll need a little Sepolia ETH to submit requests —{' '}
         <button className="btn small ghost" onClick={openRolePicker} style={{ display: 'none' }}>x</button>
         grab some from 💧 Get test funds.

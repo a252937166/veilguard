@@ -47,7 +47,7 @@ export const STEPS: Step[] = [
   {
     title: 'Your turn',
     tab: 'Delegate',
-    body: 'Now drive it yourself: hit "⚡ Try a role" in the top bar and act as the Delegate — a shared, gas-sponsored demo account. Submit an encrypted amount and watch the TEE decide in real time. Small amounts execute, big ones escalate, oversized ones get blocked. The delegate key is public on purpose: the policy, not key custody, is what contains you.',
+    body: 'Now drive it yourself: hit "⚡ Try a role" in the top bar and act as the Delegate — a shared, pre-funded public demo account. Submit an encrypted amount and watch the TEE decide in real time. Small amounts execute, big ones escalate, oversized ones get blocked. The delegate key is public on purpose: the policy, not key custody, is what contains you.',
     hint: 'No wallet needed. You can also switch to the Auditor role to decrypt the disclosure snapshots.',
   },
 ];
