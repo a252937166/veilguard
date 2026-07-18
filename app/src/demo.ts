@@ -4,7 +4,7 @@ import { sepolia } from 'viem/chains';
 import { RPC_URL } from './config';
 
 /**
- * DEMO MODE — intentionally public testnet keys.
+ * DEMO MODE — intentionally public testnet keys, LOW-POWER ROLES ONLY.
  *
  * These two Sepolia demo keys are embedded on purpose so anyone can experience
  * the product without installing a wallet:
@@ -14,8 +14,12 @@ import { RPC_URL } from './config';
  *    custody, is what contains the delegate;
  *  - the AUDITOR key only carries read-grants on immutable snapshots.
  *
- * The powerful roles (finance admin, Safe signer) are NOT embedded: a Safe
- * owner key would let anyone rewrite the treasury and deface the demo.
+ * The powerful roles (finance admin, Safe owners) are NOT embedded — the
+ * finance-admin key can propose mandates and a Safe-owner key contributes to
+ * the 2-of-2 threshold, so publishing either would let anyone reshape the
+ * treasury's policies. Escalation approvals in the demo are performed
+ * server-side by the real 2-of-2 committee (both owner keys stay off-client),
+ * and the Signer view shows the resulting on-chain evidence read-only.
  * Keys hold a few cents of testnet ETH for gas. Do not reuse anywhere.
  */
 export const DEMO_ROLES = {
@@ -24,16 +28,6 @@ export const DEMO_ROLES = {
     icon: '🧑‍💼',
     blurb: 'Submit encrypted spend requests and watch the TEE decide. You hold the real key — the policy is what stops you overspending.',
     key: '0x542fe27a6c79622ecf81ed14b4440a16eba591229c028a47021d6850340ff5d0' as `0x${string}`,
-  },
-  signer: {
-    label: 'Signer (Safe owner A)',
-    icon: '🔐',
-    blurb: 'Operate the treasury committee: activate policies and approve escalations with a REAL in-browser 2-of-2 (you sign as owner A; owner B co-signs governance-only, server-side).',
-    // Owner A of the Safe (also the finance admin). Alone it CANNOT reach the
-    // Safe threshold — owner B only co-signs bounded governance calls server-side
-    // — so this key cannot drain or brick the Safe. Intentionally public testnet
-    // demo committee key.
-    key: '0xefb387e3b31f8832aaa03a457f8d903935d547546dc9b0bf6bf3543cd52c6c83' as `0x${string}`,
   },
   auditor: {
     label: 'Auditor',
@@ -44,6 +38,17 @@ export const DEMO_ROLES = {
 } as const;
 
 export type DemoRole = keyof typeof DEMO_ROLES;
+
+/**
+ * Dedicated low-power delegate for the "Policy violation" scenario. Blocked
+ * requests put THE SUBMITTING DELEGATE in a 10-minute anti-probing cooldown, so
+ * the violation mission signs with its own key — the main demo delegate never
+ * gets frozen. Same intentionally-public delegate class as DEMO_ROLES.delegate.
+ */
+export const VIOLATION_DELEGATE = {
+  key: '0x9b07dcbf4dd18fcdd352b14e58ef7c59c3af2cc5f279aab34185fdcea9504cc6' as `0x${string}`,
+  address: '0xDFC0c6e0BAeD0948D8BA22A4917438938F2a40F4' as `0x${string}`,
+};
 
 const clients = new Map<string, WalletClient>();
 
@@ -64,8 +69,23 @@ export function demoAddress(role: DemoRole): `0x${string}` {
   return demoWallet(role).account!.address;
 }
 
+/** Wallet client for the violation-scenario delegate (never shown as a role). */
+export function violationWallet(): WalletClient {
+  let c = clients.get('violation');
+  if (!c) {
+    c = createWalletClient({
+      account: privateKeyToAccount(VIOLATION_DELEGATE.key),
+      chain: sepolia,
+      transport: http(RPC_URL),
+    });
+    clients.set('violation', c);
+  }
+  return c;
+}
+
 /** address(lowercase) -> demo wallet, for transparent signer routing. */
 export function demoWalletByAddress(addr: string): WalletClient | undefined {
+  if (addr.toLowerCase() === VIOLATION_DELEGATE.address.toLowerCase()) return violationWallet();
   for (const role of Object.keys(DEMO_ROLES) as DemoRole[]) {
     if (demoAddress(role).toLowerCase() === addr.toLowerCase()) return demoWallet(role);
   }

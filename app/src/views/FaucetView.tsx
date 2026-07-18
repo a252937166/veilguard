@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ADDR, erc20Abi, fmt, scan, short, usdc, wrapperAbi } from '../config';
-import { makeWalletClient, publicClient } from '../nox';
+import { publicClient } from '../nox';
+import { walletWrite } from '../walletTx';
 import { useApp } from '../App';
 
 const ETH_FAUCETS = [
@@ -10,9 +11,10 @@ const ETH_FAUCETS = [
 ];
 
 export function FaucetView() {
-  const { account, run, busy, toast } = useApp();
+  const { account, run, busy, toast, demoRole } = useApp();
   const [balance, setBalance] = useState<bigint>();
   const [amount, setAmount] = useState('1000');
+  const injected = !demoRole;
 
   const refreshBalance = async () => {
     if (!account) return;
@@ -25,10 +27,9 @@ export function FaucetView() {
   const claim = () =>
     run(`Claim ${amount} TestUSDC`, async () => {
       if (!account) throw new Error('connect a wallet');
-      const w = makeWalletClient(account);
-      const hash = await w.writeContract({
-        address: ADDR.TestUSDC, abi: erc20Abi, functionName: 'faucet',
-        args: [usdc(Number(amount))], chain: w.chain, account: w.account!,
+      const hash = await walletWrite({
+        account, address: ADDR.TestUSDC, abi: erc20Abi, functionName: 'faucet',
+        args: [usdc(Number(amount))], onHint: (m) => toast(m), injected,
       });
       await publicClient.waitForTransactionReceipt({ hash });
       await refreshBalance();
@@ -38,7 +39,6 @@ export function FaucetView() {
   const wrapToTreasury = () =>
     run(`Wrap ${amount} into the Safe treasury`, async () => {
       if (!account) throw new Error('connect a wallet');
-      const w = makeWalletClient(account);
       const value = usdc(Number(amount));
       const bal = (await publicClient.readContract({
         address: ADDR.TestUSDC, abi: erc20Abi, functionName: 'balanceOf', args: [account],
@@ -49,15 +49,15 @@ export function FaucetView() {
         args: [account, ADDR.ConfidentialUSDC],
       })) as bigint;
       if (allowance < value) {
-        const h1 = await w.writeContract({
-          address: ADDR.TestUSDC, abi: erc20Abi, functionName: 'approve',
-          args: [ADDR.ConfidentialUSDC, value], chain: w.chain, account: w.account!,
+        const h1 = await walletWrite({
+          account, address: ADDR.TestUSDC, abi: erc20Abi, functionName: 'approve',
+          args: [ADDR.ConfidentialUSDC, value], onHint: (m) => toast(m), injected,
         });
         await publicClient.waitForTransactionReceipt({ hash: h1 });
       }
-      const h2 = await w.writeContract({
-        address: ADDR.ConfidentialUSDC, abi: wrapperAbi, functionName: 'wrap',
-        args: [ADDR.Safe, value], chain: w.chain, account: w.account!,
+      const h2 = await walletWrite({
+        account, address: ADDR.ConfidentialUSDC, abi: wrapperAbi, functionName: 'wrap',
+        args: [ADDR.Safe, value], onHint: (m) => toast(m), injected,
       });
       await publicClient.waitForTransactionReceipt({ hash: h2 });
       await refreshBalance();

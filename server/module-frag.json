@@ -1,1 +1,273 @@
-[{"inputs":[{"internalType":"uint256","name":"mandateId","type":"uint256"}],"name":"activateMandate","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"","type":"address"}],"name":"activeMandateOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"mandateId","type":"uint256"}],"name":"getMandate","outputs":[{"internalType":"address","name":"delegate","type":"address"},{"internalType":"uint64","name":"validFrom","type":"uint64"},{"internalType":"uint64","name":"validUntil","type":"uint64"},{"internalType":"uint32","name":"version","type":"uint32"},{"internalType":"enum VeilGuardModule.MandateState","name":"state","type":"uint8"},{"internalType":"bytes32","name":"autoLimit","type":"bytes32"},{"internalType":"bytes32","name":"budgetLeft","type":"bytes32"},{"internalType":"bytes32","name":"reserveFloor","type":"bytes32"},{"internalType":"address[]","name":"recipients","type":"address[]"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"nextMandateId","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"delegate","type":"address"},{"internalType":"uint64","name":"validFrom","type":"uint64"},{"internalType":"uint64","name":"validUntil","type":"uint64"},{"internalType":"address[]","name":"recipients","type":"address[]"},{"internalType":"externalEuint256","name":"encAutoLimit","type":"bytes32"},{"internalType":"bytes","name":"autoLimitProof","type":"bytes"},{"internalType":"externalEuint256","name":"encBudget","type":"bytes32"},{"internalType":"bytes","name":"budgetProof","type":"bytes"},{"internalType":"externalEuint256","name":"encReserveFloor","type":"bytes32"},{"internalType":"bytes","name":"reserveProof","type":"bytes"}],"name":"proposeMandate","outputs":[{"internalType":"uint256","name":"mandateId","type":"uint256"}],"stateMutability":"nonpayable","type":"function"}]
+[
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "mandateId",
+        "type": "uint256"
+      }
+    ],
+    "name": "activateMandate",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "name": "activeMandateOf",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "mandateId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getMandate",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "delegate",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "validFrom",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "validUntil",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint32",
+        "name": "version",
+        "type": "uint32"
+      },
+      {
+        "internalType": "enum VeilGuardModule.MandateState",
+        "name": "state",
+        "type": "uint8"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "autoLimit",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "budgetLeft",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "reserveFloor",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "address[]",
+        "name": "recipients",
+        "type": "address[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "nextMandateId",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "delegate",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "validFrom",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "validUntil",
+        "type": "uint64"
+      },
+      {
+        "internalType": "address[]",
+        "name": "recipients",
+        "type": "address[]"
+      },
+      {
+        "internalType": "externalEuint256",
+        "name": "encAutoLimit",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes",
+        "name": "autoLimitProof",
+        "type": "bytes"
+      },
+      {
+        "internalType": "externalEuint256",
+        "name": "encBudget",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes",
+        "name": "budgetProof",
+        "type": "bytes"
+      },
+      {
+        "internalType": "externalEuint256",
+        "name": "encReserveFloor",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes",
+        "name": "reserveProof",
+        "type": "bytes"
+      }
+    ],
+    "name": "proposeMandate",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "mandateId",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "requestId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bytes",
+        "name": "decryptionProof",
+        "type": "bytes"
+      }
+    ],
+    "name": "finalize",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "requestId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getRequest",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "mandateId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "delegate",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "recipient",
+        "type": "address"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "memoHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint64",
+        "name": "createdAt",
+        "type": "uint64"
+      },
+      {
+        "internalType": "enum VeilGuardModule.RequestState",
+        "name": "state",
+        "type": "uint8"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "amount",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "decision",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "blockedReason",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "nextRequestId",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "requestId",
+        "type": "uint256"
+      }
+    ],
+    "name": "executeEscalated",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+]
