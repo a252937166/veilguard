@@ -50,6 +50,16 @@ export const VIOLATION_DELEGATE = {
   address: '0xDFC0c6e0BAeD0948D8BA22A4917438938F2a40F4' as `0x${string}`,
 };
 
+/**
+ * Dedicated delegate for shared-demo Free Play. Visitors can type ANY amount
+ * here — if it gets blocked, only THIS delegate cools down, never the guided
+ * missions. Same intentionally-public low-power class as the other two.
+ */
+export const FREEPLAY_DELEGATE = {
+  key: '0x7662318d3b60a91622c6c9918ce1f4ad1df877414dab4e9d8dac105d03be2a11' as `0x${string}`,
+  address: '0x2Fc2DC420540B3A93D6FA45F07c536c305a96497' as `0x${string}`,
+};
+
 const clients = new Map<string, WalletClient>();
 
 export function demoWallet(role: DemoRole): WalletClient {
@@ -83,9 +93,23 @@ export function violationWallet(): WalletClient {
   return c;
 }
 
+export function freeplayWallet(): WalletClient {
+  let c = clients.get('freeplay');
+  if (!c) {
+    c = createWalletClient({
+      account: privateKeyToAccount(FREEPLAY_DELEGATE.key),
+      chain: sepolia,
+      transport: http(RPC_URL),
+    });
+    clients.set('freeplay', c);
+  }
+  return c;
+}
+
 /** address(lowercase) -> demo wallet, for transparent signer routing. */
 export function demoWalletByAddress(addr: string): WalletClient | undefined {
   if (addr.toLowerCase() === VIOLATION_DELEGATE.address.toLowerCase()) return violationWallet();
+  if (addr.toLowerCase() === FREEPLAY_DELEGATE.address.toLowerCase()) return freeplayWallet();
   for (const role of Object.keys(DEMO_ROLES) as DemoRole[]) {
     if (demoAddress(role).toLowerCase() === addr.toLowerCase()) return demoWallet(role);
   }

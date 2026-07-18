@@ -535,3 +535,30 @@ textarea:focus{outline:none;border-color:var(--veil)}
 .notice{background:rgba(14,19,32,.5)}
 .mission-panel .card{background:rgba(15,20,30,.55)}
 .feat,.lcard{background:rgba(15,20,30,.4)}
+
+/* ---------- committee discrete stages ---------- */
+.committee-live.stages{display:flex;flex-direction:column;gap:4px;align-items:stretch}
+.cl-row{display:flex;align-items:center;gap:10px;font-size:13.5px;padding:4px 0;color:var(--muted)}
+.cl-row.done{color:var(--ok)}
+.cl-row.active{color:var(--text);font-weight:600}
+.cl-dot{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font-size:12px;background:rgba(255,255,255,.05);flex:none}
+.cl-row.done .cl-dot{background:rgba(62,207,142,.15);color:var(--ok)}
+.cl-age{margin-left:auto;font-size:11.5px}
+.cl-note{font-size:12px;margin-top:6px;border-top:1px solid rgba(255,255,255,.07);padding-top:8px}
+
+/* ---------- progressive-disclosure cards ---------- */
+details.prog-acc>summary{cursor:pointer;list-style:none}
+details.prog-acc>summary::-webkit-details-marker{display:none}
+details.prog-acc>summary::after{content:'▸';float:right;color:var(--muted);transition:transform .15s}
+details.prog-acc[open]>summary::after{transform:rotate(90deg)}
+details.prog-acc[open]>summary{margin-bottom:10px}
+
+/* ---------- mobile: mission strip on top ---------- */
+@media(max-width:980px){
+  .mission-panel{order:-1;position:static}
+  .mission-panel .mp-card:last-child{display:none}          /* privacy checks hidden on mobile */
+  .mission-panel .mp-list{flex-direction:row;flex-wrap:wrap;gap:8px}
+  .mission-panel .mp-row{border-bottom:0;padding:2px 8px 2px 2px;font-size:12.5px;background:rgba(255,255,255,.04);border-radius:999px}
+  .mission-panel .mp-out{display:none}
+  .mission-panel .mp-doneblock .mp-row{background:none}
+}

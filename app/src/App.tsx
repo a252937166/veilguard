@@ -48,6 +48,8 @@ type Ctx = {
   startDemo: (role: DemoRole) => void;
   openRolePicker: () => void;
   goTab: (tab: string) => void;
+  lastUpdated: number | null;
+  loadError: boolean;
 };
 const AppCtx = createContext<Ctx>(null as any);
 export const useApp = () => useContext(AppCtx);
@@ -287,7 +289,7 @@ export function App() {
     return roles.length ? roles : ['OBSERVER'];
   }, [isAdmin, isOwner, isDelegate, isAuditor]);
 
-  const ctx: Ctx = { account, chainOk, owners, paused, mandates, requests, refresh, toast, run, busy, demoRole, startDemo: enterDemo, openRolePicker: () => setTryOpen(true), goTab: (t) => setTab(t as any) };
+  const ctx: Ctx = { account, chainOk, owners, paused, mandates, requests, refresh, toast, run, busy, demoRole, startDemo: enterDemo, openRolePicker: () => setTryOpen(true), goTab: (t) => setTab(t as any), lastUpdated, loadError };
 
   const tryModal = tryOpen && (
     <div className="modal-back" onClick={() => setTryOpen(false)}>

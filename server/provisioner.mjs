@@ -201,7 +201,13 @@ async function finalizeRequest(id) {
  * after a short review window with a REAL Safe 2-of-2 execTransaction (both
  * owner keys live only on this server; neither is ever shipped to a browser).
  */
-const AUTO_APPROVE_MS = Number(process.env.AUTO_APPROVE_MS ?? 45_000);
+const AUTO_APPROVE_MS = Number(process.env.AUTO_APPROVE_MS ?? 18_000);
+// Non-demo escalations are NEVER silently approved — that would hollow out the
+// "private threshold + Safe governance" semantics for provisioned wallets. They
+// stay AwaitingSafeApproval; after this window the committee CANCELS them
+// (funds return to the treasury escrow, the mandate slot frees up).
+const NON_DEMO_CANCEL_MS = Number(process.env.NON_DEMO_CANCEL_MS ?? 30 * 60_000);
+const isDemoDelegate = (a) => DEMO_DELEGATES.some((d) => d.toLowerCase() === a.toLowerCase());
 const approvingIds = new Set();
 async function sweepFinalize() {
   try {
@@ -216,16 +222,30 @@ async function sweepFinalize() {
         try { await finalizeRequest(i); console.log(`[sweep] finalized #${i}`); }
         catch (e) { console.log(`[sweep] #${i} finalize failed: ${e?.shortMessage ?? e?.message}`); }
       } else if (state === 3) {
-        // AwaitingSafeApproval — approve after the review window
-        if (Date.now() - Number(r[4]) * 1000 < AUTO_APPROVE_MS) continue;
-        approvingIds.add(key);
-        try {
-          const data = encodeFunctionData({ abi: MODULE_ABI, functionName: 'executeEscalated', args: [i] });
-          const hash = await safeExec2of2(MODULE, data);
-          console.log(`[sweep] escalation #${i} approved by committee 2-of-2 ${hash}`);
-        } catch (e) {
-          console.log(`[sweep] #${i} approve failed: ${e?.shortMessage ?? e?.message}`);
-        } finally { approvingIds.delete(key); }
+        const age = Date.now() - Number(r[4]) * 1000;
+        if (isDemoDelegate(r[1])) {
+          // demo treasury: committee approves after the review window (real 2-of-2)
+          if (age < AUTO_APPROVE_MS) continue;
+          approvingIds.add(key);
+          try {
+            const data = encodeFunctionData({ abi: MODULE_ABI, functionName: 'executeEscalated', args: [i] });
+            const hash = await safeExec2of2(MODULE, data);
+            console.log(`[sweep] demo escalation #${i} approved by committee 2-of-2 ${hash}`);
+          } catch (e) {
+            console.log(`[sweep] #${i} approve failed: ${e?.shortMessage ?? e?.message}`);
+          } finally { approvingIds.delete(key); }
+        } else {
+          // provisioned wallets: never auto-approve; time-boxed cancel instead
+          if (age < NON_DEMO_CANCEL_MS) continue;
+          approvingIds.add(key);
+          try {
+            const data = encodeFunctionData({ abi: MODULE_ABI, functionName: 'cancelEscalated', args: [i] });
+            const hash = await safeExec2of2(MODULE, data);
+            console.log(`[sweep] non-demo escalation #${i} expired unapproved — cancelled by committee ${hash}`);
+          } catch (e) {
+            console.log(`[sweep] #${i} cancel failed: ${e?.shortMessage ?? e?.message}`);
+          } finally { approvingIds.delete(key); }
+        }
       }
     }
   } catch (e) { console.log(`[sweep] error: ${e?.shortMessage ?? e?.message}`); }
@@ -241,11 +261,12 @@ if (SWEEP_ENABLED) setInterval(sweepFinalize, SWEEP_MS);
 // every judge sees reproducible outcomes with zero manual setup.
 const DEMO_RECIPIENT = process.env.DEMO_RECIPIENT ?? '0xc4ba09787f46441a517467fc12af459d8268c60f';
 const DEMO_DELEGATES = [
-  process.env.DEMO_DELEGATE ?? '0x17ee5ad7e4b40cadafad27c5f68f74d02c7fd532',        // main demo delegate
+  process.env.DEMO_DELEGATE ?? '0x17ee5ad7e4b40cadafad27c5f68f74d02c7fd532',        // main demo delegate (guided missions)
   process.env.VIOLATION_DELEGATE ?? '0xdfc0c6e0baed0948d8ba22a4917438938f2a40f4',   // blocked-scenario delegate
+  process.env.FREEPLAY_DELEGATE ?? '0x2fc2dc420540b3a93d6fa45f07c536c305a96497',    // free-play delegate (visitor sandboxing)
 ];
-const REFRESH_MIN_BUDGET = usdc(100);
-const REFRESH_CHECK_MS = Number(process.env.REFRESH_CHECK_MS ?? 5 * 60_000);
+const REFRESH_MIN_BUDGET = usdc(150);
+const REFRESH_CHECK_MS = Number(process.env.REFRESH_CHECK_MS ?? 2 * 60_000);
 const GAS_FLOOR = 3n * 10n ** 15n;   // 0.003 ETH
 const GAS_TOPUP = 10n * 10n ** 15n;  // 0.01 ETH
 
@@ -275,11 +296,21 @@ async function refreshDemoMandateIfDrained() {
         const id = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'activeMandateOf', args: [delegate] });
         let needsFresh = id === 0n;
         if (!needsFresh) {
-          const m = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getMandate', args: [id] });
-          const hc = await getHandleClient();
-          const budget = BigInt((await hc.decrypt(m[6])).value);
-          needsFresh = budget < REFRESH_MIN_BUDGET;
-          if (needsFresh) console.log(`[demo] ${delegate} mandate #${id} budget ${budget} below floor — refreshing`);
+          try {
+            const m = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getMandate', args: [id] });
+            const hc = await getHandleClient();
+            const budget = BigInt((await hc.decrypt(m[6])).value);
+            needsFresh = budget < REFRESH_MIN_BUDGET;
+            if (needsFresh) console.log(`[demo] ${delegate} mandate #${id} budget ${budget} below floor — refreshing`);
+          } catch (e) {
+            const msg = `${e?.shortMessage ?? e?.message ?? e}`;
+            if (/not authorized|does not exist/i.test(msg)) {
+              // pre-rotation mandate: its handles are granted to the RETIRED admin.
+              // Replace it so the new admin can monitor the budget again.
+              needsFresh = true;
+              console.log(`[demo] ${delegate} mandate #${id} has legacy (pre-rotation) handles — refreshing`);
+            } else { throw e; }
+          }
         } else {
           console.log(`[demo] ${delegate} has no active mandate — provisioning`);
         }
@@ -350,6 +381,45 @@ async function provision(address) {
   return { mandateId: Number(mandateId), proposeTx, activateTx };
 }
 
+// ------- demo readiness probe -------
+// "Run scenario" must be deterministic: before running, the client asks whether
+// this delegate is actually ready (mandate, slot, cooldown, gas, budget). If it
+// is not, we kick an async refresh and tell the client why.
+const budgetCache = new Map(); // delegate -> { at, budget }
+async function delegateBudget(delegate, mandateId) {
+  const c = budgetCache.get(delegate);
+  if (c && Date.now() - c.at < 60_000) return c.budget;
+  const m = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getMandate', args: [mandateId] });
+  const hc = await getHandleClient();
+  const budget = BigInt((await hc.decrypt(m[6])).value);
+  budgetCache.set(delegate, { at: Date.now(), budget });
+  return budget;
+}
+function kickRefresh() { lastBudgetCheck = 0; refreshDemoMandateIfDrained(); }
+
+async function demoReady(delegate) {
+  if (!isDemoDelegate(delegate)) return { ready: false, reason: 'not a demo delegate' };
+  const mandateId = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'activeMandateOf', args: [delegate] });
+  if (mandateId === 0n) { kickRefresh(); return { ready: false, reason: 'demo mandate is being provisioned — ready in ~2 min' }; }
+  const cool = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'cooldownUntil', args: [delegate] });
+  const coolLeft = Number(cool) - Math.floor(Date.now() / 1000);
+  if (coolLeft > 0) return { ready: false, reason: 'anti-probing cooldown', cooldownLeft: coolLeft };
+  const nextR = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'nextRequestId' });
+  for (let i = nextR - 1n; i > 0n && i > nextR - 30n; i--) {
+    const r = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getRequest', args: [i] });
+    if ([1, 3].includes(Number(r[5])) && r[1].toLowerCase() === delegate.toLowerCase()) {
+      return { ready: false, reason: 'a payment is already in flight — it clears in under a minute' };
+    }
+  }
+  const bal = await pub.getBalance({ address: delegate });
+  if (bal < GAS_FLOOR) { kickRefresh(); return { ready: false, reason: 'demo delegate is being topped up with gas — retry in ~1 min' }; }
+  try {
+    const budget = await delegateBudget(delegate, mandateId);
+    if (budget < REFRESH_MIN_BUDGET) { kickRefresh(); return { ready: false, reason: 'demo budget is being refreshed — ready in ~2 min' }; }
+  } catch { /* budget probe failing is not fatal — the request itself will tell */ }
+  return { ready: true };
+}
+
 // ------- http -------
 const json = (res, code, obj) => {
   res.writeHead(code, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': ALLOWED_ORIGIN, 'Vary': 'Origin', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'POST, GET, OPTIONS' });
@@ -370,6 +440,20 @@ http.createServer((req, res) => {
         json(res, 200, { ok: true, ...result });
       } catch (e) {
         json(res, 400, { error: e?.shortMessage ?? e?.message ?? 'co-sign failed' });
+      }
+    });
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/api/demo-ready') {
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 300) req.destroy(); });
+    req.on('end', async () => {
+      try {
+        const { delegate } = JSON.parse(body || '{}');
+        if (!isAddress(delegate)) return json(res, 400, { error: 'bad delegate' });
+        json(res, 200, await demoReady(delegate));
+      } catch (e) {
+        json(res, 500, { error: e?.shortMessage ?? e?.message ?? 'probe failed' });
       }
     });
     return;
