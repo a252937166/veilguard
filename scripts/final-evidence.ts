@@ -1,7 +1,7 @@
 /**
  * FINAL EVIDENCE RUN — one clean pass over the fixed v1.0 deployment that
  * freezes every transaction hash judges need, with REAL 2-of-2 Safe multisig
- * (Protocol Kit + API Kit via the Safe Transaction Service) for every
+ * (two distinct owner EIP-712 signatures, executed on-chain — no Transaction Service) for every
  * governance action.
  *
  *   1. admin proposes an encrypted mandate (autoLimit 40 / budget 500 / floor 300)

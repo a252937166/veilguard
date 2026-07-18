@@ -13,7 +13,7 @@ and the chain only ever learns a coarse, publicly verifiable outcome:
 | Outcome | Meaning |
 | --- | --- |
 | `WITHIN MANDATE` | Policy passed — a confidential ERC-7984 transfer executes immediately |
-| `APPROVAL REQUIRED` | Above the auto-limit — a real Safe multisig proposal is required |
+| `APPROVAL REQUIRED` | Above the auto-limit — a real 2-of-2 Safe multisig approval is required |
 | `BLOCKED` | Policy violated — no funds move; the coarse reason stays private to the delegate & admin |
 
 Exact limits, remaining budgets, thresholds and amounts are **never** revealed on-chain.
@@ -154,10 +154,9 @@ mandate.
   **immutable snapshot** (a fresh isolated handle), never a grant on live state.
 - **Recipient addresses are public** in P0 (the allow-list is plaintext).
 - **Escalation UX**: signers decrypt the amount in the VeilGuard view and confirm
-  the matching proposal in the Safe interface; the official Safe UI does not
-  decrypt Nox handles itself.
+  the escalated amount in the VeilGuard view; the official Safe UI does not decrypt Nox handles itself.
 - The Sepolia Safe is **2-of-2**: activation and escalation approval each require
-  two distinct owner signatures (Protocol Kit, driven by `scripts/final-evidence.ts`).
+  two distinct owner EIP-712 signatures, threshold 2 (driven on-chain by `scripts/final-evidence.ts`). The signatures are produced by the demo automation, not collected from separate humans via the Safe Transaction Service / Safe{Wallet} queue.
 - **Changing the Safe owner set does not revoke access already granted to historical
   handles** (Nox ACLs are irreversible). Propose a new policy version after owner rotation.
 - Audit packets are **selective disclosure**, not a standalone compliance proof: they

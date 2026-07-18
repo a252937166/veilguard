@@ -256,7 +256,7 @@ export function App() {
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h3>⚡ Try VeilGuard instantly</h3>
         <p className="muted" style={{ fontSize: 13.5, marginBottom: 14 }}>
-          Pick a demo role — a shared, gas-sponsored testnet account with that role's on-chain
+          Pick a demo role — a shared, pre-funded public testnet account with that role's on-chain
           permissions. No wallet, no setup. (The powerful roles — finance admin and Safe signer —
           are deliberately not public.)
         </p>
@@ -359,7 +359,7 @@ export function App() {
 
         {demoRole && (
           <div className="demobar">
-            <span>{DEMO_ROLES[demoRole].icon} You are the <b>{DEMO_ROLES[demoRole].label}</b> (shared demo account, gas sponsored) — {DEMO_ROLES[demoRole].blurb}</span>
+            <span>{DEMO_ROLES[demoRole].icon} You are the <b>{DEMO_ROLES[demoRole].label}</b> (shared pre-funded demo account) — {DEMO_ROLES[demoRole].blurb}</span>
             <button className="btn small ghost" onClick={() => setTryOpen(true)}>switch role</button>
           </div>
         )}

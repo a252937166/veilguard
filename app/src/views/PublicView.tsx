@@ -4,6 +4,7 @@ import { handleClientFor, makeWalletClient, publicClient } from '../nox';
 import { useApp } from '../App';
 import { MandatePill, RequestPill } from '../ui';
 import { EvidenceMatrix } from './Evidence';
+import { Donut } from '../Donut';
 
 function ago(ts: bigint): string {
   const s = Math.floor(Date.now() / 1000) - Number(ts);
@@ -42,27 +43,42 @@ export function PublicView() {
       await publicClient.waitForTransactionReceipt({ hash });
     });
 
+  const escalatedCount = stats.escalated + requests.filter((r) => r.state === 5).length;
   return (
     <>
-      <div className="stats">
-        <div className="stat hero-stat">
-          <span className="stat-icon">🔒</span>
-          <div>
-            <div className="stat-val">Confidential</div>
-            <div className="stat-label">Treasury balance — {A(ADDR.Safe)}</div>
-          </div>
+      <div className="dash-head">
+        <div>
+          <h2 className="dash-title">Dashboard overview</h2>
+          <p className="dash-sub">Live public state of the confidential treasury · Ethereum Sepolia</p>
         </div>
-        <div className="stat"><div className="stat-val">{stats.active}</div><div className="stat-label">active mandate{stats.active !== 1 ? 's' : ''}</div></div>
-        <div className="stat"><div className="stat-val">{stats.total}</div><div className="stat-label">spend requests</div></div>
-        <div className="stat ok"><div className="stat-val">{stats.executed}</div><div className="stat-label">executed</div></div>
-        <div className="stat warn"><div className="stat-val">{stats.escalated + requests.filter((r)=>r.state===5).length}</div><div className="stat-label">escalated</div></div>
-        <div className="stat bad"><div className="stat-val">{stats.blocked}</div><div className="stat-label">blocked</div></div>
+        <a className="pill dim" href={`https://sepolia.etherscan.io/address/${ADDR.Safe}`} target="_blank" rel="noopener">Safe {short(ADDR.Safe)} ↗</a>
       </div>
 
-      <div className="notice">
-        This is the <b>public view</b> — everything a chain observer can learn: who requested, when, and the
-        coarse outcome. <b>Never</b> amounts, limits, budgets or reserve levels. Those live on-chain only as
-        encrypted handles and are decrypted per-role through the Nox gateway.
+      <div className="tiles">
+        <div className="tile"><div className="tile-label">Total mandates</div><div className="tile-val">{stats.mandates}</div><div className="tile-sub">{stats.active} active</div></div>
+        <div className="tile"><div className="tile-label">Total requests</div><div className="tile-val">{stats.total}</div><div className="tile-sub">{stats.pending} in flight</div></div>
+        <div className="tile"><div className="tile-label">Executed</div><div className="tile-val ok">{stats.executed}</div><div className="tile-sub">confidential payouts</div></div>
+        <div className="tile hero-tile"><div className="tile-label">Treasury balance</div><div className="tile-val enc-big">🔒 Encrypted</div><div className="tile-sub">decryptable by role only</div></div>
+      </div>
+
+      <div className="grid2">
+        <div className="card">
+          <h3>Request outcomes <small>public three-state breakdown</small></h3>
+          <Donut total={stats.total}
+            segments={[
+              { label: 'Executed', value: stats.executed, color: '#3ecf8e' },
+              { label: 'Escalated / approved', value: escalatedCount, color: '#f5b83d' },
+              { label: 'Blocked', value: stats.blocked, color: '#ff6b6b' },
+              { label: 'In flight', value: stats.pending, color: '#7c5cff' },
+            ]} />
+        </div>
+        <div className="card">
+          <h3>What stays private <small>vs. what the chain sees</small></h3>
+          <div className="privacy-split">
+            <div><div className="ps-h enc">🔒 Encrypted</div><ul><li>Payment amounts</li><li>Auto-limit, budget, reserve floor</li><li>Blocked reasons (public gets none)</li></ul></div>
+            <div><div className="ps-h pub">👁 Public</div><ul><li>Who requested &amp; when</li><li>The three-state outcome</li><li>Transaction hashes</li></ul></div>
+          </div>
+        </div>
       </div>
 
       <EvidenceMatrix />

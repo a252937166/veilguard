@@ -5,7 +5,7 @@
  *   3. verify and rewrite deployments.json
  *
  * After this script every governance action requires a REAL 2-of-2 Safe
- * multisig via the Transaction Service (see safe-lib.ts).
+ * multisig (two owner EIP-712 signatures, on-chain — see safe-lib.ts).
  *
  * Run: npx hardhat run scripts/redeploy-module.ts --network sepolia
  */

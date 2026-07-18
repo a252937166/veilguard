@@ -31,7 +31,13 @@ const {
   NOX_COMPUTE = '0x24ef36ec5b626d7dcd09a98f3083c2758f0f77bf',
   SUBGRAPH_URL = 'https://thegraph.ethereum-sepolia-testnet.noxprotocol.io/api/subgraphs/id/9CsccKwvgYFo72zZeU4k4wj2NEBLdWhVE3EUandgmzgo',
   PORT = '4041',
+  PROVISION_ENABLED = 'true',                       // emergency kill switch
+  ALLOWED_ORIGIN = 'https://veilguard.axiqo.xyz',   // CORS lock
+  MAX_PER_DAY = '20',                               // global daily mandate cap
 } = process.env;
+
+const enabled = PROVISION_ENABLED !== 'false';
+const dayCap = Number(MAX_PER_DAY);
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 const usdc = (n) => BigInt(Math.round(n * 1e6));
@@ -104,6 +110,16 @@ async function getHandleClient() {
 const lastByAddr = new Map();
 const HOUR = 3600_000;
 let inFlight = false;
+let dayStart = 0;        // stamped lazily (Date.now unavailable pre-request in cron, fine here)
+let dayCount = 0;
+
+const moduleReadAbi = MODULE_ABI;
+
+/** Idempotency: if this address already holds an active mandate, reuse it. */
+async function existingActiveMandate(address) {
+  const id = await pub.readContract({ address: MODULE, abi: moduleReadAbi, functionName: 'activeMandateOf', args: [address] });
+  return id > 0n ? Number(id) : 0;
+}
 
 async function provision(address) {
   const hc = await getHandleClient();
@@ -129,14 +145,15 @@ async function provision(address) {
 
 // ------- http -------
 const json = (res, code, obj) => {
-  res.writeHead(code, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'POST, GET, OPTIONS' });
+  res.writeHead(code, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': ALLOWED_ORIGIN, 'Vary': 'Origin', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'POST, GET, OPTIONS' });
   res.end(JSON.stringify(obj));
 };
 
 http.createServer((req, res) => {
   if (req.method === 'OPTIONS') return json(res, 204, {});
-  if (req.url === '/api/health') return json(res, 200, { ok: true, module: MODULE, safe: SAFE });
+  if (req.url === '/api/health') return json(res, 200, { ok: true, enabled, module: MODULE, safe: SAFE, dayCount, dayCap });
   if (req.method === 'POST' && req.url === '/api/provision') {
+    if (!enabled) return json(res, 503, { error: 'self-service provisioning is currently disabled — use the shared demo Delegate/Auditor instead' });
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 1000) req.destroy(); });
     req.on('end', async () => {
@@ -144,13 +161,25 @@ http.createServer((req, res) => {
         const { address } = JSON.parse(body || '{}');
         if (!isAddress(address)) return json(res, 400, { error: 'invalid address' });
         const key = address.toLowerCase();
+
+        // idempotent: reuse an already-active mandate instead of creating spam
+        const existing = await existingActiveMandate(address);
+        if (existing) return json(res, 200, { ok: true, mandateId: existing, reused: true });
+
         const prev = lastByAddr.get(key);
-        if (prev && Date.now() - prev < HOUR) return json(res, 429, { error: 'already provisioned recently — you can submit spend requests now (one provision per address per hour)' });
+        if (prev && Date.now() - prev < HOUR) return json(res, 429, { error: 'already provisioned recently — one provision per address per hour' });
+
+        // global daily cap (anti gas-drain / mandate-spam)
+        const now = Date.now();
+        if (now - dayStart > 24 * HOUR) { dayStart = now; dayCount = 0; }
+        if (dayCount >= dayCap) return json(res, 429, { error: 'daily demo provisioning cap reached — please use the shared demo Delegate/Auditor for now' });
+
         if (inFlight) return json(res, 503, { error: 'another provisioning is in progress — try again in a few seconds' });
         inFlight = true;
         try {
           const result = await provision(address);
           lastByAddr.set(key, Date.now());
+          dayCount++;
           json(res, 200, { ok: true, ...result });
         } finally { inFlight = false; }
       } catch (e) {

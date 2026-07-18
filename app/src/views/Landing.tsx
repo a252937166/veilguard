@@ -21,7 +21,7 @@ export function Landing({ onLaunch, onTry }: { onLaunch: () => void; onTry: () =
           <div><span className="lnum">encrypted</span><span className="llabel">budgets · limits · reserve</span></div>
           <div><span className="lnum">5.4s</span><span className="llabel">TEE decision, one Sepolia run</span></div>
           <div><span className="lnum">3</span><span className="llabel">public outcomes, zero numbers</span></div>
-          <div><span className="lnum">4</span><span className="llabel">roles, one confidential loop</span></div>
+          <div><span className="lnum">4</span><span className="llabel">governed roles · 2 you can demo</span></div>
         </div>
       </section>
 
@@ -45,7 +45,7 @@ export function Landing({ onLaunch, onTry }: { onLaunch: () => void; onTry: () =
         <p className="llead">A delegate submits an encrypted amount. The decision is computed on ciphertext and funds are atomically reserved in the same transaction — a blocked request reserves an encrypted zero, indistinguishable on-chain.</p>
         <div className="lgrid">
           <div className="lcard out"><span className="pill ok">WITHIN MANDATE</span><p>Satisfies every encrypted rule. A confidential ERC-7984 transfer executes immediately; the private budget shrinks. Nobody learns the amount.</p></div>
-          <div className="lcard out"><span className="pill warn">APPROVAL REQUIRED</span><p>Above the auto-limit. Funds stay reserved while a real Safe multisig proposal is collected. Only signers can decrypt the amount.</p></div>
+          <div className="lcard out"><span className="pill warn">APPROVAL REQUIRED</span><p>Above the auto-limit. Funds stay reserved until a real 2-of-2 Safe multisig approves. Only signers can decrypt the amount.</p></div>
           <div className="lcard out"><span className="pill bad">BLOCKED</span><p>Budget, balance or reserve rule violated. No funds move, the budget is untouched, and the coarse reason stays private to the delegate and admin.</p></div>
         </div>
       </section>

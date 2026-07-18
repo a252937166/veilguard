@@ -81,7 +81,7 @@ export function NoRole({
         {demo
           ? <button className="btn primary" onClick={() => startDemo(demo)}>⚡ Try as the demo {demo === 'delegate' ? 'Delegate' : 'Auditor'} — instant</button>
           : <button className="btn primary" onClick={openRolePicker}>⚡ Try a demo role</button>}
-        <span className="muted" style={{ fontSize: 12.5 }}>a shared, gas-sponsored account with the right permissions — no setup</span>
+        <span className="muted" style={{ fontSize: 12.5 }}>a shared, pre-funded public account with the right permissions — no setup</span>
       </div>
     </div>
   );

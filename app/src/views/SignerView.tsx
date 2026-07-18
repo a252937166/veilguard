@@ -42,7 +42,7 @@ export function SignerView() {
         </table></div>
         <p className="muted" style={{ marginTop: 10, fontSize: 12.5 }}>
           Approval is driven by a real Safe transaction with two owner signatures
-          (<span className="mono">Protocol Kit</span> → both owners sign → execute). Because a genuine 2-of-2 needs
+          (two owners each produce an EIP-712 signature → execute once threshold 2 is met). Because a genuine 2-of-2 needs
           two separate keys, the interactive demo does not custody the owner keys in your browser — instead the
           proven flow is recorded on-chain below.
         </p>
@@ -70,7 +70,7 @@ export function SignerView() {
         <p className="muted" style={{ marginTop: 10, fontSize: 12.5 }}>
           Safe: <a className="mono alink" href={scan(ADDR.Safe)} target="_blank" rel="noopener">{short(ADDR.Safe)}</a> ·
           threshold {ev.threshold} · each action carries two confirmations. Verify on Etherscan or in the
-          Safe&#123;Wallet&#125; queue.
+          on Etherscan (two confirmations on each governance transaction). Note: signatures here are produced by the demo automation, not collected from separate humans via the Safe Transaction Service.
         </p>
       </div>
     </>
