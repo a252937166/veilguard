@@ -2,18 +2,23 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { formatEther } from 'viem';
 import { ADDR, erc20Abi, fmt, scan, short } from './config';
 import { publicClient } from './nox';
+import { isEmojiIcon, type WalletInfo } from './wallet';
 
 export function WalletMenu({
-  account, roleChips, chainOk, onConnect, onSwitchChain, onSwitchAccount, onDisconnect,
+  account, roleChips, chainOk, wallet, isDemo, onConnect, onSwitchChain, onSwitchAccount, onDisconnect,
 }: {
   account?: `0x${string}`;
   roleChips: string[];
   chainOk: boolean;
+  wallet?: WalletInfo | null;
+  isDemo?: boolean;
   onConnect: () => void;
   onSwitchChain: () => void;
   onSwitchAccount: () => void;
   onDisconnect: () => void;
 }) {
+  const walletName = isDemo ? 'Demo account' : wallet?.name ?? 'Wallet';
+  const walletIcon = isDemo ? '🎭' : wallet?.icon;
   const [open, setOpen] = useState(false);
   const [eth, setEth] = useState<bigint>();
   const [tusdc, setTusdc] = useState<bigint>();
@@ -57,7 +62,11 @@ export function WalletMenu({
     <div className="wallet" ref={ref}>
       {!chainOk && <button className="btn small wrongnet" onClick={onSwitchChain}>⚠ Wrong network — switch to Sepolia</button>}
       <button className={`wallet-btn ${open ? 'open' : ''}`} onClick={() => setOpen((o) => !o)}>
-        <span className={`netdot ${chainOk ? 'ok' : 'bad'}`} />
+        <span className="wallet-ico">
+          {walletIcon && isEmojiIcon(walletIcon) ? walletIcon
+            : walletIcon ? <img src={walletIcon} alt="" width={16} height={16} />
+            : <span className={`netdot ${chainOk ? 'ok' : 'bad'}`} />}
+        </span>
         <span className="wallet-eth">{eth !== undefined ? `${Number(formatEther(eth)).toFixed(3)} ETH` : '…'}</span>
         <span className="wallet-addr mono">{short(account)}</span>
         <span className="caret">▾</span>
@@ -65,6 +74,14 @@ export function WalletMenu({
 
       {open && (
         <div className="wallet-pop">
+          <div className="wp-wallet">
+            <span className="wp-wallet-ico">
+              {walletIcon && isEmojiIcon(walletIcon) ? walletIcon
+                : walletIcon ? <img src={walletIcon} alt="" width={20} height={20} /> : '👛'}
+            </span>
+            <span className="wp-wallet-name">{walletName}</span>
+            <span className={`wp-net ${chainOk ? 'ok' : 'bad'}`}>{chainOk ? '● Sepolia' : '● wrong network'}</span>
+          </div>
           <div className="wp-head">
             <div className="wp-roles">
               {roleChips.map((r) => <span key={r} className="pill tee">{r}</span>)}

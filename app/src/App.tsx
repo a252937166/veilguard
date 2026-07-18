@@ -10,7 +10,10 @@ import { FaucetView } from './views/FaucetView';
 import { Landing } from './views/Landing';
 import { GuidedTour, useTour, type TabName } from './GuidedTour';
 import { WalletMenu } from './WalletMenu';
+import { ConnectModal } from './ConnectModal';
 import { DEMO_ROLES, demoAddress, type DemoRole } from './demo';
+import { getActiveProvider, setActiveProvider } from './nox';
+import { listWallets, onWalletsChanged, type WalletInfo } from './wallet';
 import evidence from './demo-evidence.json';
 
 const EVIDENCE_COMMIT = evidence.commit;
@@ -53,6 +56,8 @@ export function App() {
   const [tab, setTab] = useState<(typeof TABS)[number]>('Dashboard');
   const [demoRole, setDemoRole] = useState<DemoRole | null>(null);
   const [tryOpen, setTryOpen] = useState(false);
+  const [connectOpen, setConnectOpen] = useState(false);
+  const [walletInfo, setWalletInfo] = useState<WalletInfo | null>(null);
   const tour = useTour();
 
   const enterDemo = useCallback((role: DemoRole) => {
@@ -104,18 +109,31 @@ export function App() {
     }
   }, [refresh, toast]);
 
-  // wallet
-  const connect = useCallback(async () => {
-    const eth = (window as any).ethereum;
-    if (!eth) { setTryOpen(true); return; } // no wallet → offer demo mode
-    setDemoRole(null);
-    const [acct] = await eth.request({ method: 'eth_requestAccounts' });
-    setAccount(acct);
-    setChainId(Number(await eth.request({ method: 'eth_chainId' })));
+  // wallet — open the picker (EIP-6963 multi-wallet)
+  const connect = useCallback(() => {
+    if (!listWallets().length) { setTryOpen(true); return; } // no wallet → offer demo mode
+    setConnectOpen(true);
   }, []);
 
+  // connect to a SPECIFIC detected wallet
+  const connectWallet = useCallback(async (w: WalletInfo) => {
+    try {
+      setActiveProvider(w.provider);
+      setDemoRole(null);
+      const accts = (await w.provider.request({ method: 'eth_requestAccounts' })) as string[];
+      if (!accts?.[0]) return;
+      setAccount(accts[0] as `0x${string}`);
+      setChainId(Number(await w.provider.request({ method: 'eth_chainId' })));
+      setWalletInfo(w);
+      setConnectOpen(false);
+    } catch (e: any) {
+      if (e?.code !== 4001) toast(`Connect failed: ${e?.shortMessage ?? e?.message ?? e}`, true);
+    }
+  }, [toast]);
+
   const switchChain = useCallback(async () => {
-    const eth = (window as any).ethereum;
+    const eth = getActiveProvider();
+    if (!eth) return;
     try {
       await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0xaa36a7' }] });
     } catch (e: any) {
@@ -132,39 +150,42 @@ export function App() {
   }, []);
 
   const switchAccount = useCallback(async () => {
-    const eth = (window as any).ethereum;
+    const eth = getActiveProvider();
     if (!eth) return;
     try {
       await eth.request({ method: 'wallet_requestPermissions', params: [{ eth_accounts: {} }] });
-      const [acct] = await eth.request({ method: 'eth_requestAccounts' });
-      setAccount(acct);
+      const accts = (await eth.request({ method: 'eth_requestAccounts' })) as string[];
+      setAccount(accts[0] as `0x${string}`);
     } catch (e: any) {
       if (e?.code !== 4001) toast(`Switch account failed: ${e?.message ?? e}`, true);
     }
   }, [toast]);
 
   const disconnect = useCallback(async () => {
-    const eth = (window as any).ethereum;
+    const eth = getActiveProvider();
     try { await eth?.request({ method: 'wallet_revokePermissions', params: [{ eth_accounts: {} }] }); }
     catch { /* not all wallets support revoke — clearing local state still disconnects the UI */ }
     setAccount(undefined);
+    setWalletInfo(null);
+    setActiveProvider(undefined);
     toast('Wallet disconnected from VeilGuard.');
   }, [toast]);
 
+  // re-render wallet picker as wallets announce themselves
+  useEffect(() => onWalletsChanged(() => setConnectOpen((o) => o)), []);
+
+  // subscribe to the active provider's events once connected
   useEffect(() => {
-    const eth = (window as any).ethereum;
+    const eth = walletInfo?.provider;
     if (!eth) return;
-    eth.request({ method: 'eth_accounts' }).then((a: string[]) => a[0] && setAccount(a[0] as `0x${string}`));
-    eth.request({ method: 'eth_chainId' }).then((c: string) => setChainId(Number(c)));
     const onAcct = (a: string[]) => {
-      // don't let MetaMask events clobber an active demo session
-      setDemoRole((dr) => { if (!dr) setAccount(a[0] as `0x${string}` | undefined); return dr; });
+      setDemoRole((dr) => { if (!dr) { setAccount(a[0] as `0x${string}` | undefined); if (!a[0]) setWalletInfo(null); } return dr; });
     };
     const onChain = (c: string) => setChainId(Number(c));
     eth.on?.('accountsChanged', onAcct);
     eth.on?.('chainChanged', onChain);
     return () => { eth.removeListener?.('accountsChanged', onAcct); eth.removeListener?.('chainChanged', onChain); };
-  }, []);
+  }, [walletInfo]);
 
   // chain polling
   useEffect(() => {
@@ -298,6 +319,8 @@ export function App() {
               account={account}
               roleChips={demoRole ? [`DEMO · ${DEMO_ROLES[demoRole].label.toUpperCase()}`] : roleChips}
               chainOk={chainOk}
+              wallet={walletInfo}
+              isDemo={!!demoRole}
               onConnect={connect}
               onSwitchChain={switchChain}
               onSwitchAccount={demoRole ? () => setTryOpen(true) : switchAccount}
@@ -370,6 +393,7 @@ export function App() {
         </footer>
       </div>
       {tryModal}
+      {connectOpen && <ConnectModal onPick={connectWallet} onClose={() => setConnectOpen(false)} onDemo={() => setTryOpen(true)} />}
       {toastMsg && <div className={`toast ${toastMsg.err ? 'err' : ''}`}>{toastMsg.msg}</div>}
     </AppCtx.Provider>
   );
