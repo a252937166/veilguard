@@ -14,6 +14,7 @@ const ETH_FAUCETS = [
 export function FaucetView() {
   const { account, run, busy, toast, demoRole } = useApp();
   const [balance, setBalance] = useState<bigint>();
+  const [balanceChecking, setBalanceChecking] = useState(false);
   const [balanceUnavailable, setBalanceUnavailable] = useState(false);
   const [amount, setAmount] = useState('1000');
   const injected = !demoRole;
@@ -21,9 +22,11 @@ export function FaucetView() {
   const refreshBalance = useCallback(async () => {
     if (!account) {
       setBalance(undefined);
+      setBalanceChecking(false);
       setBalanceUnavailable(false);
       return;
     }
+    setBalanceChecking(true);
     try {
       const nextBalance = (await publicClient.readContract({
         address: ADDR.TestUSDC, abi: erc20Abi, functionName: 'balanceOf', args: [account],
@@ -36,6 +39,8 @@ export function FaucetView() {
       // available and give the user an explicit, recoverable read state.
       setBalance(undefined);
       setBalanceUnavailable(true);
+    } finally {
+      setBalanceChecking(false);
     }
   }, [account]);
   useEffect(() => { void refreshBalance(); }, [refreshBalance]);
@@ -117,11 +122,20 @@ export function FaucetView() {
       <div className="card">
         <h2>2 · TestUSDC — claim in one click
           {account && balance !== undefined && <small>your balance: {fmt(balance)} tUSDC</small>}
+          {account && balance === undefined && balanceChecking && <small role="status">checking balance…</small>}
         </h2>
         {account && balanceUnavailable && (
           <div className="inline-alert warning balance-read-alert" role="status">
             <span>Balance temporarily unavailable. This does not block a new claim.</span>
-            <button className="btn small" type="button" onClick={() => void refreshBalance()}>Retry balance</button>
+            <button
+              className="btn small"
+              type="button"
+              aria-busy={balanceChecking}
+              disabled={balanceChecking}
+              onClick={() => void refreshBalance()}
+            >
+              {balanceChecking ? <><span className="spin" /> Checking…</> : 'Retry balance'}
+            </button>
           </div>
         )}
         <div className="row">
