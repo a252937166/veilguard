@@ -15,7 +15,7 @@ function ago(ts: bigint): string {
 
 function outcomeLabel(request?: SpendRequest) {
   if (!request) return 'Ready to review';
-  return ['Unknown', request.decisionReady ? 'Proof ready' : 'TEE evaluating', 'Executed', 'Awaiting approval', 'Blocked', 'Rejected', 'Expired'][request.state] ?? 'Unknown';
+  return ['Unknown', request.decisionReady ? 'Proof ready' : 'TEE evaluating', 'Executed', 'Awaiting approval', 'Blocked', 'Cancelled · refunded', 'Expired'][request.state] ?? 'Unknown';
 }
 
 function requestTime(request?: SpendRequest) {

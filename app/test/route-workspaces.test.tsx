@@ -3,6 +3,8 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, expect, test, vi } from 'vitest';
+import { createDemoSession, saveDemoSession } from '../src/demo-session';
+import { demoMemoHash } from '../src/demo-scenarios';
 
 const appContext = vi.hoisted(() => ({ current: {} as any }));
 
@@ -57,7 +59,11 @@ function setAppContext() {
   };
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+  vi.unstubAllGlobals();
+});
 
 test('policy selection follows route history and the list route has no implicit selection', async () => {
   setAppContext();
@@ -104,4 +110,59 @@ test('approval selection follows route history and Back returns to the queue rou
   expect(document.querySelector('.approval-workbench')).toHaveClass('workbench-route-list');
   expect(within(screen.getByRole('article')).getByRole('status')).toHaveTextContent('Select a request');
   expect(document.querySelector('.object-list-item[aria-current="page"]')).toBeNull();
+});
+
+test('demo approval workspace contains only the current run-bound ShieldOps request', () => {
+  const runId = 'launch-current-run';
+  saveDemoSession(createDemoSession({ runId }));
+  const current = {
+    ...requests[0],
+    memoHash: demoMemoHash(runId, 'approval', requests[0].mandateId, requests[0].delegate),
+  };
+  const previousRun = {
+    ...requests[1],
+    memoHash: demoMemoHash('launch-previous-run', 'approval', requests[1].mandateId, requests[1].delegate),
+  };
+  setAppContext();
+  appContext.current.demoRole = 'delegate';
+  appContext.current.requests = [previousRun, current];
+
+  const router = createMemoryRouter([{ path: '*', element: <SignerView /> }], {
+    initialEntries: ['/approvals'],
+  });
+  render(<RouterProvider router={router} />);
+
+  expect(screen.getByRole('button', { name: /Request #10/i })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Request #11/i })).not.toBeInTheDocument();
+  expect(screen.getByText('1 awaiting decision')).toBeInTheDocument();
+});
+
+test('demo signer labels a cancellation as user Reject only after server attestation', async () => {
+  const runId = 'launch-attested-run';
+  saveDemoSession(createDemoSession({ runId }));
+  const cancelled = {
+    ...requests[0],
+    state: 5,
+    memoHash: demoMemoHash(runId, 'approval', requests[0].mandateId, requests[0].delegate),
+  };
+  setAppContext();
+  appContext.current.demoRole = 'delegate';
+  appContext.current.requests = [cancelled];
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    ok: true,
+    requestId: 10,
+    chainState: 5,
+    origin: 'user',
+    action: 'reject',
+    hash: `0x${'9'.repeat(64)}`,
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+  const router = createMemoryRouter([{ path: '*', element: <SignerView /> }], {
+    initialEntries: ['/approvals/10'],
+  });
+  render(<RouterProvider router={router} />);
+
+  expect(await screen.findByText('USER REJECTED · REFUNDED')).toBeInTheDocument();
+  expect(screen.getByText(/User selected Reject · authenticated by the run-bound server receipt/i)).toBeInTheDocument();
+  expect(fetch).toHaveBeenCalledWith('/api/demo-decision?runId=launch-attested-run&requestId=10', expect.objectContaining({ method: 'GET' }));
 });

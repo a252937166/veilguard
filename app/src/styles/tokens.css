@@ -6,6 +6,10 @@
   --surface-2: #161e2b;
   --surface-selected: #1c2440;
   --overlay: #111722;
+  --surface-ambient: rgba(15, 20, 30, .48);
+  --surface-payment: rgba(15, 20, 30, .72);
+  --surface-dense: rgba(13, 18, 27, .88);
+  --surface-action: rgba(12, 16, 24, .95);
   --border-subtle: #273143;
   --border-strong: #3a4660;
   --text-primary: #f4f6fb;
@@ -30,10 +34,13 @@
   --ease-out: cubic-bezier(.22, 1, .36, 1);
   --z-sticky: 20;
   --z-popover: 40;
+  --z-action-dock: 45;
   --z-backdrop: 50;
   --z-dialog: 60;
   --z-toast: 70;
   --z-tooltip: 80;
+  --mobile-action-dock-h: 76px;
+  --mission-compact-h: 56px;
 
   /* Compatibility aliases while legacy views migrate to the shared system. */
   --bg: var(--canvas);

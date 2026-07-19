@@ -35,7 +35,8 @@ import { Icon, type IconName } from './icons';
 import { ModalDialog } from './components/ModalDialog';
 import { runBoundScenarioRequests } from './demo-scenarios';
 import { reconcileRunBoundMissionEvidence } from './mission-recovery';
-import { acquireOperationLock, releaseOperationLock } from './operation-lock';
+import { OperationCoordinator, type OperationSpec } from './operation-lock';
+import { chainSnapshotFingerprint, changedRequestIds as diffChangedRequestIds, requestStateSnapshot } from './chain-refresh';
 
 const EVIDENCE_COMMIT = evidence.commit;
 
@@ -48,6 +49,7 @@ const VerifyView = lazy(() => import('./views/VerifyView').then((module) => ({ d
 const PoliciesView = lazy(() => import('./views/PoliciesView').then((module) => ({ default: module.PoliciesView })));
 const DisclosureView = lazy(() => import('./views/DisclosureView').then((module) => ({ default: module.DisclosureView })));
 const TrustCenterView = lazy(() => import('./views/TrustCenterView').then((module) => ({ default: module.TrustCenterView })));
+const NotFoundView = lazy(() => import('./views/NotFoundView').then((module) => ({ default: module.NotFoundView })));
 
 export type Mandate = {
   id: bigint; delegate: `0x${string}`; validFrom: bigint; validUntil: bigint;
@@ -63,14 +65,15 @@ export type SpendRequest = {
 
 type Ctx = {
   account?: `0x${string}`;
+  financeAdmin?: `0x${string}`;
   chainOk: boolean;
   owners: `0x${string}`[];
   paused: boolean;
   mandates: Mandate[];
   requests: SpendRequest[];
-  refresh: () => void;
+  refresh: () => Promise<ChainRefreshResult>;
   toast: (msg: string, err?: boolean) => void;
-  run: (label: string, fn: () => Promise<void>) => Promise<void>;
+  run: (operation: string | OperationSpec, fn: () => Promise<void>) => Promise<OperationRunResult>;
   busy: string | null;
   demoRole: DemoRole | null;
   startDemo: (role: DemoRole) => void;
@@ -79,6 +82,14 @@ type Ctx = {
   lastUpdated: number | null;
   loadError: boolean;
 };
+
+export type ChainRefreshResult =
+  | { status: 'changed' | 'unchanged'; checkedAt: number; changedRequestIds: string[] }
+  | { status: 'failed'; checkedAt: number; message: string; changedRequestIds: [] };
+
+export type OperationRunResult =
+  | { accepted: true; status: 'succeeded' | 'failed' }
+  | { accepted: false; status: 'blocked'; blocker: { key: string; label: string; startedAt: number } };
 const AppCtx = createContext<Ctx>(null as any);
 export const useApp = () => useContext(AppCtx);
 
@@ -108,11 +119,19 @@ export function App() {
   const dispatchDemo = useCallback((action: DemoSessionAction) => {
     setDemoSession((current) => {
       if (!current) return current;
-      const next = demoSessionReducer(current, action);
-      if (next !== current) saveDemoSession(next);
-      return next;
+      // React may execute this updater while rendering App's routed children.
+      // Keep it pure: saveDemoSession emits a synchronous window event and
+      // must only run after the render has committed.
+      return demoSessionReducer(current, action);
     });
   }, []);
+
+  useEffect(() => {
+    if (!demoSession) return;
+    const persisted = loadDemoSession();
+    if (persisted && JSON.stringify(persisted) === JSON.stringify(demoSession)) return;
+    saveDemoSession(demoSession);
+  }, [demoSession]);
 
   useEffect(() => {
     const sync = () => setDemoSession(loadDemoSession());
@@ -194,15 +213,16 @@ export function App() {
   const [mandates, setMandates] = useState<Mandate[]>([]);
   const [requests, setRequests] = useState<SpendRequest[]>([]);
   const [owners, setOwners] = useState<`0x${string}`[]>([]);
+  const [financeAdmin, setFinanceAdmin] = useState<`0x${string}`>();
   const [paused, setPaused] = useState(false);
   const [toastMsg, setToastMsg] = useState<{ msg: string; err: boolean } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [loadError, setLoadError] = useState(false);
   const toastTimer = useRef<any>(null);
-  const operationLock = useRef(false);
+  const operationCoordinator = useRef(new OperationCoordinator());
   const lastToast = useRef<{ msg: string; at: number } | null>(null);
-  const chainRefresh = useRef<(() => void) | null>(null);
+  const chainRefresh = useRef<(() => Promise<ChainRefreshResult>) | null>(null);
 
   const toast = useCallback((msg: string, err = false) => {
     const now = Date.now();
@@ -213,24 +233,48 @@ export function App() {
     toastTimer.current = setTimeout(() => setToastMsg(null), err ? 9000 : 5000);
   }, []);
 
-  const refresh = useCallback(() => chainRefresh.current?.(), []);
+  const refresh = useCallback((): Promise<ChainRefreshResult> => (
+    chainRefresh.current?.() ?? Promise.resolve({
+      status: 'failed', checkedAt: Date.now(), message: 'Chain reader is not ready yet.', changedRequestIds: [],
+    })
+  ), []);
 
-  const run = useCallback(async (label: string, fn: () => Promise<void>) => {
-    // React state updates are asynchronous; a ref closes the same-frame window
-    // where a second click could start the same transaction again.
-    if (!acquireOperationLock(operationLock)) return;
-    setBusy(label);
+  const run = useCallback(async (input: string | OperationSpec, fn: () => Promise<void>): Promise<OperationRunResult> => {
+    const operation: OperationSpec = typeof input === 'string'
+      ? {
+          key: input,
+          label: input,
+          resources: account ? [`wallet:${account.toLowerCase()}`] : ['wallet:unconnected'],
+          feedback: 'global',
+        }
+      : input;
+    const acquired = operationCoordinator.current.acquire(operation);
+    if (!acquired.acquired) {
+      toast(`${acquired.blocker.label} is still running. Return to that operation before starting another conflicting action.`, true);
+      return {
+        accepted: false,
+        status: 'blocked',
+        blocker: {
+          key: acquired.blocker.key,
+          label: acquired.blocker.label,
+          startedAt: acquired.blocker.startedAt,
+        },
+      };
+    }
+    if (acquired.operation.feedback === 'global') setBusy(acquired.operation.label);
     try {
       await fn();
-      refresh();
+      void refresh();
+      return { accepted: true, status: 'succeeded' };
     } catch (e: any) {
       console.error(e);
-      toast(`${label} failed: ${e?.shortMessage ?? e?.message ?? e}`, true);
+      toast(`${acquired.operation.label} failed: ${e?.shortMessage ?? e?.message ?? e}`, true);
+      return { accepted: true, status: 'failed' };
     } finally {
-      setBusy(null);
-      releaseOperationLock(operationLock);
+      if (acquired.operation.feedback === 'global') setBusy(null);
+      operationCoordinator.current.release(acquired.operation);
     }
-  }, [refresh, toast]);
+  }, [account, refresh, toast]);
 
   // wallet — open the picker (EIP-6963 multi-wallet)
   const connect = useCallback(() => {
@@ -340,18 +384,18 @@ export function App() {
   // chain polling
   useEffect(() => {
     let stop = false;
-    let loading = false;
-    let queued = false;
-    const load = async () => {
-      if (loading) { queued = true; return; }
-      loading = true;
-      do {
-        queued = false;
+    let inFlight: Promise<ChainRefreshResult> | null = null;
+    let previousFingerprint: string | null = null;
+    let previousRequestState = new Map<string, string>();
+    const load = (): Promise<ChainRefreshResult> => {
+      if (inFlight) return inFlight;
+      inFlight = (async (): Promise<ChainRefreshResult> => {
         try {
-          const [nextM, nextR, own, isPaused] = await Promise.all([
+          const [nextM, nextR, own, currentFinanceAdmin, isPaused] = await Promise.all([
             publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'nextMandateId' }) as Promise<bigint>,
             publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'nextRequestId' }) as Promise<bigint>,
             publicClient.readContract({ address: ADDR.Safe, abi: safeAbi, functionName: 'getOwners' }) as Promise<`0x${string}`[]>,
+            publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'financeAdmin' }) as Promise<`0x${string}`>,
             publicClient.readContract({ address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'paused' }) as Promise<boolean>,
           ]);
           // Fire all reads concurrently so viem's Multicall3 batching collapses them
@@ -371,12 +415,37 @@ export function App() {
               r.decisionReady = await handlesResolved([r.decision]);
             }));
           }
-          if (!stop) { setMandates(ms); setRequests(rs); setOwners(own); setPaused(isPaused); setLastUpdated(Date.now()); setLoadError(false); }
-        } catch (e) { console.error('poll', e); if (!stop) setLoadError(true); }
-      } while (!stop && queued);
-      loading = false;
+          const checkedAt = Date.now();
+          const requestState = requestStateSnapshot(rs);
+          const changedRequestIds = diffChangedRequestIds(previousRequestState, requestState);
+          const fingerprint = chainSnapshotFingerprint({ mandates: ms, requests: requestState, owners: own, financeAdmin: currentFinanceAdmin, paused: isPaused });
+          const changed = previousFingerprint !== null && previousFingerprint !== fingerprint;
+          previousFingerprint = fingerprint;
+          previousRequestState = requestState;
+          if (!stop) {
+            setMandates(ms);
+            setRequests(rs);
+            setOwners(own);
+            setFinanceAdmin(currentFinanceAdmin);
+            setPaused(isPaused);
+            setLastUpdated(checkedAt);
+            setLoadError(false);
+          }
+          return { status: changed ? 'changed' : 'unchanged', checkedAt, changedRequestIds };
+        } catch (error: any) {
+          console.error('poll', error);
+          if (!stop) setLoadError(true);
+          return {
+            status: 'failed',
+            checkedAt: Date.now(),
+            message: error?.shortMessage ?? error?.message ?? String(error),
+            changedRequestIds: [],
+          };
+        }
+      })().finally(() => { inFlight = null; });
+      return inFlight!;
     };
-    chainRefresh.current = () => { void load(); };
+    chainRefresh.current = load;
     void load();
     const iv = setInterval(() => { void load(); }, 10_000);
     return () => {
@@ -398,7 +467,7 @@ export function App() {
   }, [demoSession, requests]);
 
   const lc = account?.toLowerCase();
-  const isAdmin = lc === ROLES.financeAdmin.toLowerCase();
+  const isAdmin = !!financeAdmin && lc === financeAdmin.toLowerCase();
   const isOwner = owners.some((o) => o.toLowerCase() === lc);
   const isDelegate = mandates.some((m) => m.delegate.toLowerCase() === lc);
   const isAuditor = lc === ROLES.auditor.toLowerCase();
@@ -419,7 +488,7 @@ export function App() {
     if ((TABS as readonly string[]).includes(nextTab)) goRoute(legacyTabToRoute(nextTab as LegacyTabName));
   }, [goRoute]);
 
-  const ctx: Ctx = { account, chainOk, owners, paused, mandates, requests, refresh, toast, run, busy, demoRole, startDemo: enterDemo, openRolePicker: () => setTryOpen(true), goTab: goLegacy, lastUpdated, loadError };
+  const ctx: Ctx = { account, financeAdmin, chainOk, owners, paused, mandates, requests, refresh, toast, run, busy, demoRole, startDemo: enterDemo, openRolePicker: () => setTryOpen(true), goTab: goLegacy, lastUpdated, loadError };
 
   const resumeDemo = useCallback(() => {
     if (!demoSession) { startFreshDemo(); return; }
@@ -630,7 +699,7 @@ export function App() {
   const activeNav = (target: AppRoute) => {
     if (target.page === 'payment-inbox') return ['payment-inbox', 'new-payment', 'payment-detail'].includes(route.page);
     if (target.page === 'approvals') return ['approvals', 'approval-detail'].includes(route.page);
-    if (target.page === 'policies') return ['policies', 'policy-detail'].includes(route.page);
+    if (target.page === 'policies') return ['policies', 'policy-new', 'policy-detail', 'policy-new-version'].includes(route.page);
     if (target.page === 'audit-packets') return ['audit-packets', 'audit-detail'].includes(route.page);
     return route.page === target.page;
   };
@@ -677,6 +746,17 @@ export function App() {
             <div className="crumb"><span className="crumb-parent">Confidential Operations Desk</span><Icon name="chevron" size={14} /><span className="crumb-page">{appRouteLabel(route)}</span></div>
             <div className="row">
               {paused && <span className="pill bad">PAUSED</span>}
+              {!demoSession?.tour.active && (
+                <button
+                  type="button"
+                  className="btn ghost mobile-guided-trigger"
+                  aria-label="Start interactive demo"
+                  title="Start guided demo"
+                  onClick={() => launch(true)}
+                >
+                  <Icon name="tour" />
+                </button>
+              )}
               {demoRole ? (
                 <button className="context-role-chip" onClick={() => setTryOpen(true)}><Icon name="role" /><span>{DEMO_ROLES[demoRole].label}</span><small>Demo role</small></button>
               ) : (
@@ -713,8 +793,13 @@ export function App() {
 
             <Suspense fallback={<div className="card workspace-skeleton" role="status"><span className="skeleton-line wide" /><span className="skeleton-line" /><span className="skeleton-panel" /><span className="sr-only">Loading workspace</span></div>}>
               {route.page === 'overview' && <PublicView />}
-              {['payment-inbox', 'new-payment', 'payment-detail'].includes(route.page) && <DelegateView key={demoSession?.runId ?? 'no-demo-run'} />}
-              {['policies', 'policy-detail'].includes(route.page) && <PoliciesView />}
+              {['payment-inbox', 'new-payment', 'payment-detail'].includes(route.page) && (
+                <DelegateView
+                  key={demoSession?.runId ?? 'no-demo-run'}
+                  detailRequestId={route.page === 'payment-detail' ? route.requestId : undefined}
+                />
+              )}
+              {['policies', 'policy-new', 'policy-detail', 'policy-new-version'].includes(route.page) && <PoliciesView />}
               {['approvals', 'approval-detail'].includes(route.page) && <SignerView />}
               {route.page === 'disclosure-builder' && <DisclosureView />}
               {['audit-packets', 'audit-detail'].includes(route.page) && <AuditorView />}
@@ -722,6 +807,7 @@ export function App() {
               {route.page === 'contracts' && <TrustCenterView mode="contracts" />}
               {route.page === 'provenance' && <TrustCenterView mode="provenance" />}
               {route.page === 'funds' && <FaucetView />}
+              {route.page === 'not-found' && <NotFoundView path={route.path} />}
             </Suspense>
 
             <footer>

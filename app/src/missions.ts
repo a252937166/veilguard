@@ -3,6 +3,7 @@ import {
   createDemoSession,
   createRunId,
   demoSessionReducer,
+  guidedTourStepAction,
   isMissionComplete,
   loadDemoSession,
   saveDemoSession,
@@ -10,6 +11,8 @@ import {
   type DemoMissionKey,
   type DemoSessionV2,
 } from './demo-session';
+import type { DemoRole } from './demo';
+import type { AppRoute, RouteObjectSelection } from './routes';
 
 export { getActiveDemoRunId } from './demo-session';
 
@@ -145,6 +148,26 @@ export function confirmApprovalDecision(
     decision,
     transactionHash: options.transactionHash,
   });
+  saveDemoSession(next);
+  emit(next);
+  return next;
+}
+
+/**
+ * Page-level mission CTAs use the same atomic route/role/selection reducer
+ * intent as MissionDrawer. Persisting it before the shell applies role and
+ * hash changes prevents the drawer from observing a transient mismatch and
+ * incorrectly pausing the guided run.
+ */
+export function advanceGuidedMission(target: {
+  step: number;
+  route: AppRoute;
+  role?: DemoRole;
+  selected?: RouteObjectSelection;
+}): DemoSessionV2 | null {
+  const session = loadDemoSession();
+  if (!session) return null;
+  const next = demoSessionReducer(session, guidedTourStepAction(session, target));
   saveDemoSession(next);
   emit(next);
   return next;

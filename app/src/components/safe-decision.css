@@ -1,0 +1,196 @@
+.mission-compact-rail { display: none; }
+.tour-collapse {
+  min-height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--control-radius);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.tour-collapse:hover { background: var(--surface-2); color: var(--text-primary); }
+.tour-check-result { width: 100%; color: var(--text-secondary); font-size: 11px; }
+.tour-check-result.bad { color: var(--danger); }
+
+.safe-decision-dock {
+  border-top: 1px solid #675629;
+  background: rgba(12, 16, 24, .95);
+}
+
+.safe-decision-dock__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 16px;
+}
+
+/* Approval and refund are consequential actions. Keep their hit targets safe
+   even when this dock is embedded in a document without a mobile viewport. */
+.safe-decision-dock__actions .btn {
+  min-height: 44px;
+  justify-content: center;
+}
+
+.safe-decision-progress {
+  padding: 12px 16px 4px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.safe-decision-progress__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.safe-decision-progress__head > span:nth-child(2) {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+}
+
+.safe-decision-progress__head b { font-size: 12.5px; }
+.safe-decision-progress__head small { color: var(--text-tertiary); font-size: 11px; }
+.safe-decision-progress__head a { flex: none; }
+.safe-decision-progress__check { color: var(--verified); font-weight: 800; }
+.safe-decision-progress__warning {
+  display: grid;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: none;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--warn) 65%, transparent);
+  border-radius: 999px;
+  color: var(--warn);
+  font-weight: 800;
+}
+
+.safe-decision-progress__track {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.safe-decision-progress__track > span {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border-strong);
+}
+
+.safe-decision-progress__track > span.done { background: var(--verified); }
+.safe-decision-progress__track > span.active { background: var(--brand); }
+
+.safe-decision-progress__labels {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin: 5px 0 2px;
+  color: var(--text-tertiary);
+  font-size: 9.5px;
+}
+
+.safe-decision-progress__labels span:last-child { text-align: right; }
+.safe-decision-progress__labels .reached { color: var(--text-secondary); }
+
+@media (max-width: 719px) {
+  body:has(.mission-drawer.is-action-compact) .main-body {
+    padding-bottom: calc(var(--mission-compact-h) + env(safe-area-inset-bottom) + 24px);
+  }
+  body:has(.safe-decision-dock) .main-body {
+    padding-bottom: calc(var(--mobile-action-dock-h) + env(safe-area-inset-bottom) + 24px);
+  }
+  body:has(.safe-decision-dock):has(.mission-drawer.is-action-compact) .main-body {
+    padding-bottom: calc(var(--mobile-action-dock-h) + var(--mission-compact-h) + env(safe-area-inset-bottom) + 24px);
+  }
+
+  .safe-decision-dock {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: var(--z-action-dock);
+    height: calc(var(--mobile-action-dock-h) + env(safe-area-inset-bottom));
+    padding-bottom: env(safe-area-inset-bottom);
+    box-shadow: 0 -8px 14px rgba(0, 0, 0, .28);
+  }
+
+  .safe-decision-dock__actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    height: 52px;
+    padding: 4px 12px;
+  }
+
+  .safe-decision-progress { height: 24px; padding: 3px 12px; overflow: hidden; }
+  .safe-decision-progress__head { min-height: 18px; }
+  .safe-decision-progress__head > span:nth-child(2) b { display: none; }
+  .safe-decision-progress__head > span:nth-child(2) small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .safe-decision-progress__head a { font-size: 10px; }
+  .safe-decision-progress__labels,
+  .safe-decision-progress__track { display: none; }
+
+  .mission-drawer.is-action-compact {
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: var(--mission-compact-h);
+    max-height: var(--mission-compact-h);
+    padding: 6px 12px;
+    overflow: hidden;
+    border-radius: 12px 12px 0 0;
+  }
+
+  .mission-drawer.is-action-compact .mission-compact-rail {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .mission-drawer.is-action-compact .mission-compact-count {
+    flex: none;
+    color: var(--text-tertiary);
+    font-size: 10.5px;
+    white-space: nowrap;
+  }
+  .mission-drawer.is-action-compact .mission-compact-rail > b {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mission-drawer.is-action-compact .mission-compact-continue,
+  .mission-drawer.is-action-compact .mission-compact-toggle {
+    min-width: 44px;
+    min-height: 44px;
+    flex: none;
+  }
+  .mission-drawer.is-action-compact .mission-drawer-content { display: none; }
+  body:has(.safe-decision-dock) .mission-drawer.is-action-compact {
+    bottom: calc(var(--mobile-action-dock-h) + env(safe-area-inset-bottom));
+  }
+  body:has(.safe-decision-dock) .mission-drawer.is-decision-step:not(.is-action-compact) {
+    padding-bottom: calc(16px + var(--mobile-action-dock-h) + env(safe-area-inset-bottom));
+  }
+}
+
+@media (forced-colors: active) {
+  .safe-decision-dock,
+  .safe-decision-progress__track > span { border: 1px solid CanvasText; }
+  .safe-decision-progress__track > span.active { background: Highlight; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .safe-decision-progress .spin { animation-duration: 1.6s; }
+}

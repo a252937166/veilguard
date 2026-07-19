@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { deriveRequestDetailModel, deriveRequestStatus, type SpendRequestLike } from '../src/domain.ts';
+import { deriveRequestDetailModel, deriveRequestStatus, resolveRequestContexts, type SpendRequestLike } from '../src/domain.ts';
 
 const request = (state: number): SpendRequestLike => ({
   id: 42n,
@@ -14,16 +14,34 @@ const request = (state: number): SpendRequestLike => ({
   blockedReason: '0xreason',
 });
 
-test('Cancelled always derives as rejected and refunded despite stale approval evidence', () => {
+test('Cancelled stays neutral and refunded despite stale approval or cancellation evidence', () => {
   const model = deriveRequestDetailModel(request(5), {
     transactions: { approval: '0xapproval', cancellation: '0xcancel' },
-    events: { safeAction: 'approve', outcomePath: 'approval' },
+    events: { safeAction: 'reject', outcomePath: 'approval', decisionOrigin: 'unknown' },
     actor: { canUseDemoDecision: true },
   });
-  expect(model.status).toBe('safe-rejected');
+  expect(model.status).toBe('cancelled');
+  expect(model.statusLabel).toBe('Cancelled and refunded');
+  expect(model.statusTone).toBe('neutral');
   expect(model.escrow).toBe('refunded');
   expect(model.capabilities.canApprove).toBe(false);
   expect(model.capabilities.canReject).toBe(false);
+  expect(model.timeline.find((stage) => stage.id === 'safe')?.detail).toMatch(/no user Reject is claimed/);
+});
+
+test('only a server-authenticated user receipt upgrades cancellation to safe-rejected', () => {
+  const attested = deriveRequestDetailModel(request(5), {
+    transactions: { cancellation: '0xcancel' },
+    events: { safeAction: 'reject', outcomePath: 'approval', decisionOrigin: 'user' },
+  });
+  const timeout = deriveRequestDetailModel(request(5), {
+    transactions: { cancellation: '0xtimeout' },
+    events: { outcomePath: 'approval', decisionOrigin: 'timeout' },
+  });
+  expect(attested.status).toBe('safe-rejected');
+  expect(attested.statusLabel).toBe('User rejected · refunded');
+  expect(timeout.status).toBe('cancelled');
+  expect(timeout.timeline.find((stage) => stage.id === 'safe')?.detail).toMatch(/timeout cancellation authenticated/);
 });
 
 test('executed requests distinguish direct and Safe-approved evidence', () => {
@@ -54,4 +72,20 @@ test('demo decision capability only exists while escrow awaits a decision', () =
   expect(pending.capabilities.canApprove).toBe(true);
   expect(pending.capabilities.canReject).toBe(true);
   expect(settled.capabilities.canApprove).toBe(false);
+});
+
+test('viewed request never replaces or falls back to the active operation request', () => {
+  const active = request(1);
+  const viewed = { ...request(2), id: 99n };
+  expect(resolveRequestContexts([active, viewed], { activeId: 42n, viewedId: 99n })).toEqual({ active, viewed });
+  expect(resolveRequestContexts([active, viewed], { activeId: 42n, viewedId: 100n })).toEqual({ active, viewed: undefined });
+});
+
+test('blocked protection is a completed stage and uses the danger presentation', () => {
+  const model = deriveRequestDetailModel(request(4));
+  expect(model.statusTone).toBe('danger');
+  expect(model.timeline.find((stage) => stage.id === 'escrow')).toMatchObject({
+    label: 'Treasury protected',
+    state: 'complete',
+  });
 });
