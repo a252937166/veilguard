@@ -23,7 +23,9 @@ The Launch Day Treasury Shift is one run-bound story:
 
 Mission completion is derived only from run-bound on-chain request and packet
 evidence. A timeout cancellation never counts as a user Reject. A blocked request
-does not complete until its reason is explicitly decrypted.
+does not complete until its reason is explicitly decrypted. Evidence may mark a
+mission complete, but navigation never advances by timer: the user keeps the
+Receipt, Privacy Lens or packet result until they explicitly continue.
 
 ## Visual direction
 
@@ -44,18 +46,47 @@ The desktop shell is 232px sidebar plus work area at 1280px and above. Below
 single-column and action controls remain at least 44px high. All layouts must be
 usable at 200% zoom without horizontal page overflow.
 
+Surface opacity follows information density rather than one universal glass
+value. Ambient and empty areas show the WaveField most clearly; Payment uses a
+stronger reading surface; Audit, Policies and Verify use dense surfaces; decision
+docks and dialogs are nearly opaque.
+
 ## Long-action feedback
 
 Every irreversible or network-bound action acknowledges the first click in the
-same frame. Confidential payment submission uses the truthful stages `Preflight`,
-`Encrypt`, `Broadcast`, `TEE`, and `Finalize` with an indeterminate shimmer inside
-the active stage; it never fabricates a percentage.
+same frame. Confidential payment submission has one primary progress system with
+the truthful product stages `Preflight`, `Encrypt`, `Submit`, `Private check`, and
+`Publish result`; protocol finalization remains available in technical detail,
+not as a competing user-facing stage. Receipt recovery remains under `Submit`
+until the Request object is found. The UI never fabricates a percentage.
 
 The active button keeps normal contrast, shows a spinner and processing label,
 and is synchronously locked before the first await. The progress surface sits next
 to the initiating CTA and includes elapsed time, an expected range, a transaction
 link when known, and a recovery explanation. Reduced-motion mode keeps the stage
 state but removes the moving shimmer.
+
+An active payment remains visible in an operation dock even while another invoice
+is inspected. A terminal Receipt replaces progress and remains selected until the
+user chooses the next invoice. Safe Approve and Reject use the same contract:
+validation, threshold signatures, broadcast and settlement are explicit stages,
+and the transaction hash appears as soon as broadcast returns it.
+
+## Object and authority boundaries
+
+- `#/payments` contains Invoice drafts. `#/payments/:id` is a real Request object
+  with its own summary, timeline, Privacy Lens, settlement, packet inclusion and
+  transaction evidence.
+- Demo narrative metadata is applied only when the run-bound memo, scenario,
+  mandate, delegate and recipient all match. Recipient similarity alone never
+  supplies an amount or purpose, and browser plaintext is scoped to one Request ID.
+- A guided Delegate selects disclosure scope; a bounded Finance Admin service
+  validates and writes the fixed-Auditor packet. A connected real Finance Admin
+  signs its own packet action directly. Neither path implies that the Delegate
+  holds an Admin key.
+- Finance Admin may propose encrypted drafts and tighten with `pauseAll`. Safe
+  2-of-2 activates, retires or resumes. Finance Admin rotation remains a managed
+  Safe/deployment operation and is not added to the public automatic co-sign list.
 
 ## Recovery contract
 
@@ -70,12 +101,21 @@ gated mission. Failed finalization releases its retry lock; a successful but slo
 finalization lock expires after 60 seconds so the next chain snapshot can safely
 retry the idempotent endpoint.
 
+State 5 proves cancellation and refund, not who initiated it. The UI upgrades it
+to a user Reject only after the read-only decision endpoint validates the same
+run-bound request against a persisted user receipt; timeout and unknown origins
+remain neutral. Likewise, an Admin disclosure checkpoint is only a recovery
+pointer: receipt, `AuditPacketCreated` fields and `getAuditPacket` scope must all
+match before the bundle can be shown as created or advance a mission.
+
 ## Authenticity boundaries
 
 - The v1 contract ABI and existing Sepolia addresses are unchanged.
 - Public views never display plaintext amounts, policy values or blocked reasons.
 - The v1 Audit Packet always includes the three policy snapshots plus each
-  selected request's amount and reason. The UI labels this fixed schema.
+  selected request's amount and reason. The UI labels this fixed schema. Request
+  selection is real: one or more subsets may be accumulated, while the guided
+  handoff waits until all three Launch Day Request IDs are covered.
 - Vendor names, purposes and the Launch Day narrative are explicitly demo
   metadata. Request states, Safe decisions, packets, proofs and transaction links
   come from real objects or a clearly labelled frozen evidence run.
@@ -85,6 +125,20 @@ retry the idempotent endpoint.
 ## Change log
 
 ### 2026-07-19
+
+- Split Invoice drafts from true Request Detail routes and bound private
+  presentation data to the exact run-bound Request object.
+- Reduced Payment to one five-stage progress system, kept active operations
+  visible across Invoice browsing and replaced timer navigation with explicit
+  Continue actions.
+- Made disclosure request selection real and cumulative, with explicit Delegate,
+  facilitated Finance Admin and Auditor boundaries.
+- Added staged Safe decision snapshots, early transaction-hash recovery, real
+  chain-refresh results and resource-scoped mutation coordination.
+- Added role-correct Policy proposal, pause, activation, retirement and resume
+  surfaces without exposing privileged demo keys.
+- Added mobile mission/action-dock collision rules and density-based translucent
+  surface tokens.
 
 - Restored the WaveField, translucent panel hierarchy and original VeilGuard
   wordmark treatment throughout the operations desk.

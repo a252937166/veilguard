@@ -38,6 +38,9 @@ export type RequestTxs = {
   safeAction?: 'approve' | 'reject';
 };
 
+/** The event proves a cancellation transaction, never a user-selected Reject. */
+export const ESCALATION_CANCELLATION_EVIDENCE = Object.freeze({ outcomePath: 'approval' as const });
+
 let cache: Map<string, RequestTxs> | null = null;
 let inflight: Promise<Map<string, RequestTxs>> | null = null;
 
@@ -73,7 +76,7 @@ export function fetchRequestTxs(force = false): Promise<Map<string, RequestTxs>>
       blk.forEach((l) => { upsert(l.args.requestId!, 'finalize', l.transactionHash); annotate(l.args.requestId!, { outcomePath: 'blocked' }); });
       esc.forEach((l) => { upsert(l.args.requestId!, 'finalize', l.transactionHash); annotate(l.args.requestId!, { outcomePath: 'approval' }); });
       app.forEach((l) => { upsert(l.args.requestId!, 'approval', l.transactionHash); annotate(l.args.requestId!, { outcomePath: 'approval', safeAction: 'approve' }); });
-      rej.forEach((l) => { upsert(l.args.requestId!, 'cancellation', l.transactionHash); annotate(l.args.requestId!, { outcomePath: 'approval', safeAction: 'reject' }); });
+      rej.forEach((l) => { upsert(l.args.requestId!, 'cancellation', l.transactionHash); annotate(l.args.requestId!, ESCALATION_CANCELLATION_EVIDENCE); });
     }
     cache = map;
     return map;

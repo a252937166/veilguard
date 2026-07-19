@@ -19,6 +19,33 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: cd app && npm ci && npm test && npm run build
+  app-e2e:
+    needs: app-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        working-directory: app
+      - run: npm run build
+        working-directory: app
+      - run: npx playwright install --with-deps chromium
+        working-directory: app
+      - run: npm run test:e2e
+        working-directory: app
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            app/playwright-report
+            app/test-results
+          if-no-files-found: ignore
   contract-tests:
     # Full suite runs against the local Nox off-chain stack (Docker). Best-effort:
     # image pulls can be slow/flaky in CI, so this job does not gate merges.

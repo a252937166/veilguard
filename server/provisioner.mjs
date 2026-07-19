@@ -113,18 +113,23 @@ function sortedSignatures(parts) {
     .map((s) => s.sig.slice(2)).join('')}`;
 }
 
-async function broadcastSafe(message, signatures) {
+async function broadcastSafe(message, signatures, onProgress) {
+  await onProgress?.({ phase: 'broadcasting' });
   const hash = await signerBWallet.writeContract({
     address: SAFE, abi: safeAbi, functionName: 'execTransaction',
     args: [message.to, 0n, message.data, 0, 0n, 0n, 0n, ZERO, ZERO, signatures],
   });
+  // Publish and persist the transaction hash before the potentially slow
+  // receipt wait so browsers can recover without inviting a duplicate click.
+  await onProgress?.({ phase: 'confirming', hash });
   const rc = await pub.waitForTransactionReceipt({ hash });
   if (rc.status !== 'success') throw new Error('Safe execTransaction reverted');
   return hash;
 }
 
 // ------- Safe v1.4.1 EIP-712 2-of-2 (pure viem, no API key) -------
-async function safeExec2of2Unlocked(to, data) {
+async function safeExec2of2Unlocked(to, data, onProgress) {
+  await onProgress?.({ phase: 'signing' });
   const nonce = await pub.readContract({ address: SAFE, abi: safeAbi, functionName: 'nonce' });
   const domain = { chainId: CHAIN_ID, verifyingContract: SAFE };
   const types = {
@@ -148,7 +153,7 @@ async function safeExec2of2Unlocked(to, data) {
   // sanity: ensure v is 27/28 (viem returns that for EIP-712)
   for (const s of signers) { const { v } = parseSignature(s.sig); if (v !== 27n && v !== 28n) throw new Error('unexpected sig v'); }
 
-  return broadcastSafe(message, signatures);
+  return broadcastSafe(message, signatures, onProgress);
 }
 
 const safeExec2of2 = (to, data) => withSafeLock(() => safeExec2of2Unlocked(to, data));
@@ -583,17 +588,20 @@ const demoDecisionService = createDemoDecisionService({
   readActiveMandate: (delegate) => pub.readContract({
     address: MODULE, abi: MODULE_ABI, functionName: 'activeMandateOf', args: [delegate],
   }),
-  executeUnlocked: (id, action) => {
+  executeUnlocked: (id, action, onProgress) => {
     const functionName = action === 'approve' ? 'executeEscalated' : 'cancelEscalated';
     const data = encodeFunctionData({ abi: MODULE_ABI, functionName, args: [id] });
-    return safeExec2of2Unlocked(MODULE, data);
+    return safeExec2of2Unlocked(MODULE, data, onProgress);
+  },
+  recoverBroadcast: async (hash) => {
+    const receipt = await pub.waitForTransactionReceipt({ hash });
+    if (receipt.status !== 'success') throw new Error('Safe execTransaction reverted');
+    return receipt;
   },
   withSafeLock,
   store: createFileDecisionStore(decisionJournalPath),
   decisionWindowMs: DEMO_DECISION_WINDOW_MS,
 });
-const decisionJobs = demoDecisionService.jobs;
-
 // ------- run-bound audit packet bundles -------
 async function validateAuditRequest(runId, id) {
   const r = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getRequest', args: [id] });
@@ -741,7 +749,7 @@ http.createServer((req, res) => {
   if (req.url === '/api/health') return json(res, 200, {
     ok: true, enabled, module: MODULE, safe: SAFE, dayCount, dayCap,
     sweep: SWEEP_ENABLED, finalizing: finalizingIds.size,
-    decisions: decisionJobs.size, auditJobs: auditJobs.size,
+    decisions: demoDecisionService.processingCount, auditJobs: auditJobs.size,
     auditDayCount, auditDayCap,
     demoDecisionWindowSeconds: Math.floor(DEMO_DECISION_WINDOW_MS / 1000),
   });
@@ -772,6 +780,21 @@ http.createServer((req, res) => {
         json(res, e?.status ?? 500, { error: e?.shortMessage ?? e?.message ?? 'demo decision failed', ...(e?.details ? { details: e.details } : {}) });
       }
     });
+    return;
+  }
+  if (req.method === 'GET' && req.url?.startsWith('/api/demo-decision?')) {
+    void (async () => {
+      try {
+        const url = new URL(req.url, 'http://localhost');
+        const result = await demoDecisionService.attest({
+          runId: url.searchParams.get('runId'),
+          requestId: url.searchParams.get('requestId'),
+        });
+        json(res, result.status, result.body);
+      } catch (e) {
+        json(res, e?.status ?? 500, { error: e?.shortMessage ?? e?.message ?? 'decision attestation failed' });
+      }
+    })();
     return;
   }
   if (req.method === 'POST' && req.url === '/api/demo-audit-packet') {

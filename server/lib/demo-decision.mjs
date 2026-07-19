@@ -123,6 +123,25 @@ function createDecisionStore({ load, persist }) {
         current[key] = { ...current[key], intent: clone(intent) };
       });
     },
+    recordBroadcast(requestId, broadcast) {
+      return mutate((current) => {
+        const key = String(requestId);
+        const entry = current[key];
+        if (!entry?.intent
+          || entry.intent.runId !== broadcast.runId
+          || entry.intent.action !== broadcast.action) {
+          throw new DemoDecisionError(409, 'decision broadcast has no matching run-bound intent');
+        }
+        current[key] = {
+          ...entry,
+          intent: {
+            ...entry.intent,
+            hash: broadcast.hash,
+            broadcastAt: entry.intent.broadcastAt ?? broadcast.broadcastAt,
+          },
+        };
+      });
+    },
     clearIntent(requestId, runId, action) {
       return mutate((current) => {
         const key = String(requestId);
@@ -218,6 +237,7 @@ export function createDemoDecisionService({
   verifyAmount,
   readActiveMandate,
   executeUnlocked,
+  recoverBroadcast,
   withSafeLock,
   store,
   decisionWindowMs,
@@ -281,7 +301,7 @@ export function createDemoDecisionService({
       : 'cancelled request has no matching user rejection receipt');
   };
 
-  const perform = async (input) => {
+  const perform = async (input, report = async () => {}) => {
     const runId = assertDemoRunId(input.runId);
     const requestId = parseDemoRequestId(input.requestId);
     const action = assertDemoAction(input.action);
@@ -289,18 +309,102 @@ export function createDemoDecisionService({
     const initial = await readRequest(requestId);
     const spec = assertIdentity(initial, runId);
     const initialState = Number(initial[5]);
-    if (initialState === 3) {
-      // Persist the first valid public observation before any potentially slow
-      // decryption so all callers agree on the exact decision-window boundary.
-      await terminalResult({ requestId, request: initial, runId, action });
-      await store.observeAwaiting(requestId, now());
+    const recorded = await store.get(requestId);
+
+    // A persisted receipt or broadcast is already past the authorization
+    // boundary: the amount was verified before the intent was written. Recover
+    // or return that trusted result before consulting Nox again, so a temporary
+    // decrypt outage cannot break idempotency or strand a broadcast Safe tx.
+    if (recorded?.intent && !recorded.receipt
+      && (recorded.intent.runId !== runId || recorded.intent.action !== action)) {
+      throw new DemoDecisionError(409, `request already has a ${recorded.intent.action} decision in progress`);
     }
-    await verifyAmount(initial, spec);
+    if (recorded?.intent?.hash && !recorded.receipt) {
+      if (typeof recoverBroadcast !== 'function') {
+        throw new DemoDecisionError(503, 'Safe transaction was broadcast but receipt recovery is unavailable', {
+          hash: recorded.intent.hash,
+          phase: 'recovering',
+        });
+      }
+      return withSafeLock(async () => {
+        const current = await readRequest(requestId);
+        assertIdentity(current, runId);
+        const currentEntry = await store.get(requestId);
+
+        // The watchdog or another recovery may have completed while this call
+        // waited for the Safe critical section.
+        if (currentEntry?.receipt) {
+          const terminal = await terminalResult({ requestId, request: current, runId, action });
+          if (terminal) return terminal;
+          throw new DemoDecisionError(503, 'Safe receipt is recorded but request settlement is not indexed yet', {
+            hash: currentEntry.receipt.hash,
+            phase: 'recovering',
+          });
+        }
+        if (!currentEntry?.intent?.hash) {
+          throw new DemoDecisionError(409, 'decision broadcast journal changed; retry from current chain state');
+        }
+        if (currentEntry.intent.runId !== runId || currentEntry.intent.action !== action) {
+          throw new DemoDecisionError(409, `request already has a ${currentEntry.intent.action} decision broadcast`);
+        }
+
+        await report({ phase: 'recovering', hash: currentEntry.intent.hash });
+        try {
+          await recoverBroadcast(currentEntry.intent.hash, requestId, action);
+        } catch (error) {
+          if (Number.isInteger(error?.status)) throw error;
+          throw new DemoDecisionError(503, 'Safe transaction was broadcast; receipt confirmation is still pending', {
+            hash: currentEntry.intent.hash,
+            phase: 'recovering',
+          });
+        }
+        const recovered = await readRequest(requestId);
+        assertIdentity(recovered, runId);
+        const expectedNumericState = action === 'approve' ? 2 : 5;
+        if (Number(recovered[5]) !== expectedNumericState) {
+          throw new DemoDecisionError(503, 'Safe receipt confirmed but request settlement is not indexed yet', {
+            hash: currentEntry.intent.hash,
+            phase: 'recovering',
+          });
+        }
+        const recoveredState = action === 'approve' ? 'safe-approved' : 'safe-rejected';
+        await store.recordUserReceipt(requestId, {
+          runId,
+          action,
+          hash: currentEntry.intent.hash,
+          state: recoveredState,
+          recordedAt: now(),
+        });
+        await report({ phase: 'settled', hash: currentEntry.intent.hash });
+        return {
+          ok: true,
+          requestId: Number(requestId),
+          action,
+          hash: currentEntry.intent.hash,
+          state: recoveredState,
+          idempotent: true,
+          recovered: true,
+        };
+      });
+    }
+
+    const already = await terminalResult({ requestId, request: initial, runId, action });
+    if (already) return already;
+    if (recorded?.receipt?.origin === 'user') {
+      throw new DemoDecisionError(503, 'Safe receipt is recorded but request settlement is not indexed yet', {
+        hash: recorded.receipt.hash,
+        phase: 'recovering',
+      });
+    }
     if (initialState !== 3) {
-      const already = await terminalResult({ requestId, request: initial, runId, action });
-      if (already) return already;
       throw new DemoDecisionError(409, 'request is not awaiting Safe approval');
     }
+
+    // Persist the first valid public observation before the only path that can
+    // produce a new signature. New signing still fails closed unless Finance
+    // Admin decrypts and verifies the exact scenario amount.
+    await store.observeAwaiting(requestId, now());
+    await verifyAmount(initial, spec);
 
     return withSafeLock(async () => {
       const current = await readRequest(requestId);
@@ -336,13 +440,38 @@ export function createDemoDecisionService({
       }
 
       await store.recordIntent(requestId, { runId, action, recordedAt: now() });
+      await report({ phase: 'signing' });
       let hash;
+      let broadcastHash;
       try {
-        hash = await executeUnlocked(requestId, action);
+        hash = await executeUnlocked(requestId, action, async (progress = {}) => {
+          const update = { ...progress };
+          if (update.hash) {
+            broadcastHash = update.hash;
+            await store.recordBroadcast(requestId, {
+              runId,
+              action,
+              hash: update.hash,
+              broadcastAt: now(),
+            });
+          }
+          await report(update);
+        });
       } catch (error) {
-        await store.clearIntent(requestId, runId, action).catch(() => {});
+        if (!broadcastHash) await store.clearIntent(requestId, runId, action).catch(() => {});
+        if (broadcastHash) {
+          throw new DemoDecisionError(503, 'Safe transaction was broadcast; receipt confirmation is still pending', {
+            hash: broadcastHash,
+            phase: 'recovering',
+          });
+        }
         throw error;
       }
+      // Older injected executors may only return the hash after confirmation.
+      // Persisting it here keeps those adapters compatible; the production Safe
+      // executor reports it at broadcast time, before waiting for the receipt.
+      await store.recordBroadcast(requestId, { runId, action, hash, broadcastAt: now() });
+      await report({ phase: 'confirming', hash });
       const state = action === 'approve' ? 'safe-approved' : 'safe-rejected';
       await store.recordUserReceipt(requestId, {
         runId,
@@ -351,6 +480,7 @@ export function createDemoDecisionService({
         state,
         recordedAt: now(),
       });
+      await report({ phase: 'settled', hash });
       return {
         ok: true,
         requestId: Number(requestId),
@@ -361,6 +491,18 @@ export function createDemoDecisionService({
       };
     });
   };
+
+  const snapshot = (job) => ({
+    status: 202,
+    body: {
+      ok: true,
+      processing: true,
+      requestId: job.requestId,
+      action: job.action,
+      phase: job.phase,
+      ...(job.hash ? { hash: job.hash } : {}),
+    },
+  });
 
   const start = (input) => {
     const runId = assertDemoRunId(input.runId);
@@ -375,26 +517,111 @@ export function createDemoDecisionService({
       if (existing.action !== action) {
         throw new DemoDecisionError(409, `request already has a ${existing.action} decision in progress`);
       }
-      return { processing: true, action, requestId: Number(requestId) };
+      return existing;
     }
-    const promise = perform({ runId, requestId, action });
-    jobs.set(key, { runId, action, promise });
-    promise.finally(() => jobs.delete(key)).catch(() => {});
-    return { processing: false, promise };
+    const job = {
+      runId,
+      action,
+      requestId: Number(requestId),
+      phase: 'validating',
+      hash: undefined,
+      result: undefined,
+      delivered: false,
+      promise: undefined,
+      cleanup: undefined,
+    };
+    const report = async (progress = {}) => {
+      if (typeof progress.phase === 'string') job.phase = progress.phase;
+      if (typeof progress.hash === 'string') job.hash = progress.hash;
+    };
+    jobs.set(key, job);
+    job.promise = Promise.resolve()
+      .then(() => perform({ runId, requestId, action }, report))
+      .then((body) => {
+        job.phase = 'settled';
+        job.hash = body.hash;
+        job.result = { status: 200, body };
+      })
+      .catch((error) => {
+        job.result = { status: error?.status ?? 500, body: errorPayload(error) };
+      });
+    // Retention starts only after the job settles. A slow decrypt, Safe
+    // broadcast or receipt wait must never be evicted while it is processing,
+    // otherwise polling could start a second recovery job for the same request.
+    job.promise.finally(() => {
+      job.cleanup = setTimeout(() => {
+        if (jobs.get(key) === job) jobs.delete(key);
+      }, Math.min(decisionWindowMs, 300_000));
+      job.cleanup.unref?.();
+    }).catch(() => {});
+    return job;
   };
 
   const handle = async (input) => {
     try {
-      const started = start(input);
-      if (started.processing) {
-        return {
-          status: 202,
-          body: { ok: true, processing: true, requestId: started.requestId, action: started.action },
-        };
+      const job = start(input);
+      if (!job.result) return snapshot(job);
+      if (job.result.status !== 200) {
+        if (job.cleanup) clearTimeout(job.cleanup);
+        jobs.delete(String(job.requestId));
+        return job.result;
       }
-      return { status: 200, body: await started.promise };
+      const result = job.delivered
+        ? { ...job.result, body: { ...job.result.body, idempotent: true } }
+        : job.result;
+      job.delivered = true;
+      return result;
     } catch (error) {
       return { status: error?.status ?? 500, body: errorPayload(error) };
+    }
+  };
+
+  /**
+   * Read-only decision attestation. Public chain state=5 proves cancellation,
+   * not who selected it. Only a matching persisted user receipt may upgrade
+   * that outcome to an explicit user Reject.
+   */
+  const attest = async (input) => {
+    try {
+      const runId = assertDemoRunId(input.runId);
+      const requestId = parseDemoRequestId(input.requestId);
+      const request = await readRequest(requestId);
+      assertIdentity(request, runId);
+      const chainState = Number(request[5]);
+      const entry = await store.get(requestId);
+
+      let origin = 'unknown';
+      let action;
+      let hash;
+      let recordedAt;
+      if (entry?.receipt?.origin === 'timeout') {
+        origin = 'timeout';
+        hash = entry.receipt.hash;
+        recordedAt = entry.receipt.recordedAt;
+      } else if (
+        (chainState === 2 && matchingUserReceipt(entry, runId, 'approve', 'safe-approved'))
+        || (chainState === 5 && matchingUserReceipt(entry, runId, 'reject', 'safe-rejected'))
+      ) {
+        origin = 'user';
+        action = entry.receipt.action;
+        hash = entry.receipt.hash;
+        recordedAt = entry.receipt.recordedAt;
+      }
+
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          requestId: Number(requestId),
+          chainState,
+          origin,
+          ...(action ? { action } : {}),
+          ...(hash ? { hash } : {}),
+          ...(Number.isFinite(recordedAt) ? { recordedAt } : {}),
+        },
+      };
+    } catch (error) {
+      return { status: error?.status ?? 500, body: errorPayload(error, 'decision attestation failed') };
     }
   };
 
@@ -410,6 +637,19 @@ export function createDemoDecisionService({
       if (entry?.receipt?.origin === 'timeout') {
         return { skipped: 'timeout-recorded', hash: entry.receipt.hash, origin: 'timeout' };
       }
+      if (entry?.receipt?.origin === 'user') {
+        return { skipped: 'user-decision-recorded', hash: entry.receipt.hash, origin: 'user' };
+      }
+      if (entry?.intent?.hash) {
+        // A run-bound decision crossed the broadcast boundary before this
+        // watchdog acquired the shared Safe lock. Never submit a competing
+        // timeout cancellation; the browser/recovery path will reconcile it.
+        return {
+          skipped: 'decision-broadcast-pending',
+          hash: entry.intent.hash,
+          action: entry.intent.action,
+        };
+      }
       const awaitingSince = await store.observeAwaiting(requestId, now());
       const age = now() - awaitingSince;
       if (age < windowMs) return { skipped: 'not-expired', awaitingSince };
@@ -423,5 +663,14 @@ export function createDemoDecisionService({
     });
   };
 
-  return { jobs, start, handle, expire };
+  return {
+    jobs,
+    get processingCount() {
+      return [...jobs.values()].filter((job) => !job.result).length;
+    },
+    start,
+    handle,
+    attest,
+    expire,
+  };
 }

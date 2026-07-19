@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { SpendRequest } from './App';
+import './components/safe-decision.css';
+import type { ChainRefreshResult, SpendRequest } from './App';
 import type { DemoRole } from './demo';
 import {
+  hasCompleteAuditPacketCoverage,
+  guidedTourStepAction,
   isMissionComplete,
   loadDemoSession,
   type DemoMissionKey,
@@ -30,6 +33,7 @@ export type MissionStep = {
   mission?: DemoMissionKey;
   gate?: 'audit-packets-created';
   nextLabel?: string;
+  mobileActionLabel?: string;
   waiting?: string;
 };
 
@@ -46,6 +50,8 @@ export const MISSION_STEPS: readonly MissionStep[] = [
     tab: 'Delegate', route: { page: 'payment-inbox' }, target: 'scenario-routine', mission: 'routine',
     body: 'Open the 25 cUSDC infrastructure invoice, review its request detail, then submit it. The TEE evaluates three private rules and the admissible payment executes.',
     waiting: 'Waiting for the executed request evidence…',
+    mobileActionLabel: 'Submit the CloudNode payment',
+    nextLabel: 'Continue to ShieldOps',
   },
   {
     title: 'ShieldOps · choose the consequence',
@@ -53,6 +59,8 @@ export const MISSION_STEPS: readonly MissionStep[] = [
     body: 'Open the 60 cUSDC emergency security request. Once the TEE reserves it in escrow, choose Approve or Reject. Your choice drives a real Safe 2-of-2 execution or refund.',
     hint: 'The constrained demo endpoint performs the selected committee action; the browser never receives a Safe owner key.',
     waiting: 'Waiting for your decision and its Safe receipt…',
+    mobileActionLabel: 'Choose Approve or Reject',
+    nextLabel: 'Continue to Atlas Contractor',
   },
   {
     title: 'Atlas Contractor · inspect the block',
@@ -60,20 +68,26 @@ export const MISSION_STEPS: readonly MissionStep[] = [
     body: 'Submit the 600 cUSDC new-vendor invoice. After the TEE blocks it, decrypt the private reason as the Delegate and compare it with the public chain view.',
     hint: 'The isolated violation delegate absorbs the anti-probing cooldown without freezing the other requests.',
     waiting: 'Waiting for the block and private-reason disclosure…',
+    mobileActionLabel: 'Submit and inspect the blocked request',
+    nextLabel: 'Continue to disclosure',
   },
   {
     title: 'Launch Day Review · create disclosure',
     tab: 'Admin', route: { page: 'disclosure-builder' }, role: 'delegate', target: 'disclosure-builder', gate: 'audit-packets-created',
-    body: 'Select the three run-bound terminal requests, review the immutable v1 scope, then create the smallest real packet set. Requests from different mandates become separate on-chain packets inside one clearly labeled UI bundle.',
-    hint: 'The v1 schema always includes auto-limit, budget-left and reserve-floor, plus amount and reason for every selected request.',
-    waiting: 'Waiting for the run-bound packet IDs…',
+    body: 'Choose the run-bound terminal requests to disclose. You control the scope; the bounded demo service validates it and performs the on-chain grant as the Finance Admin. Requests from different mandates become separate packets inside one clearly labeled UI bundle.',
+    hint: 'You are not acting with an Admin key. The v1 schema always includes auto-limit, budget-left and reserve-floor, plus amount and reason for every selected request.',
+    waiting: 'Waiting until all three Launch Day requests are covered by real packet IDs…',
+    mobileActionLabel: 'Choose the disclosure scope',
+    nextLabel: 'Continue as Auditor',
   },
   {
     title: 'Launch Day Review · audit packet',
     tab: 'Auditor', route: { page: 'audit-packets' }, role: 'auditor', target: 'packets', mission: 'audit',
-    body: 'Unlock the disclosed values, review or flag every included request, and verify the immutable manifest. The UI bundle may contain two clearly identified on-chain packets.',
+    body: 'Unlock the disclosed values, review or flag every included request, and verify each immutable manifest. The UI bundle contains however many mandate-scoped on-chain packets the selected requests require.',
     hint: 'The v1 packet schema always snapshots auto-limit, budget-left and reserve-floor, plus amount and reason for each selected request.',
     waiting: 'Waiting for packet review and integrity verification…',
+    mobileActionLabel: 'Review the disclosed packet values',
+    nextLabel: 'Continue to Verify',
   },
   {
     title: 'Demo complete · verify the evidence',
@@ -88,6 +102,7 @@ type DrawerSurfaceProps = {
   paused: boolean;
   missionDone: boolean;
   checking: boolean;
+  checkResult: ChainRefreshResult | null;
   onBack: () => void;
   onNext: () => void;
   onReturn: () => void;
@@ -96,12 +111,44 @@ type DrawerSurfaceProps = {
 };
 
 function DrawerSurface({
-  step, paused, missionDone, checking, onBack, onNext, onReturn, onCheckEvidence, onClose,
+  step, paused, missionDone, checking, checkResult, onBack, onNext, onReturn, onCheckEvidence, onClose,
 }: DrawerSurfaceProps) {
   const s = MISSION_STEPS[step];
   const gated = !!(s.mission || s.gate) && !missionDone;
+  const actionStep = !!(s.mission || s.gate);
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => setExpanded(false), [step]);
+  const compactTitle = missionDone
+    ? `${s.title} complete`
+    : s.mobileActionLabel ?? s.title;
+  const checkedAt = checkResult
+    ? new Date(checkResult.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : '';
+  const checkMessage = checkResult?.status === 'changed'
+    ? `New on-chain evidence found${checkResult.changedRequestIds.length ? ` for request${checkResult.changedRequestIds.length === 1 ? '' : 's'} ${checkResult.changedRequestIds.map((id) => `#${id}`).join(', ')}` : ''} · checked ${checkedAt}`
+    : checkResult?.status === 'unchanged'
+      ? `No new evidence yet · checked ${checkedAt}`
+      : checkResult?.status === 'failed'
+        ? `Chain check failed: ${checkResult.message} · checked ${checkedAt}`
+        : '';
   return (
-    <aside className="tour mission-drawer" aria-label="Launch Day demo mission">
+    <aside className={`tour mission-drawer ${actionStep && !paused && !expanded ? 'is-action-compact' : ''} ${s.mission === 'approval' ? 'is-decision-step' : ''}`} aria-label="Launch Day demo mission">
+      <div className="mission-compact-rail">
+        <span className="mission-compact-count">Mission {step + 1}/{MISSION_STEPS.length}</span>
+        <b title={compactTitle}>{missionDone ? '✓ ' : ''}{compactTitle}</b>
+        {missionDone && step < MISSION_STEPS.length - 1 && (
+          <button type="button" className="btn small primary mission-compact-continue" onClick={onNext}>Continue</button>
+        )}
+        <button
+          type="button"
+          className="icon-button mission-compact-toggle"
+          aria-expanded={expanded}
+          aria-controls="mission-drawer-content"
+          aria-label="Expand mission details"
+          onClick={() => setExpanded(true)}
+        >⌃</button>
+      </div>
+      <div id="mission-drawer-content" className="mission-drawer-content">
       <div className="tour-head">
         <div
           className="tour-progress"
@@ -121,6 +168,15 @@ function DrawerSurface({
           ))}
         </div>
         <div className="tour-step-of">Launch Day · {step + 1} / {MISSION_STEPS.length}</div>
+        {actionStep && !paused && (
+          <button
+            type="button"
+            className="tour-collapse"
+            aria-expanded={expanded}
+            aria-controls="mission-drawer-content"
+            onClick={() => setExpanded(false)}
+          >Collapse</button>
+        )}
         <button className="tour-x" onClick={onClose} title="Close mission drawer" aria-label="Close mission drawer">×</button>
       </div>
 
@@ -153,8 +209,16 @@ function DrawerSurface({
             )}
             {gated && (
               <button className="btn small ghost tour-recheck" disabled={checking} onClick={onCheckEvidence}>
-                {checking ? <><span className="spin" aria-hidden="true" /> Checking chain…</> : 'Check chain state'}
+                {checking ? <><span className="spin" aria-hidden="true" /> Checking chain…</> : checkResult?.status === 'failed' ? 'Retry chain check' : 'Check chain state'}
               </button>
+            )}
+            {gated && checkMessage && (
+              <span className={`tour-check-result ${checkResult?.status === 'failed' ? 'bad' : ''}`} role={checkResult?.status === 'failed' ? 'alert' : 'status'}>
+                {checkMessage}
+              </span>
+            )}
+            {!gated && actionStep && missionDone && (
+              <span className="status-badge ok" role="status">Evidence confirmed</span>
             )}
             {!gated && step < MISSION_STEPS.length - 1 && (
               <button className="btn small primary" onClick={onNext}>{s.nextLabel ?? 'Continue'}</button>
@@ -164,6 +228,7 @@ function DrawerSurface({
             )}
           </>
         )}
+      </div>
       </div>
     </aside>
   );
@@ -176,7 +241,7 @@ export type MissionDrawerProps = {
   currentRole: DemoRole | null;
   /** Route + role must be applied as one navigation intent by the App shell. */
   onNavigate: (target: { route: AppRoute; role?: DemoRole }) => void;
-  onRefresh: () => void;
+  onRefresh: () => Promise<ChainRefreshResult>;
   onClose: () => void;
 };
 
@@ -190,24 +255,23 @@ export function MissionDrawer({
   const step = Math.min(Math.max(session.tour.step, 0), MISSION_STEPS.length - 1);
   const s = MISSION_STEPS[step];
   const arrived = useRef(false);
-  const advanceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const checkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [checking, setChecking] = useState(false);
+  const [checkResult, setCheckResult] = useState<ChainRefreshResult | null>(null);
   const missionDone = s.mission
     ? isMissionComplete(session, s.mission, { strict: true })
     : s.gate === 'audit-packets-created'
-      ? session.missions.audit.packetIds.length > 0
-        && session.missions.audit.includedRequestIds.length === 3
+      ? hasCompleteAuditPacketCoverage(session)
       : true;
 
   const enterStep = useCallback((nextStep: number) => {
     const bounded = Math.min(Math.max(nextStep, 0), MISSION_STEPS.length - 1);
     const target = MISSION_STEPS[bounded];
     arrived.current = false;
-    dispatch({
-      type: 'TOUR_STEP', runId: session.runId, step: bounded,
-      route: target.route, role: target.role,
-    });
+    dispatch(guidedTourStepAction(session, {
+      step: bounded,
+      route: target.route,
+      role: target.role,
+    }));
     onNavigate({ route: target.route, role: target.role });
   }, [dispatch, onNavigate, session.runId]);
 
@@ -225,21 +289,21 @@ export function MissionDrawer({
     }
   }, [currentRole, currentRoute, dispatch, s.role, s.route, session.runId, session.tour.paused]);
 
-  useEffect(() => {
-    if ((!s.mission && !s.gate) || !missionDone || session.tour.paused || step >= MISSION_STEPS.length - 1) return;
-    advanceTimer.current = setTimeout(() => enterStep(step + 1), 700);
-    return () => { if (advanceTimer.current) clearTimeout(advanceTimer.current); };
-  }, [enterStep, missionDone, s.gate, s.mission, session.tour.paused, step]);
+  useEffect(() => setCheckResult(null), [step]);
 
-  useEffect(() => () => {
-    if (checkTimer.current) clearTimeout(checkTimer.current);
-  }, []);
-
-  const checkEvidence = () => {
+  const checkEvidence = async () => {
     if (checking) return;
     setChecking(true);
-    onRefresh();
-    checkTimer.current = setTimeout(() => setChecking(false), 1_500);
+    try {
+      setCheckResult(await onRefresh());
+    } catch (reason: any) {
+      setCheckResult({
+        status: 'failed', checkedAt: Date.now(),
+        message: reason?.message ?? String(reason), changedRequestIds: [],
+      });
+    } finally {
+      setChecking(false);
+    }
   };
 
   const returnToMission = () => {
@@ -254,6 +318,7 @@ export function MissionDrawer({
       paused={session.tour.paused}
       missionDone={missionDone}
       checking={checking}
+      checkResult={checkResult}
       onBack={() => enterStep(step - 1)}
       onNext={() => enterStep(step + 1)}
       onReturn={returnToMission}
@@ -288,17 +353,15 @@ export function GuidedTour({
 }: GuidedTourProps) {
   const boundedStep = Math.min(Math.max(step, 0), MISSION_STEPS.length - 1);
   const s = MISSION_STEPS[boundedStep];
-  const [missionTick, setMissionTick] = useState(0);
+  const [, setMissionTick] = useState(0);
   const [paused, setPaused] = useState(false);
   const arrived = useRef(false);
-  const advanceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentSession = loadDemoSession();
   const missionDone = s.mission
     ? loadMissions()[s.mission as MissionKey]
     : s.gate === 'audit-packets-created'
       ? !!currentSession
-        && currentSession.missions.audit.packetIds.length > 0
-        && currentSession.missions.audit.includedRequestIds.length === 3
+        && hasCompleteAuditPacketCoverage(currentSession)
       : true;
 
   const navigate = useCallback((target: MissionStep) => {
@@ -350,18 +413,13 @@ export function GuidedTour({
     else if (arrived.current) setPaused(true);
   }, [currentTab, demoRole, s.role, s.tab]);
 
-  useEffect(() => {
-    if ((!s.mission && !s.gate) || !missionDone || paused || boundedStep >= MISSION_STEPS.length - 1) return;
-    advanceTimer.current = setTimeout(() => setStep(boundedStep + 1), 700);
-    return () => { if (advanceTimer.current) clearTimeout(advanceTimer.current); };
-  }, [boundedStep, missionDone, missionTick, paused, s.gate, s.mission, setStep]);
-
   return (
     <DrawerSurface
       step={boundedStep}
       paused={paused}
       missionDone={missionDone}
       checking={false}
+      checkResult={null}
       onBack={() => setStep(Math.max(0, boundedStep - 1))}
       onNext={() => setStep(Math.min(MISSION_STEPS.length - 1, boundedStep + 1))}
       onReturn={() => { setPaused(false); arrived.current = false; navigate(s); }}

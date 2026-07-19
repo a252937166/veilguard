@@ -1,5 +1,5 @@
 import type { DemoRole } from './demo';
-import { DEFAULT_APP_ROUTE, formatAppRoute, parseAppHash, type AppRoute, type RouteObjectSelection } from './routes';
+import { DEFAULT_APP_ROUTE, formatAppRoute, parseAppHash, selectionFromRoute, type AppRoute, type RouteObjectSelection } from './routes';
 
 export const DEMO_SESSION_VERSION = 2 as const;
 export const DEMO_SESSION_KEY = 'vg_demo_session_v2';
@@ -157,14 +157,31 @@ export function isMissionComplete(
       return hasRequestEvidence(p) && p.outcome === 'blocked' && p.reasonDecrypted === true;
     case 'audit': {
       const dispositions = new Set([...p.reviewedRequestIds, ...p.flaggedRequestIds]);
+      const requiredRequestIds = [
+        session.missions.routine.requestId,
+        session.missions.approval.requestId,
+        session.missions.violation.requestId,
+      ];
       return p.packetIds.length > 0
         && p.includedRequestIds.length > 0
+        && requiredRequestIds.every((id) => !!id && p.includedRequestIds.includes(id))
         && p.includedRequestIds.every((id) => dispositions.has(id))
         && p.packetUnlocked === true
         && p.integrityVerified === true
         && p.outcome === 'audit-reviewed';
     }
   }
+}
+
+/** The guided review may be built across several selective packet operations. */
+export function hasCompleteAuditPacketCoverage(session: DemoSessionV2): boolean {
+  const requiredRequestIds = [
+    session.missions.routine.requestId,
+    session.missions.approval.requestId,
+    session.missions.violation.requestId,
+  ];
+  return session.missions.audit.packetIds.length > 0
+    && requiredRequestIds.every((id) => !!id && session.missions.audit.includedRequestIds.includes(id));
 }
 
 export function demoCompleted(session: DemoSessionV2): boolean {
@@ -214,7 +231,7 @@ export type DemoSessionAction =
   | { type: 'AUDIT_REQUEST_DISPOSITION'; runId: string; requestId: string; disposition: 'reviewed' | 'flagged'; at?: number }
   | { type: 'AUDIT_INTEGRITY_VERIFIED'; runId: string; verified: boolean; at?: number }
   | { type: 'LEGACY_COMPLETE'; runId: string; mission: DemoMissionKey; at?: number }
-  | { type: 'TOUR_STEP'; runId: string; step: number; route: AppRoute; role?: DemoRole; at?: number }
+  | { type: 'TOUR_STEP'; runId: string; step: number; route: AppRoute; role?: DemoRole; selected?: RouteObjectSelection; at?: number }
   | { type: 'PAUSE_TOUR'; runId: string; reason: DemoTourState['pauseReason']; at?: number }
   | { type: 'RETURN_TO_MISSION'; runId: string; at?: number }
   | { type: 'CLOSE_TOUR'; runId: string; at?: number }
@@ -324,15 +341,16 @@ export function demoSessionReducer(state: DemoSessionV2, action: DemoSessionActi
       break;
     }
     case 'AUDIT_PACKETS_CREATED': {
-      const packetIds = unique(action.packetIds);
+      const packetIds = unique([...state.missions.audit.packetIds, ...action.packetIds]);
+      const includedRequestIds = action.requestIds
+        ? unique([...state.missions.audit.includedRequestIds, ...action.requestIds])
+        : state.missions.audit.includedRequestIds;
       const packetSetChanged = packetIds.join(',') !== state.missions.audit.packetIds.join(',');
+      const scopeChanged = includedRequestIds.join(',') !== state.missions.audit.includedRequestIds.join(',');
       next = updateMission(state, 'audit', {
         packetIds,
-        includedRequestIds: action.requestIds
-          ? unique(action.requestIds)
-          : state.missions.audit.includedRequestIds,
-        ...(packetSetChanged ? {
-          reviewedRequestIds: [], flaggedRequestIds: [],
+        includedRequestIds,
+        ...(packetSetChanged || scopeChanged ? {
           packetUnlocked: false, integrityVerified: false, outcome: undefined,
         } : {}),
         status: 'active',
@@ -372,6 +390,7 @@ export function demoSessionReducer(state: DemoSessionV2, action: DemoSessionActi
         ...state,
         route: action.route,
         role: action.role ?? state.role,
+        selected: action.selected ?? selectionFromRoute(action.route),
         tour: {
           active: true,
           step: Math.max(0, Math.floor(action.step)),
@@ -443,6 +462,26 @@ export function demoSessionReducer(state: DemoSessionV2, action: DemoSessionActi
   }
 
   return normalizeSession({ ...next, updatedAt: at }, at);
+}
+
+/**
+ * Build the single reducer intent shared by the mission drawer and page-level
+ * CTAs. Route, role, selected object and expected tour target therefore change
+ * in one state transition before the browser navigation is applied.
+ */
+export function guidedTourStepAction(
+  session: DemoSessionV2,
+  target: { step: number; route: AppRoute; role?: DemoRole; selected?: RouteObjectSelection; at?: number },
+): DemoSessionAction {
+  return {
+    type: 'TOUR_STEP',
+    runId: session.runId,
+    step: target.step,
+    route: target.route,
+    role: target.role,
+    selected: target.selected ?? selectionFromRoute(target.route),
+    at: target.at,
+  };
 }
 
 const validRoute = (value: unknown): AppRoute | undefined => {

@@ -49,9 +49,6 @@ export const DEMO_SCENARIOS: readonly DemoScenario[] = [
 export const scenarioByKey = (key: DemoScenarioKey) =>
   DEMO_SCENARIOS.find((scenario) => scenario.key === key)!;
 
-export const scenarioByRecipient = (recipient?: string) =>
-  DEMO_SCENARIOS.find((scenario) => scenario.recipient.toLowerCase() === recipient?.toLowerCase());
-
 const MEMO_DOMAIN = keccak256(stringToBytes('VEILGUARD_DEMO_RUN_V1'));
 
 /**
@@ -113,4 +110,19 @@ export function runBoundScenarioRequests<T extends DemoRequestIdentity>(
       request.mandateId,
       request.delegate,
     ).toLowerCase());
+}
+
+/**
+ * Resolves narrative metadata only when the request cryptographically belongs
+ * to this exact demo run. Recipient-only matching is intentionally forbidden:
+ * Free Play may pay the same vendor with a different amount or purpose.
+ */
+export function trustedDemoScenarioForRequest<T extends DemoRequestIdentity>(
+  runId: string | undefined,
+  request: T | undefined,
+): DemoScenario | undefined {
+  if (!runId || !request) return undefined;
+  return DEMO_SCENARIOS.find((scenario) => (
+    runBoundScenarioRequests(runId, scenario.key, [request]).length === 1
+  ));
 }

@@ -3,14 +3,16 @@ import { scanTx } from '../config';
 export type PaymentPhase = 'preflight' | 'encrypting' | 'broadcasting' | 'confirming' | 'evaluating' | 'finalizing' | 'recovering';
 export type PaymentFlow = { phase: PaymentPhase; label: string; startedAt: number; expect?: number; tx?: `0x${string}` };
 
-export const PAYMENT_STEPS = ['Preflight', 'Encrypt', 'Broadcast', 'TEE', 'Finalize'] as const;
+export const PAYMENT_STEPS = ['Preflight', 'Encrypt', 'Submit', 'Private check', 'Publish result'] as const;
 export const PAYMENT_PHASE_INDEX: Record<PaymentPhase, number> = {
   preflight: 0,
   encrypting: 1,
   broadcasting: 2,
   confirming: 2,
   evaluating: 3,
-  recovering: 3,
+  // A delayed receipt means the transaction was submitted, but the browser has
+  // not yet proved that a Request exists. Do not claim TEE work prematurely.
+  recovering: 2,
   finalizing: 4,
 };
 

@@ -152,7 +152,8 @@ Systemd/cron templates: [`scripts/keeper.service.example`](./scripts/keeper.serv
 
 The dApp is organized around work objects rather than disconnected role demos.
 Its refresh-safe routes include `#/overview`, `#/payments`, `#/payments/:id`,
-`#/policies/:id`, `#/approvals/:id`, `#/disclosure`, `#/audit/:packetId`,
+`#/policies/new`, `#/policies/:id`, `#/policies/:id/new-version`,
+`#/approvals/:id`, `#/disclosure`, `#/audit/:packetId`,
 `#/verify/:flowId`, `#/contracts`, `#/provenance` and `#/funds`. The guided
 Launch Day run cannot skip ahead:
 
@@ -170,11 +171,19 @@ cancelled and its escrow refund confirmed. The public view never receives
 plaintext amounts, policy values or blocked reasons.
 
 Payment submission acknowledges the first click immediately and reports the
-truthful Preflight → Encrypt → Broadcast → TEE → Finalize stages. The transaction
-hash is persisted at broadcast time; refresh recovery then matches only the
-current run's domain-separated memo and recipient. See
+single truthful Preflight → Encrypt → Submit → Private check → Publish result
+flow. The transaction hash is persisted at broadcast time; refresh recovery stays
+under Submit and then matches only the current run's domain-separated memo,
+scenario, mandate, delegate and recipient. Invoice drafts remain in the Inbox;
+created Request IDs open a dedicated timeline, Privacy Lens, settlement and
+transaction view. See
 [`docs/DESIGN.md`](./docs/DESIGN.md) for the canonical interaction and recovery
 contract.
+
+Mission evidence never triggers a timed page change. The completed Receipt,
+blocked reason or packet result stays visible until the visitor explicitly
+continues. On mobile, action-required missions collapse to a compact rail above
+the Safe decision dock instead of covering Approve or Reject.
 
 ## Real 2-of-2 demo committee
 
@@ -189,15 +198,32 @@ The provisioner enforces three narrow server interfaces:
 
 - `POST /api/demo-decision` accepts only the current run's pending ShieldOps
   request, exact recipient and decrypted 60 cUSDC amount. Same-action retries are
-  idempotent; `202` means the same action is still processing, `409` is a
+  idempotent; `202` returns the current validation/signing/broadcast/confirmation
+  phase and the transaction hash as soon as it exists. `409` is a
   conflicting decision, `410` means the window expired and escrow was returned,
   and `503` refuses to sign when Finance Admin cannot decrypt and verify the amount.
+- `GET /api/demo-decision?runId=…&requestId=…` is a read-only, run-bound
+  attestation over the persisted decision journal. A public state-5 cancellation
+  remains `Cancelled and refunded` unless this endpoint proves a matching user
+  Reject; watchdog expiry is reported separately and never impersonates a user.
 - `POST /api/demo-audit-packet` accepts only verified terminal requests from the
   current run, groups them by mandate and creates or reuses real on-chain packets.
   The returned bundle is explicitly a UI aggregate, never a synthetic contract object.
 - `POST /api/governance-execute` replaces the removed `/api/cosign`. It verifies a
   current owner-A EIP-712 signature, canonical allow-listed module calldata and the
   latest Safe nonce before owner B co-signs and broadcasts.
+
+The disclosure request list is a real scope selector. Guided runs may create one
+or more subsets; packet IDs and covered Request IDs accumulate, and the Auditor
+handoff unlocks only after CloudNode, ShieldOps and Atlas Contractor are all
+covered. Packets are still grouped by mandate and the displayed bundle remains a
+UI aggregate rather than a fabricated contract object.
+
+Policies expose the complete authority model without publishing privileged keys:
+the connected Finance Admin may propose a new encrypted mandate or replacement
+Draft and pause the module; a current Safe owner may activate, retire or resume
+through 2-of-2 governance. Finance Admin rotation remains a managed Safe/deployment
+operation outside the public automatic co-sign allowlist.
 
 Every Safe operation shares one serialized nonce boundary from state revalidation
 through receipt. The self-service `/api/provision` path remains idempotent per

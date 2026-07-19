@@ -32,6 +32,18 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+async function settleDecision(service, input, limit = 200) {
+  for (let attempt = 0; attempt < limit; attempt++) {
+    const response = await service.handle(input);
+    if (response.status !== 202) return response;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  const pending = [...service.jobs.values()].map(({ requestId, action, phase, result }) => ({
+    requestId, action, phase, result,
+  }));
+  throw new Error(`decision did not settle within the test poll limit: ${JSON.stringify(pending)}`);
+}
+
 function makeHarness({
   runId = RUN_ID,
   memo,
@@ -43,8 +55,10 @@ function makeHarness({
   decryptError,
   financeAdminError,
   execute,
+  recover,
   now = NOW,
   store = createMemoryDecisionStore(),
+  decisionWindowMs = WINDOW_MS,
 } = {}) {
   let currentNow = now;
   const request = [
@@ -88,17 +102,20 @@ function makeHarness({
       },
     }),
     readActiveMandate: async () => MANDATE_ID,
-    executeUnlocked: async (id, action) => {
+    executeUnlocked: async (id, action, report) => {
       executions.push({ id, action });
+      await report?.({ phase: 'broadcasting' });
       const hash = execute
-        ? await execute({ id, action, request })
+        ? await execute({ id, action, request, report })
         : `0x${action === 'approve' ? 'a' : 'b'}`;
+      await report?.({ phase: 'confirming', hash });
       request[5] = action === 'approve' ? 2 : 5;
       return hash;
     },
+    recoverBroadcast: recover ?? (async () => {}),
     withSafeLock: createSerialExecutor(),
     store,
-    decisionWindowMs: WINDOW_MS,
+    decisionWindowMs,
     now: () => currentNow,
   });
   return {
@@ -113,10 +130,10 @@ function makeHarness({
 test('decision authorization binds run, memo, delegate, recipient and decrypted amount', async (t) => {
   await t.test('rejects malformed and mismatched run ids', async () => {
     const malformed = makeHarness();
-    assert.equal((await malformed.service.handle({ runId: 'short', requestId: REQUEST_ID, action: 'approve' })).status, 400);
+    assert.equal((await settleDecision(malformed.service, { runId: 'short', requestId: REQUEST_ID, action: 'approve' })).status, 400);
 
     const mismatched = makeHarness();
-    const response = await mismatched.service.handle({ runId: 'run_87654321', requestId: REQUEST_ID, action: 'approve' });
+    const response = await settleDecision(mismatched.service, { runId: 'run_87654321', requestId: REQUEST_ID, action: 'approve' });
     assert.equal(response.status, 403);
     assert.match(response.body.error, /not bound to this demo run/);
     assert.equal(mismatched.executions.length, 0);
@@ -132,14 +149,14 @@ test('decision authorization binds run, memo, delegate, recipient and decrypted 
       delegate: DELEGATE,
     });
     const harness = makeHarness({ memo: wrongMemo });
-    const response = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+    const response = await settleDecision(harness.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
     assert.equal(response.status, 403);
     assert.equal(harness.executions.length, 0);
   });
 
   await t.test('rejects a recipient outside the ShieldOps scenario', async () => {
     const harness = makeHarness({ recipient: OTHER_RECIPIENT });
-    const response = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+    const response = await settleDecision(harness.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
     assert.equal(response.status, 403);
     assert.match(response.body.error, /recipient/);
     assert.equal(harness.executions.length, 0);
@@ -147,7 +164,7 @@ test('decision authorization binds run, memo, delegate, recipient and decrypted 
 
   await t.test('rejects a request owned by the isolated blocked-scenario delegate', async () => {
     const harness = makeHarness({ delegate: OTHER_DELEGATE });
-    const response = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+    const response = await settleDecision(harness.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
     assert.equal(response.status, 403);
     assert.match(response.body.error, /not owned/);
     assert.equal(harness.executions.length, 0);
@@ -155,7 +172,7 @@ test('decision authorization binds run, memo, delegate, recipient and decrypted 
 
   await t.test('rejects a decrypted amount outside the exact 60 cUSDC scenario', async () => {
     const harness = makeHarness({ decryptedAmount: AMOUNT + 1n });
-    const response = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+    const response = await settleDecision(harness.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
     assert.equal(response.status, 403);
     assert.match(response.body.error, /decrypted amount/);
     assert.equal(harness.executions.length, 0);
@@ -169,7 +186,7 @@ test('decryption or finance-admin verification failure returns 503 and never sig
   ]) {
     await t.test(name, async () => {
       const harness = makeHarness(options);
-      const response = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+      const response = await settleDecision(harness.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
       assert.equal(response.status, 503);
       assert.match(response.body.error, /could not decrypt and verify/);
       assert.equal(harness.executions.length, 0);
@@ -189,7 +206,9 @@ test('same-direction work returns 202 while the opposite action returns 409', as
     },
   });
 
-  const first = harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+  const first = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+  assert.equal(first.status, 202);
+  assert.equal(first.body.phase, 'validating');
   await entered.promise;
 
   const retry = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
@@ -201,7 +220,7 @@ test('same-direction work returns 202 while the opposite action returns 409', as
   assert.match(opposite.body.error, /approve decision in progress/);
 
   release.resolve();
-  const completed = await first;
+  const completed = await settleDecision(harness.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
   assert.equal(completed.status, 200);
   assert.equal(completed.body.idempotent, false);
 
@@ -214,9 +233,231 @@ test('same-direction work returns 202 while the opposite action returns 409', as
   assert.equal(harness.executions.length, 1);
 });
 
+test('processing snapshots expose and persist the Safe hash before receipt confirmation', async () => {
+  const broadcasted = deferred();
+  const releaseReceipt = deferred();
+  const hash = '0xbroadcast';
+  const harness = makeHarness({
+    execute: async ({ report }) => {
+      await report({ phase: 'confirming', hash });
+      broadcasted.resolve();
+      await releaseReceipt.promise;
+      return hash;
+    },
+  });
+
+  const accepted = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+  assert.equal(accepted.status, 202);
+  await broadcasted.promise;
+
+  const processing = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+  assert.equal(processing.status, 202);
+  assert.equal(processing.body.phase, 'confirming');
+  assert.equal(processing.body.hash, hash);
+  const journalBeforeReceipt = await harness.store.get(REQUEST_ID);
+  assert.equal(journalBeforeReceipt.intent.hash, hash);
+  assert.equal(journalBeforeReceipt.receipt, undefined);
+
+  releaseReceipt.resolve();
+  const completed = await settleDecision(harness.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+  assert.equal(completed.status, 200);
+  assert.equal(completed.body.hash, hash);
+  assert.equal((await harness.store.get(REQUEST_ID)).receipt.hash, hash);
+});
+
+test('a persisted broadcast is recovered after service recreation without a second Safe execution', async () => {
+  const store = createMemoryDecisionStore();
+  const hash = '0xrecoverable';
+  const interrupted = makeHarness({
+    store,
+    execute: async ({ report }) => {
+      await report({ phase: 'confirming', hash });
+      throw new Error('receipt transport timed out');
+    },
+  });
+  const failed = await settleDecision(interrupted.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+  assert.equal(failed.status, 503);
+  assert.equal(failed.body.details.hash, hash);
+  assert.equal((await store.get(REQUEST_ID)).intent.hash, hash);
+
+  let recoveredHash;
+  const restarted = makeHarness({
+    state: 2,
+    store,
+    decryptError: new Error('Nox temporarily unavailable'),
+    recover: async (candidate) => { recoveredHash = candidate; },
+  });
+  const recovered = await settleDecision(restarted.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+  assert.equal(recovered.status, 200);
+  assert.equal(recovered.body.recovered, true);
+  assert.equal(recovered.body.hash, hash);
+  assert.equal(recoveredHash, hash);
+  assert.equal(restarted.executions.length, 0);
+});
+
+test('a persisted terminal receipt remains idempotent while Nox decryption is unavailable', async () => {
+  const store = createMemoryDecisionStore();
+  await store.recordIntent(REQUEST_ID, { runId: RUN_ID, action: 'approve', recordedAt: NOW - 2_000 });
+  await store.recordUserReceipt(REQUEST_ID, {
+    runId: RUN_ID,
+    action: 'approve',
+    hash: '0xapproved',
+    state: 'safe-approved',
+    recordedAt: NOW - 1_000,
+  });
+  const harness = makeHarness({
+    state: 2,
+    store,
+    decryptError: new Error('Nox temporarily unavailable'),
+  });
+
+  const response = await settleDecision(harness.service, {
+    runId: RUN_ID,
+    requestId: REQUEST_ID,
+    action: 'approve',
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.idempotent, true);
+  assert.equal(response.body.hash, '0xapproved');
+  assert.equal(harness.executions.length, 0);
+});
+
+test('read-only decision attestation never infers user Reject from state=5 alone', async () => {
+  const harness = makeHarness({
+    state: 5,
+    decryptError: new Error('attestation must not decrypt'),
+    financeAdminError: new Error('attestation must not inspect finance admin'),
+  });
+  const response = await harness.service.attest({ runId: RUN_ID, requestId: REQUEST_ID });
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, {
+    ok: true,
+    requestId: Number(REQUEST_ID),
+    chainState: 5,
+    origin: 'unknown',
+  });
+  assert.equal(harness.executions.length, 0);
+});
+
+test('decision attestation exposes only matching persisted user or timeout origin', async (t) => {
+  await t.test('matching user rejection receipt', async () => {
+    const store = createMemoryDecisionStore();
+    await store.recordIntent(REQUEST_ID, { runId: RUN_ID, action: 'reject', recordedAt: NOW - 2_000 });
+    await store.recordUserReceipt(REQUEST_ID, {
+      runId: RUN_ID,
+      action: 'reject',
+      hash: '0xuser-reject',
+      state: 'safe-rejected',
+      recordedAt: NOW - 1_000,
+    });
+    const response = await makeHarness({ state: 5, store }).service.attest({ runId: RUN_ID, requestId: REQUEST_ID });
+    assert.deepEqual(response, {
+      status: 200,
+      body: {
+        ok: true,
+        requestId: Number(REQUEST_ID),
+        chainState: 5,
+        origin: 'user',
+        action: 'reject',
+        hash: '0xuser-reject',
+        recordedAt: NOW - 1_000,
+      },
+    });
+  });
+
+  await t.test('watchdog timeout receipt', async () => {
+    const store = createMemoryDecisionStore();
+    await store.recordTimeoutReceipt(REQUEST_ID, {
+      hash: '0xtimeout',
+      state: 'safe-rejected',
+      recordedAt: NOW,
+    });
+    const response = await makeHarness({ state: 5, store }).service.attest({ runId: RUN_ID, requestId: REQUEST_ID });
+    assert.equal(response.status, 200);
+    assert.equal(response.body.origin, 'timeout');
+    assert.equal(response.body.action, undefined);
+    assert.equal(response.body.hash, '0xtimeout');
+  });
+
+  await t.test('wrong run is rejected by memo identity before journal disclosure', async () => {
+    const store = createMemoryDecisionStore();
+    await store.recordIntent(REQUEST_ID, { runId: RUN_ID, action: 'reject', recordedAt: NOW - 2_000 });
+    await store.recordUserReceipt(REQUEST_ID, {
+      runId: RUN_ID,
+      action: 'reject',
+      hash: '0xprivate-to-run',
+      state: 'safe-rejected',
+      recordedAt: NOW - 1_000,
+    });
+    const response = await makeHarness({ state: 5, store }).service.attest({
+      runId: 'run_87654321',
+      requestId: REQUEST_ID,
+    });
+    assert.equal(response.status, 403);
+    assert.equal(response.body.hash, undefined);
+  });
+});
+
+test('an opposite action conflicts with a persisted broadcast before Nox decryption', async () => {
+  const store = createMemoryDecisionStore();
+  await store.recordIntent(REQUEST_ID, { runId: RUN_ID, action: 'approve', recordedAt: NOW - 2_000 });
+  await store.recordBroadcast(REQUEST_ID, {
+    runId: RUN_ID,
+    action: 'approve',
+    hash: '0xpending',
+    broadcastAt: NOW - 1_000,
+  });
+  const harness = makeHarness({
+    store,
+    decryptError: new Error('Nox temporarily unavailable'),
+  });
+
+  const response = await settleDecision(harness.service, {
+    runId: RUN_ID,
+    requestId: REQUEST_ID,
+    action: 'reject',
+  });
+  assert.equal(response.status, 409);
+  assert.match(response.body.error, /approve decision in progress/);
+  assert.equal(harness.executions.length, 0);
+});
+
+test('a processing decision job is not evicted by its decision-window retention timer', async () => {
+  const entered = deferred();
+  const release = deferred();
+  const harness = makeHarness({
+    decisionWindowMs: 10,
+    execute: async () => {
+      entered.resolve();
+      await release.promise;
+      return '0xslow';
+    },
+  });
+
+  const accepted = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+  assert.equal(accepted.status, 202);
+  await entered.promise;
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  const retry = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+  assert.equal(retry.status, 202);
+  assert.equal(retry.body.phase, 'broadcasting');
+  assert.equal(harness.service.jobs.size, 1);
+  assert.equal(harness.executions.length, 1);
+
+  release.resolve();
+  const completed = await settleDecision(harness.service, {
+    runId: RUN_ID,
+    requestId: REQUEST_ID,
+    action: 'approve',
+  });
+  assert.equal(completed.status, 200);
+  assert.equal(harness.executions.length, 1);
+});
+
 test('TEE processing time does not consume the human decision window', async () => {
   const harness = makeHarness({ ageMs: 10 * WINDOW_MS });
-  const response = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+  const response = await settleDecision(harness.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
   assert.equal(response.status, 200);
   assert.equal(response.body.state, 'safe-approved');
   assert.equal((await harness.store.get(REQUEST_ID)).awaitingSince, NOW);
@@ -242,21 +483,86 @@ test('watchdog expiry starts at its first persisted state=3 observation', async 
   assert.deepEqual(harness.executions.map(({ action }) => action), ['reject']);
 });
 
+test('watchdog never blindly rejects a persisted decision broadcast', async () => {
+  const store = createMemoryDecisionStore();
+  await store.observeAwaiting(REQUEST_ID, NOW - WINDOW_MS - 1_000);
+  await store.recordIntent(REQUEST_ID, { runId: RUN_ID, action: 'approve', recordedAt: NOW - 3_000 });
+  await store.recordBroadcast(REQUEST_ID, {
+    runId: RUN_ID,
+    action: 'approve',
+    hash: '0xpending-approval',
+    broadcastAt: NOW - 2_000,
+  });
+  const harness = makeHarness({ store });
+
+  const expired = await harness.service.expire({ requestId: REQUEST_ID, windowMs: WINDOW_MS });
+  assert.equal(expired.skipped, 'decision-broadcast-pending');
+  assert.equal(expired.hash, '0xpending-approval');
+  assert.equal(expired.action, 'approve');
+  assert.equal(harness.executions.length, 0);
+  assert.equal((await store.get(REQUEST_ID)).receipt, undefined);
+});
+
+test('restart recovery and watchdog expiry share the Safe critical section', async () => {
+  const store = createMemoryDecisionStore();
+  await store.observeAwaiting(REQUEST_ID, NOW - WINDOW_MS - 1_000);
+  await store.recordIntent(REQUEST_ID, { runId: RUN_ID, action: 'approve', recordedAt: NOW - 3_000 });
+  await store.recordBroadcast(REQUEST_ID, {
+    runId: RUN_ID,
+    action: 'approve',
+    hash: '0xrecovering-approval',
+    broadcastAt: NOW - 2_000,
+  });
+  const recoveryEntered = deferred();
+  const releaseRecovery = deferred();
+  let harness;
+  harness = makeHarness({
+    store,
+    recover: async () => {
+      recoveryEntered.resolve();
+      await releaseRecovery.promise;
+      harness.request[5] = 2;
+    },
+  });
+
+  const accepted = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+  assert.equal(accepted.status, 202);
+  await recoveryEntered.promise;
+
+  let watchdogSettled = false;
+  const watchdog = harness.service.expire({ requestId: REQUEST_ID, windowMs: WINDOW_MS })
+    .then((value) => { watchdogSettled = true; return value; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(watchdogSettled, false);
+
+  releaseRecovery.resolve();
+  const watchdogResult = await watchdog;
+  const recovered = await settleDecision(harness.service, {
+    runId: RUN_ID,
+    requestId: REQUEST_ID,
+    action: 'approve',
+  });
+  assert.equal(recovered.status, 200);
+  assert.equal(recovered.body.recovered, true);
+  assert.equal(watchdogResult.skipped, 'not-awaiting-approval');
+  assert.equal(harness.executions.length, 0);
+});
+
 test('an expired user decision is cancelled and remains 410 on Reject retry', async () => {
   const harness = makeHarness();
   await harness.store.observeAwaiting(REQUEST_ID, NOW - WINDOW_MS - 1_000);
-  const expired = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+  const expired = await settleDecision(harness.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
   assert.equal(expired.status, 410);
   assert.equal(expired.body.details.origin, 'timeout');
   assert.deepEqual(harness.executions.map(({ action }) => action), ['reject']);
 
-  const retry = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'reject' });
+  const retry = await settleDecision(harness.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'reject' });
   assert.equal(retry.status, 410);
   assert.equal(retry.body.details.origin, 'timeout');
   assert.equal(harness.executions.length, 1);
 
   harness.request[5] = 3; // stale RPC observation after the confirmed timeout
-  const staleRetry = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'reject' });
+  const staleRetry = await settleDecision(harness.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'reject' });
   assert.equal(staleRetry.status, 410);
   assert.equal(staleRetry.body.details.origin, 'timeout');
   assert.equal(harness.executions.length, 1);
@@ -269,7 +575,7 @@ test('an expired user decision is cancelled and remains 410 on Reject retry', as
 test('external state=5 without a receipt is 409 regardless of request age', async () => {
   const harness = makeHarness({ state: 5, ageMs: 10 * WINDOW_MS });
   await harness.store.observeAwaiting(REQUEST_ID, NOW - 10 * WINDOW_MS);
-  const response = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'reject' });
+  const response = await settleDecision(harness.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'reject' });
   assert.equal(response.status, 409);
   assert.match(response.body.error, /no matching user rejection receipt/);
   assert.equal(response.body.details, undefined);
@@ -289,14 +595,16 @@ test('Safe serialization makes a user decision win before a queued timeout', asy
   });
   await harness.store.observeAwaiting(REQUEST_ID, NOW - WINDOW_MS + 1_000);
 
-  const decision = harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+  const accepted = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
+  assert.equal(accepted.status, 202);
   await entered.promise;
   // The action crossed the deadline only after it acquired the Safe lock.
   harness.setNow(NOW + 2_000);
   const timeout = harness.service.expire({ requestId: REQUEST_ID, windowMs: WINDOW_MS });
 
   release.resolve();
-  const [decisionResult, timeoutResult] = await Promise.all([decision, timeout]);
+  const timeoutResult = await timeout;
+  const decisionResult = await settleDecision(harness.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'approve' });
   assert.equal(decisionResult.status, 200);
   assert.equal(timeoutResult.skipped, 'not-awaiting-approval');
   assert.equal(harness.request[5], 2);
@@ -318,10 +626,12 @@ test('Safe serialization makes a timeout win before a queued user decision', asy
 
   const timeout = harness.service.expire({ requestId: REQUEST_ID, windowMs: WINDOW_MS });
   await entered.promise;
-  const decision = harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'reject' });
+  const accepted = await harness.service.handle({ runId: RUN_ID, requestId: REQUEST_ID, action: 'reject' });
+  assert.equal(accepted.status, 202);
   release.resolve();
 
-  const [timeoutResult, decisionResult] = await Promise.all([timeout, decision]);
+  const timeoutResult = await timeout;
+  const decisionResult = await settleDecision(harness.service, { runId: RUN_ID, requestId: REQUEST_ID, action: 'reject' });
   assert.equal(timeoutResult.ok, true);
   assert.equal(timeoutResult.origin, 'timeout');
   assert.equal(decisionResult.status, 410);
@@ -360,7 +670,7 @@ test('file decision journal preserves idempotency across service recreation', as
     });
 
     const restarted = makeHarness({ state: 5, store: reloadedStore });
-    const response = await restarted.service.handle({
+    const response = await settleDecision(restarted.service, {
       runId: RUN_ID,
       requestId: REQUEST_ID,
       action: 'reject',
@@ -383,7 +693,7 @@ test('persisted awaiting timestamp enforces the same window after restart', asyn
       ageMs: 1,
       store: createFileDecisionStore(journalPath),
     });
-    const response = await restarted.service.handle({
+    const response = await settleDecision(restarted.service, {
       runId: RUN_ID,
       requestId: REQUEST_ID,
       action: 'approve',

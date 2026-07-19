@@ -7,12 +7,15 @@
  */
 
 export type AppRoute =
+  | { page: 'not-found'; path: string }
   | { page: 'overview' }
   | { page: 'payment-inbox' }
   | { page: 'new-payment' }
   | { page: 'payment-detail'; requestId: string }
   | { page: 'policies' }
+  | { page: 'policy-new' }
   | { page: 'policy-detail'; policyId: string }
+  | { page: 'policy-new-version'; policyId: string }
   | { page: 'approvals' }
   | { page: 'approval-detail'; requestId: string }
   | { page: 'disclosure-builder' }
@@ -41,12 +44,12 @@ export type LegacyTabName =
 
 export const DEFAULT_APP_ROUTE: AppRoute = { page: 'overview' };
 
-const cleanId = (value: string | undefined): string | undefined => {
+const cleanOpaqueId = (value: string | undefined): string | undefined => {
   if (!value) return undefined;
   try {
     const decoded = decodeURIComponent(value).trim();
-    // IDs are deliberately opaque, but path separators/control characters are
-    // never valid object identifiers and would make round-tripping ambiguous.
+    // Flow ids are deliberately opaque, but path separators/control characters
+    // are never valid and would make round-tripping ambiguous.
     if (!decoded || /[\u0000-\u001f/\\]/.test(decoded)) return undefined;
     return decoded;
   } catch {
@@ -54,62 +57,84 @@ const cleanId = (value: string | undefined): string | undefined => {
   }
 };
 
+/** Contract object identifiers are unsigned base-10 integers. */
+export const isDecimalObjectId = (value: string | undefined): value is string => {
+  if (!value) return false;
+  try {
+    return /^\d+$/.test(decodeURIComponent(value).trim());
+  } catch {
+    return false;
+  }
+};
+
+const cleanDecimalId = (value: string | undefined): string | undefined => {
+  if (!isDecimalObjectId(value)) return undefined;
+  return decodeURIComponent(value).trim();
+};
+
 const encoded = (value: string) => encodeURIComponent(value);
 
 /** Return an AppRoute for an app hash, or null when the hash is the landing page. */
 export function parseAppHash(hash: string): AppRoute | null {
   const raw = hash.trim();
-  if (!raw || raw === '#') return null;
+  if (!raw || raw === '#' || raw === '#/') return null;
   if (raw === '#app' || raw === '#/app' || raw === '#/overview') return DEFAULT_APP_ROUTE;
 
   const path = raw.replace(/^#/, '').replace(/^\/?/, '/').replace(/\/+$/, '') || '/';
+  const notFound = (): AppRoute => ({ page: 'not-found', path });
   const parts = path.split('/').filter(Boolean);
   const [root, id, extra] = parts;
-  if (extra) return null;
+  if (parts.length > 3 || (extra && root !== 'policies')) return notFound();
 
   switch (root) {
     case 'overview': return { page: 'overview' };
     case 'payments': {
       if (!id) return { page: 'payment-inbox' };
       if (id === 'new') return { page: 'new-payment' };
-      const requestId = cleanId(id);
-      return requestId ? { page: 'payment-detail', requestId } : null;
+      const requestId = cleanDecimalId(id);
+      return requestId ? { page: 'payment-detail', requestId } : notFound();
     }
     case 'policies': {
       if (!id) return { page: 'policies' };
-      const policyId = cleanId(id);
-      return policyId ? { page: 'policy-detail', policyId } : null;
+      if (id === 'new' && !extra) return { page: 'policy-new' };
+      const policyId = cleanDecimalId(id);
+      if (!policyId) return notFound();
+      if (!extra) return { page: 'policy-detail', policyId };
+      return extra === 'new-version' ? { page: 'policy-new-version', policyId } : notFound();
     }
     case 'approvals': {
       if (!id) return { page: 'approvals' };
-      const requestId = cleanId(id);
-      return requestId ? { page: 'approval-detail', requestId } : null;
+      const requestId = cleanDecimalId(id);
+      return requestId ? { page: 'approval-detail', requestId } : notFound();
     }
-    case 'disclosure': return id ? null : { page: 'disclosure-builder' };
+    case 'disclosure': return id ? notFound() : { page: 'disclosure-builder' };
     case 'audit': {
       if (!id) return { page: 'audit-packets' };
-      const packetId = cleanId(id);
-      return packetId ? { page: 'audit-detail', packetId } : null;
+      const packetId = cleanDecimalId(id);
+      return packetId ? { page: 'audit-detail', packetId } : notFound();
     }
     case 'verify': {
-      const flowId = cleanId(id);
-      return id && !flowId ? null : { page: 'verify', ...(flowId ? { flowId } : {}) };
+      const flowId = cleanOpaqueId(id);
+      return id && !flowId ? notFound() : { page: 'verify', ...(flowId ? { flowId } : {}) };
     }
-    case 'contracts': return id ? null : { page: 'contracts' };
-    case 'provenance': return id ? null : { page: 'provenance' };
-    case 'funds': return id ? null : { page: 'funds' };
-    default: return null;
+    case 'contracts': return id ? notFound() : { page: 'contracts' };
+    case 'provenance': return id ? notFound() : { page: 'provenance' };
+    case 'funds': return id ? notFound() : { page: 'funds' };
+    default: return notFound();
   }
 }
 
 export function formatAppRoute(route: AppRoute): string {
   switch (route.page) {
+    case 'not-found': return `#${route.path.startsWith('/') ? route.path : `/${route.path}`}`;
     case 'overview': return '#/overview';
     case 'payment-inbox': return '#/payments';
     case 'new-payment': return '#/payments/new';
     case 'payment-detail': return `#/payments/${encoded(route.requestId)}`;
     case 'policies': return '#/policies';
+    case 'policy-new': return '#/policies/new';
     case 'policy-detail': return `#/policies/${encoded(route.policyId)}`;
+    case 'policy-new-version': return `#/policies/${encoded(route.policyId)}/new-version`;
     case 'approvals': return '#/approvals';
     case 'approval-detail': return `#/approvals/${encoded(route.requestId)}`;
     case 'disclosure-builder': return '#/disclosure';
@@ -130,9 +155,11 @@ export function selectionFromRoute(route: AppRoute): RouteObjectSelection {
   switch (route.page) {
     case 'payment-detail':
     case 'approval-detail': return { requestId: route.requestId };
-    case 'policy-detail': return { policyId: route.policyId };
+    case 'policy-detail':
+    case 'policy-new-version': return { policyId: route.policyId };
     case 'audit-detail': return { packetId: route.packetId };
     case 'verify': return route.flowId ? { flowId: route.flowId } : {};
+    case 'not-found': return {};
     default: return {};
   }
 }
@@ -140,12 +167,15 @@ export function selectionFromRoute(route: AppRoute): RouteObjectSelection {
 /** Temporary bridge for the existing tab renderer while routes are adopted. */
 export function routeToLegacyTab(route: AppRoute): LegacyTabName {
   switch (route.page) {
+    case 'not-found': return 'Dashboard';
     case 'overview': return 'Dashboard';
     case 'payment-inbox':
     case 'new-payment':
     case 'payment-detail': return 'Delegate';
     case 'policies':
+    case 'policy-new':
     case 'policy-detail':
+    case 'policy-new-version':
     case 'disclosure-builder': return 'Admin';
     case 'approvals':
     case 'approval-detail': return 'Signer';
@@ -172,12 +202,15 @@ export function legacyTabToRoute(tab: LegacyTabName): AppRoute {
 
 export function appRouteLabel(route: AppRoute): string {
   switch (route.page) {
+    case 'not-found': return 'Not Found';
     case 'overview': return 'Overview';
     case 'payment-inbox': return 'Payment Inbox';
     case 'new-payment': return 'New Payment';
     case 'payment-detail': return `Request #${route.requestId}`;
     case 'policies': return 'Policies';
+    case 'policy-new': return 'New Policy';
     case 'policy-detail': return `Policy #${route.policyId}`;
+    case 'policy-new-version': return `Policy #${route.policyId} · New Version`;
     case 'approvals': return 'Pending Approvals';
     case 'approval-detail': return `Approval #${route.requestId}`;
     case 'disclosure-builder': return 'Build Packet';

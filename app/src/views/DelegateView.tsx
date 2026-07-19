@@ -1,19 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { keccak256, parseEventLogs, stringToBytes } from 'viem';
 import { ADDR, FINALIZE_API, PROVISION_API, moduleAbi, parseUsdc, scanTx, short, vendorName } from '../config';
 import { handleClientFor, publicClient } from '../nox';
 import { walletWrite } from '../walletTx';
 import { fetchRequestTxs, type RequestTxs } from '../txlog';
 import { useApp, type SpendRequest } from '../App';
-import { NoRole, RequestPill } from '../ui';
+import { Decrypt, NoRole, RequestPill } from '../ui';
 import { FREEPLAY_DELEGATE, VIOLATION_DELEGATE, demoWalletByAddress } from '../demo';
-import { MISSIONS, bindMissionRequest, completeMission, confirmApprovalDecision, getOrCreateDemoSession, loadMissions, type MissionKey, type MissionState } from '../missions';
-import { DEMO_SCENARIOS, demoMemoHash, scenarioByKey, scenarioByRecipient, type DemoScenarioKey } from '../demo-scenarios';
+import { MISSIONS, advanceGuidedMission, bindMissionRequest, completeMission, confirmApprovalDecision, getOrCreateDemoSession, loadMissions, type MissionKey, type MissionState } from '../missions';
+import { DEMO_SCENARIOS, demoMemoHash, scenarioByKey, trustedDemoScenarioForRequest, type DemoScenarioKey } from '../demo-scenarios';
 import { loadDemoSession } from '../demo-session';
-import { formatAppRoute, parseAppHash } from '../routes';
+import { formatAppRoute, isDecimalObjectId, parseAppHash } from '../routes';
 import { PrivacyLens } from '../components/PrivacyLens';
-import { PaymentProgress, PAYMENT_PHASE_INDEX, type PaymentFlow, type PaymentPhase } from '../components/PaymentProgress';
-import { acquireOperationLock, releaseOperationLock } from '../operation-lock';
+import { PaymentProgress, type PaymentFlow, type PaymentPhase } from '../components/PaymentProgress';
+import { pollDemoSafeDecision, SafeDecisionDock, type SafeDecisionFlow } from '../components/SafeDecisionProgress';
+import { acquireLocalOperationLock, releaseLocalOperationLock } from '../operation-lock';
+import { deriveRequestDetailModel, resolveRequestContexts } from '../domain';
+import { RequestDetailView } from './RequestDetailView';
+import {
+  fetchDemoDecisionAttestation,
+  isAttestedUserReject,
+  type DemoDecisionAttestation,
+} from '../demo-decision-attestation';
 
 const REASONS: Record<number, string> = {
   1: 'over the delegated budget',
@@ -37,23 +46,67 @@ function mmss(sec: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-export function DelegateView() {
-  const { account, mandates, requests, run, busy, refresh, toast, goTab, startDemo, lastUpdated, loadError } = useApp();
+function ActivePaymentOperationDock({
+  flow,
+  isDemo,
+  story,
+  showReturn = true,
+  onReturn,
+}: {
+  flow: PaymentFlow;
+  isDemo: boolean;
+  story?: ReturnType<typeof scenarioByKey>;
+  showReturn?: boolean;
+  onReturn: () => void;
+}) {
+  return (
+    <section className="active-operation-dock" aria-label="Active payment operation">
+      <div className="active-operation-head">
+        <div>
+          <span className="detail-kicker">Active operation</span>
+          <h2>{story?.vendor ?? 'Custom confidential payment'}</h2>
+          <p>{story ? `${story.amount} cUSDC · ${story.purpose}` : 'This operation remains visible while you inspect another invoice.'}</p>
+        </div>
+        {story && showReturn && (
+          <button type="button" className="btn small ghost" onClick={onReturn}>
+            Return to {story.vendor}
+          </button>
+        )}
+      </div>
+      <PaymentProgress flow={flow} isDemo={isDemo} />
+    </section>
+  );
+}
+
+export function DelegateView({ detailRequestId }: { detailRequestId?: string } = {}) {
+  const { account, mandates, requests, run, busy, refresh, toast, goTab, startDemo, demoRole, lastUpdated, loadError } = useApp();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const route = useMemo(() => parseAppHash(`#${location.pathname}`), [location.pathname]);
+  const routedDetailId = detailRequestId ?? (route?.page === 'payment-detail' ? route.requestId : undefined);
+  const viewedRequestId = routedDetailId && isDecimalObjectId(routedDetailId)
+    ? BigInt(routedDetailId)
+    : null;
   const [amount, setAmount] = useState('25');
   const [recipient, setRecipient] = useState('');
   const [memo, setMemo] = useState('');
   const [trackId, setTrackId] = useState<bigint | null>(null);
   const [missionOf, setMissionOf] = useState<MissionKey | 'free' | null>(null);
   const [lastAmount, setLastAmount] = useState<string>('');
+  const [lastAmountRequestId, setLastAmountRequestId] = useState<string | null>(null);
   const [lastTx, setLastTx] = useState<`0x${string}` | null>(null);
+  const [lastTxRequestId, setLastTxRequestId] = useState<string | null>(null);
   const [reasonVal, setReasonVal] = useState<string | null>(null);
+  const [reasonRequestId, setReasonRequestId] = useState<string | null>(null);
   const [reasonBusy, setReasonBusy] = useState(false);
   const [missions, setMissions] = useState<MissionState>(loadMissions);
   const [txs, setTxs] = useState<Map<string, RequestTxs>>(new Map());
+  const [decisionAttestations, setDecisionAttestations] = useState<Map<string, DemoDecisionAttestation>>(new Map());
   const [cool, setCool] = useState<{ main: number; violation: number; freeplay: number }>({ main: 0, violation: 0, freeplay: 0 });
   const [selectedScenario, setSelectedScenario] = useState<DemoScenarioKey>('routine');
   const [decisionBusy, setDecisionBusy] = useState<'approve' | 'reject' | null>(null);
   const [decisionError, setDecisionError] = useState<string | null>(null);
+  const [decisionFlow, setDecisionFlow] = useState<SafeDecisionFlow | null>(null);
   const decisionLock = useRef(false);
 
   const [flow, setFlowState] = useState<PaymentFlow | null>(null);
@@ -80,22 +133,7 @@ export function DelegateView() {
   const freeFormRef = useRef<HTMLDivElement>(null);
   const amountRef = useRef<HTMLInputElement>(null);
   const receiptRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const selectFromRoute = () => {
-      const route = parseAppHash(window.location.hash);
-      if (route?.page !== 'payment-detail' || !/^\d+$/.test(route.requestId)) return;
-      const id = BigInt(route.requestId);
-      const session = loadDemoSession();
-      const mission = session && (['routine', 'approval', 'violation'] as const)
-        .find((key) => session.missions[key].requestId === route.requestId);
-      setTrackId(id);
-      setMissionOf(mission ?? null);
-    };
-    selectFromRoute();
-    window.addEventListener('hashchange', selectFromRoute);
-    return () => window.removeEventListener('hashchange', selectFromRoute);
-  }, []);
+  const inboxRef = useRef<HTMLElement>(null);
 
   const isDemo = account?.toLowerCase() === '0x17ee5ad7e4b40cadafad27c5f68f74d02c7fd532';
   const myMandate = useMemo(
@@ -114,7 +152,16 @@ export function DelegateView() {
     const mine = (d: string) => d.toLowerCase() === account?.toLowerCase() || (isDemo && isDemoAddr(d));
     return [...requests].filter((r) => mine(r.delegate)).reverse();
   }, [requests, account, isDemo]);
-  const latest = useMemo(() => (trackId != null ? requests.find((r) => r.id === trackId) : undefined), [requests, trackId]);
+  const requestContexts = useMemo(() => resolveRequestContexts(requests, {
+    activeId: trackId,
+    viewedId: viewedRequestId,
+  }), [requests, trackId, viewedRequestId]);
+  const latest = requestContexts.active;
+  const viewedRequest = requestContexts.viewed;
+  const activeOperationKey = submittingScenario ?? missionOf;
+  const activeOperationStory = activeOperationKey && activeOperationKey !== 'free' && activeOperationKey !== 'audit'
+    ? scenarioByKey(activeOperationKey as DemoScenarioKey)
+    : undefined;
 
   // In-flight (Requested OR AwaitingSafeApproval) occupies the mandate slot —
   // both must block new submissions (the contract rejects them anyway).
@@ -138,11 +185,13 @@ export function DelegateView() {
       t = null;
     }
     if (t?.id && requests.some((r) => String(r.id) === t.id)) {
-      setTrackId(BigInt(t.id)); setMissionOf(t.mission); setLastAmount(t.amount); if (t.tx) setLastTx(t.tx);
+      setTrackId(BigInt(t.id)); setMissionOf(t.mission); setLastAmount(t.amount); setLastAmountRequestId(t.id);
+      if (t.tx) { setLastTx(t.tx); setLastTxRequestId(t.id); }
       return;
     }
     if (t && !t.id) {
-      setMissionOf(t.mission); setLastAmount(t.amount); if (t.tx) setLastTx(t.tx);
+      setMissionOf(t.mission); setLastAmount(t.amount); setLastAmountRequestId(null);
+      if (t.tx) { setLastTx(t.tx); setLastTxRequestId(null); }
       if (t.tx) setFlow('recovering', 'Recovering the broadcast request from Sepolia…', 30, t.tx);
     }
     const boundMission = session && (['routine', 'approval', 'violation'] as const)
@@ -207,7 +256,9 @@ export function DelegateView() {
         if (tracked.mission !== 'free' && tracked.mission !== 'audit') bindMissionRequest(tracked.mission, id, runId);
         setReasonVal(null);
         setLastAmount(tracked.amount);
+        setLastAmountRequestId(String(id));
         setLastTx(tracked.tx);
+        setLastTxRequestId(String(id));
         setMissionOf(tracked.mission);
         setTrackId(id);
         setFlow('evaluating', `Request #${id} recovered · Nox is evaluating three private rules…`, 30, tracked.tx);
@@ -283,11 +334,13 @@ export function DelegateView() {
       setMissions(completeMission('routine', { requestId: latest.id, outcome: 'executed', runId }));
       completed = true;
     }
-    if ((latest.state === 2 || latest.state === 5) && attributedMission === 'approval') {
+    const attestedReject = latest.state === 5
+      && isAttestedUserReject(decisionAttestations.get(String(latest.id)));
+    if ((latest.state === 2 || attestedReject) && attributedMission === 'approval') {
       setMissions(completeMission('approval', {
         requestId: latest.id,
-        outcome: latest.state === 5 ? 'cancelled' : 'executed',
-        decision: latest.state === 5 ? 'reject' : 'approve',
+        outcome: attestedReject ? 'cancelled' : 'executed',
+        decision: attestedReject ? 'reject' : 'approve',
         runId,
       }));
       fetchRequestTxs(true).then(setTxs).catch(() => {});
@@ -297,21 +350,41 @@ export function DelegateView() {
     clearFlow();
     setTimeout(() => receiptRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 250);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [latest?.state, latest?.id, missionOf]);
+  }, [latest?.state, latest?.id, missionOf, decisionAttestations]);
   useEffect(() => { fetchRequestTxs().then(setTxs).catch(() => {}); }, []);
+  useEffect(() => {
+    const session = loadDemoSession();
+    if (!session) return;
+    const candidates = requests.filter((request) => request.state === 5
+      && trustedDemoScenarioForRequest(session.runId, request)?.key === 'approval');
+    if (!candidates.length) return;
+    let stopped = false;
+    void Promise.all(candidates.map(async (request) => [
+      String(request.id),
+      await fetchDemoDecisionAttestation(session.runId, request.id),
+    ] as const)).then((entries) => {
+      if (stopped) return;
+      setDecisionAttestations((current) => {
+        const next = new Map(current);
+        entries.forEach(([id, attestation]) => next.set(id, attestation));
+        return next;
+      });
+    });
+    return () => { stopped = true; };
+  }, [requests]);
   useEffect(() => {
     const on = () => {
       setMissions(loadMissions());
       if (trackId != null) return;
       const session = loadDemoSession();
-      const mission = session && (['routine', 'approval', 'violation'] as const)
-        .find((key) => {
-          const requestId = session.missions[key].requestId;
-          return requestId && requests.some((request) => String(request.id) === requestId);
-        });
+      const mission = session && (['routine', 'approval', 'violation'] as const).includes(session.currentMission as any)
+        ? session.currentMission as 'routine' | 'approval' | 'violation'
+        : undefined;
+      const requestId = mission && session?.missions[mission].requestId;
+      if (!requestId || !requests.some((request) => String(request.id) === requestId)) return;
       if (!mission) return;
       setMissionOf(mission);
-      setTrackId(BigInt(session!.missions[mission].requestId!));
+      setTrackId(BigInt(requestId));
     };
     window.addEventListener('vg-missions', on);
     window.addEventListener('vg-demo-session', on);
@@ -320,11 +393,6 @@ export function DelegateView() {
       window.removeEventListener('vg-demo-session', on);
     };
   }, [requests, trackId]);
-  useEffect(() => {
-    const next = DEMO_SCENARIOS.find((scenario) => !missions[scenario.key]);
-    if (next) setSelectedScenario(next.key);
-  }, [missions.routine, missions.approval, missions.violation]);
-
   // flash table rows whose outcome just changed (skip the initial load)
   const prevStates = useRef<Map<string, number>>(new Map());
   const primed = useRef(false);
@@ -362,7 +430,12 @@ export function DelegateView() {
   const submitCore = async (who: `0x${string}`, mandateId: bigint, recipient: `0x${string}`, amt: string, mission: MissionKey | 'free'): Promise<'bound' | 'recovering' | 'failed'> => {
     let requestBound = false;
     let recoveryPending = false;
-    await run(`Pay ${amt} cUSDC`, async () => {
+    await run({
+      key: `payment:${who.toLowerCase()}:${mandateId}`,
+      label: `Pay ${amt} cUSDC`,
+      resources: [`wallet:${who.toLowerCase()}`, `mandate:${mandateId}`],
+      feedback: 'inline',
+    }, async () => {
       const local = !!demoWalletByAddress(who);
       const runId = activeRunId();
       try {
@@ -395,7 +468,7 @@ export function DelegateView() {
         // Persist at broadcast time, not receipt time. A slow RPC can no longer
         // erase the only recovery pointer after the transaction is already live.
         saveTrack({ mission, amount: amt, tx: hash, delegate: who, at: Date.now(), runId });
-        setLastAmount(amt); setLastTx(hash); setMissionOf(mission);
+        setLastAmount(amt); setLastAmountRequestId(null); setLastTx(hash); setLastTxRequestId(null); setMissionOf(mission);
         setFlow('confirming', 'Sepolia is including your transaction…', 13, hash);
         let receipt;
         try {
@@ -420,7 +493,8 @@ export function DelegateView() {
         const id = ev.args.requestId as bigint;
         saveTrack({ id: String(id), mission, amount: amt, tx: hash, delegate: who, at: Date.now(), runId });
         if (mission !== 'free' && mission !== 'audit') bindMissionRequest(mission, id, runId);
-        setReasonVal(null); setLastAmount(amt); setLastTx(hash); setMissionOf(mission); setTrackId(id);
+        setReasonVal(null); setLastAmount(amt); setLastAmountRequestId(String(id));
+        setLastTx(hash); setLastTxRequestId(String(id)); setMissionOf(mission); setTrackId(id);
         requestBound = true;
         setFlow('evaluating', `Request #${id} submitted · Nox is evaluating three private rules…`, 30, hash);
       } finally {
@@ -440,7 +514,12 @@ export function DelegateView() {
     const activeFinalize = finalizingRef.current;
     if ((activeFinalize?.id === latest.id && Date.now() - activeFinalize.startedAt < 60_000)
       || busy || Date.now() < finalizeRetryAt.current) return;
-    run('Publishing the result', async () => {
+    run({
+      key: `finalize:${latest.id}`,
+      label: `Publish result for request #${latest.id}`,
+      resources: [`request:${latest.id}:finalize`],
+      feedback: 'inline',
+    }, async () => {
       // Set the lock only after App.run accepted this operation. If another
       // action owned the global lock in the same render frame, the next chain
       // poll can still retry instead of leaving this request stuck forever.
@@ -476,6 +555,7 @@ export function DelegateView() {
 
   const loadScenario = (amt: string, label: string, to?: `0x${string}`) => {
     setAmount(amt); if (to) setRecipient(to); setTrackId(null); setReasonVal(null);
+    setLastAmount(''); setLastAmountRequestId(null); setLastTx(null); setLastTxRequestId(null);
     requestAnimationFrame(() => freeFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
     setTimeout(() => amountRef.current?.focus(), 420);
     toast(`${label} loaded — press Submit to run it with your wallet.`);
@@ -502,14 +582,14 @@ export function DelegateView() {
   };
 
   const beginSubmission = (mission: MissionKey | 'free', label: string) => {
-    if (busy || !acquireOperationLock(submissionLock)) return false;
+    if (busy || !acquireLocalOperationLock(submissionLock)) return false;
     setSubmittingScenario(mission);
     setFlow('preflight', label, 4);
     return true;
   };
 
   const finishSubmission = (result: 'bound' | 'recovering' | 'failed') => {
-    releaseOperationLock(submissionLock);
+    releaseLocalOperationLock(submissionLock);
     setSubmittingScenario(null);
     if (result === 'failed') clearFlow();
   };
@@ -557,7 +637,8 @@ export function DelegateView() {
       // bound to another run and must never advance this session or its audit.
       const exhibit = [...requests].reverse().find((r) => r.mandateId === violationMandate.id && r.state === 4);
       if (exhibit) {
-        setReasonVal(null); setLastAmount('600'); setLastTx(null); setMissionOf(null); setTrackId(exhibit.id);
+        setReasonVal(null); setLastAmount(''); setLastAmountRequestId(null);
+        setLastTx(null); setLastTxRequestId(null); setMissionOf(null); setTrackId(exhibit.id);
         toast('Another run just triggered this live block. You may inspect it, but it cannot complete or enter your run-bound audit packet.');
         setTimeout(() => receiptRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 250);
         return;
@@ -591,85 +672,174 @@ export function DelegateView() {
     }
   };
 
-  const decryptReason = async () => {
-    if (!latest) return;
+  const decryptReason = async (request: SpendRequest | undefined = latest) => {
+    if (!request) return;
     setReasonBusy(true);
     try {
-      const client = await handleClientFor(latest.delegate);
-      const { value } = await client.decrypt(latest.blockedReason as any);
+      const client = await handleClientFor(request.delegate);
+      const { value } = await client.decrypt(request.blockedReason as any);
       const n = Number(value);
       setReasonVal(`${n} · ${REASONS[n] ?? 'unknown'}`);
-      if (missionOf === 'violation') {
-        const tracked = loadTrack();
-        const runId = tracked?.runId ?? activeRunId();
-        const expectedMemo = demoMemoHash(runId, 'violation', latest.mandateId, latest.delegate);
-        if (latest.memoHash.toLowerCase() === expectedMemo.toLowerCase()) {
-          setMissions(completeMission('violation', {
-            requestId: latest.id,
-            outcome: 'blocked',
-            reasonDecrypted: true,
-            runId,
-          }));
-        } else {
-          toast('Reason unlocked for this live exhibit, but it belongs to another run and was not added to your mission.', true);
-        }
+      setReasonRequestId(String(request.id));
+      const session = loadDemoSession();
+      const story = trustedDemoScenarioForRequest(session?.runId, request);
+      if (story?.key === 'violation' && session) {
+        setMissions(completeMission('violation', {
+          requestId: request.id,
+          outcome: 'blocked',
+          reasonDecrypted: true,
+          runId: session.runId,
+        }));
+      } else if (isDemoAddr(request.delegate)) {
+        toast('Reason unlocked for this live exhibit, but it belongs to another run and was not added to your mission.', true);
       }
     } catch (e: any) {
       toast(`Decrypt refused: ${e?.message ?? e}`.slice(0, 260), true);
     } finally { setReasonBusy(false); }
   };
 
-  const decideEscalation = async (action: 'approve' | 'reject') => {
-    if (!latest || latest.state !== 3 || !acquireOperationLock(decisionLock)) return;
+  const decideEscalation = async (request: SpendRequest, action: 'approve' | 'reject') => {
+    const session = loadDemoSession();
+    const story = trustedDemoScenarioForRequest(session?.runId, request);
+    if (!session || demoRole !== 'delegate' || story?.key !== 'approval' || request.state !== 3) {
+      toast('This request is not the current run-bound ShieldOps approval task.', true);
+      return;
+    }
+    if (!acquireLocalOperationLock(decisionLock)) return;
     setDecisionBusy(action);
     setDecisionError(null);
+    setDecisionFlow(null);
     try {
-      const tracked = loadTrack();
-      const runId = tracked?.runId ?? activeRunId();
-      let data: any;
-      for (let attempt = 0; attempt < 45; attempt++) {
-        const res = await fetch('/api/demo-decision', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ runId, requestId: String(latest.id), action }),
-          signal: AbortSignal.timeout(15_000),
-        });
-        data = await res.json().catch(() => ({}));
-        if (res.status === 202) {
-          if (attempt === 0) toast('The Safe decision is being assembled. Recovering its on-chain receipt…');
-          await new Promise((resolve) => setTimeout(resolve, 1_500));
-          continue;
-        }
-        if (!res.ok) throw new Error(data?.error ?? data?.code ?? 'committee decision failed');
-        break;
+      const runId = session.runId;
+      const data = await pollDemoSafeDecision({
+        runId,
+        requestId: String(request.id),
+        action,
+        onProgress: setDecisionFlow,
+      });
+      confirmApprovalDecision(request.id, action, { runId, transactionHash: data.hash });
+      if (action === 'reject') {
+        setDecisionAttestations((current) => new Map(current).set(String(request.id), {
+          requestId: Number(request.id),
+          chainState: 5,
+          origin: 'user',
+          action: 'reject',
+          hash: data.hash,
+        }));
       }
-      if (!data?.ok || data?.state !== (action === 'approve' ? 'safe-approved' : 'safe-rejected')) {
-        throw new Error('committee decision did not return a confirmed terminal receipt');
-      }
-      confirmApprovalDecision(latest.id, action, { runId, transactionHash: data.hash });
       setMissions(completeMission('approval', {
-        requestId: latest.id,
+        requestId: request.id,
         outcome: action === 'reject' ? 'cancelled' : 'executed',
         decision: action,
         runId,
       }));
       toast(action === 'approve'
-        ? 'Safe 2-of-2 approved the payment. Confirming the confidential payout…'
-        : 'Safe 2-of-2 rejected the payment. Confirming escrow return and budget restoration…');
-      for (let i = 0; i < 12; i++) {
-        refresh();
-        await new Promise((resolve) => setTimeout(resolve, 1_500));
-      }
-      fetchRequestTxs(true).then(setTxs).catch(() => {});
+        ? 'Safe 2-of-2 approved the payment and confirmed the confidential payout.'
+        : 'Safe 2-of-2 rejected the payment; escrow return and budget restoration are confirmed.');
+      await refresh();
+      await fetchRequestTxs(true).then(setTxs).catch(() => {});
     } catch (e: any) {
       const message = e?.message ?? String(e);
       setDecisionError(message);
       toast(`Decision not completed: ${message}. Your request remains recoverable from this page.`, true);
     } finally {
       setDecisionBusy(null);
-      releaseOperationLock(decisionLock);
+      releaseLocalOperationLock(decisionLock);
     }
   };
+
+  if (routedDetailId) {
+    if (viewedRequestId != null && !viewedRequest && !lastUpdated) {
+      return (
+        <section className="card workspace-loading" role="status" aria-live="polite">
+          <h1>Request #{routedDetailId}</h1>
+          <p className="muted">Loading this request and its transaction evidence from Sepolia…</p>
+          <div className="operation-track loading-track" aria-hidden="true"><span className="active" /><span /><span /><span /><span /></div>
+        </section>
+      );
+    }
+    if (viewedRequestId == null || !viewedRequest) {
+      return (
+        <section className="card workspace-loading" role="alert">
+          <h1>Request #{routedDetailId} not found</h1>
+          <p className="muted">The current on-chain request registry does not contain this ID. A just-broadcast request may still be recovering its receipt.</p>
+          <div className="row">
+            <button type="button" className="btn" onClick={() => navigate(formatAppRoute({ page: 'payment-inbox' }).slice(1))}>Back to Payment Inbox</button>
+            <button type="button" className="btn primary" onClick={() => void refresh()}>Check chain state</button>
+          </div>
+        </section>
+      );
+    }
+
+    const detailRequest = viewedRequest;
+    const detailSession = loadDemoSession();
+    const detailStory = trustedDemoScenarioForRequest(detailSession?.runId, detailRequest);
+    const detailLocalAmount = lastAmountRequestId === String(detailRequest.id) ? lastAmount : '';
+    const accountCanDecrypt = account?.toLowerCase() === detailRequest.delegate.toLowerCase();
+    const canDemoDecide = demoRole === 'delegate' && detailStory?.key === 'approval' && detailRequest.state === 3;
+    const detailAmount = detailLocalAmount
+      ? <span className="value">{detailLocalAmount} cUSDC</span>
+      : detailStory && demoRole === 'delegate'
+        ? <span className="value">{detailStory.amount} cUSDC</span>
+        : accountCanDecrypt
+          ? <Decrypt handle={detailRequest.amount} label="Decrypt to view" />
+          : <span className="enc">Decrypt to view</span>;
+    const detailTx = txs.get(String(detailRequest.id));
+    const detailAttestation = decisionAttestations.get(String(detailRequest.id));
+    const detailAuditPacketIds = detailSession?.missions.audit.includedRequestIds.includes(String(detailRequest.id))
+      ? detailSession.missions.audit.packetIds
+      : [];
+    const detailModel = deriveRequestDetailModel(detailRequest, {
+      transactions: detailTx,
+      events: {
+        outcomePath: detailTx?.outcomePath,
+        safeAction: isAttestedUserReject(detailAttestation) ? 'reject' : detailTx?.safeAction,
+        decisionOrigin: detailAttestation?.origin,
+      },
+      actor: {
+        isDelegate: accountCanDecrypt,
+        canUseDemoDecision: canDemoDecide,
+      },
+      expectedPath: detailStory?.key === 'routine' ? 'direct' : detailStory?.key === 'approval' ? 'approval' : detailStory?.key === 'violation' ? 'blocked' : undefined,
+    });
+
+    return (
+      <RequestDetailView
+        request={detailRequest}
+        model={detailModel}
+        transactions={detailTx}
+        trustedStory={detailStory}
+        authorizedAmount={detailAmount}
+        purpose={detailStory?.purpose ?? 'Private memo / unavailable'}
+        reason={reasonRequestId === String(detailRequest.id) ? reasonVal : null}
+        reasonBusy={reasonBusy}
+        activeOperation={flow ? (
+          <ActivePaymentOperationDock
+            flow={flow}
+            isDemo={isDemo}
+            story={activeOperationStory}
+            onReturn={() => {
+              if (activeOperationStory) setSelectedScenario(activeOperationStory.key);
+              navigate(formatAppRoute({ page: 'payment-inbox' }).slice(1));
+            }}
+          />
+        ) : undefined}
+        decisionBusy={decisionBusy}
+        decisionFlow={decisionFlow}
+        decisionError={decisionError}
+        canDemoDecide={canDemoDecide}
+        auditPacketIds={detailAuditPacketIds}
+        onBack={() => navigate(formatAppRoute({ page: 'payment-inbox' }).slice(1))}
+        onRefresh={async () => {
+          const result = await refresh();
+          await fetchRequestTxs(true).then(setTxs).catch(() => {});
+          return result;
+        }}
+        onDecryptReason={detailRequest.state === 4 ? () => void decryptReason(detailRequest) : undefined}
+        onDecision={canDemoDecide ? (action) => void decideEscalation(detailRequest, action) : undefined}
+      />
+    );
+  }
 
   if (!account)
     return <NoRole demo="delegate" title="Act as a Delegate"
@@ -686,69 +856,103 @@ export function DelegateView() {
     return <ProvisionMe account={account} />;
 
   const selectedStory = scenarioByKey(selectedScenario);
-  const latestStory = scenarioByRecipient(latest?.recipient) ?? (missionOf && missionOf !== 'free' && missionOf !== 'audit' ? scenarioByKey(missionOf as DemoScenarioKey) : undefined);
+  const sessionSnapshot = loadDemoSession();
+  const latestStory = trustedDemoScenarioForRequest(sessionSnapshot?.runId, latest);
+  const boundLocalAmount = latest && lastAmountRequestId === String(latest.id) ? lastAmount : '';
+  const boundLocalTx = latest && lastTxRequestId === String(latest.id) ? lastTx : null;
   const vendor = (latest?.recipient ?? selectedStory.recipient) as `0x${string}`;
   const vName = latestStory?.vendor ?? vendorName(vendor) ?? short(vendor);
-  const stage = !latest ? (flow ? (PAYMENT_PHASE_INDEX[flow.phase] >= 3 ? 2 : 1) : busy ? 1 : 0) : latest.state === 1 ? 2 : 3;
-  const inFlight = stage === 1 || stage === 2;
   const terminal = latest && latest.state !== 1 && latest.state !== 3;
   const escalated = latest?.state === 3;
   const allCollected = missions.routine && missions.approval && missions.violation;
   const demoComplete = allCollected && missions.audit;
-  const sessionSnapshot = loadDemoSession();
   const confirmedApproval = latest && sessionSnapshot?.missions.approval.requestId === String(latest.id)
     && sessionSnapshot.missions.approval.decisionConfirmed === true
     ? sessionSnapshot.missions.approval.decision
     : undefined;
-  const selectedOperationActive = !!flow
-    && (submittingScenario === selectedStory.key || missionOf === selectedStory.key);
-  const freePlayOperationActive = !!flow
-    && (submittingScenario === 'free' || missionOf === 'free');
+  const latestAttestation = latest ? decisionAttestations.get(String(latest.id)) : undefined;
+  const latestIsAttestedReject = isAttestedUserReject(latestAttestation);
+  const canDecryptLatestAmount = !!latest && account?.toLowerCase() === latest.delegate.toLowerCase();
+  const authorizedAmountNode = boundLocalAmount
+    ? <span className="value">{boundLocalAmount} cUSDC</span>
+    : latestStory
+      ? <span className="value">{latestStory.amount} cUSDC</span>
+      : latest && canDecryptLatestAmount
+        ? <Decrypt handle={latest.amount} label="Decrypt to view" />
+        : <span className="enc">Decrypt to view</span>;
+  const trustedPurpose = latestStory?.purpose ?? 'Private memo / unavailable';
+
+  const advanceActiveTour = (step: number, route: { page: 'payment-inbox' } | { page: 'disclosure-builder' }) => {
+    if (!sessionSnapshot?.tour.active) return;
+    advanceGuidedMission({ step, route, role: 'delegate' });
+  };
+
+  const openDisclosureBuilder = () => {
+    const route = { page: 'disclosure-builder' } as const;
+    advanceActiveTour(4, route);
+    navigate(formatAppRoute(route).slice(1));
+  };
 
   const primaryNext = () => {
-    if (!missions.routine) return { label: '▶ Run: Routine payment', act: () => runScenario('routine') };
-    if (!missions.approval) return { label: 'Continue: Approval challenge →', act: () => runScenario('approval') };
-    if (!missions.violation) return { label: 'Continue: Policy violation →', act: () => runScenario('violation') };
+    if (!missions.routine) return {
+      label: '▶ Run: Routine payment',
+      act: () => {
+        advanceActiveTour(1, { page: 'payment-inbox' });
+        void runScenario('routine');
+      },
+    };
+    if (!missions.approval) return { label: 'Continue to ShieldOps →', act: () => continueToScenario('approval') };
+    if (!missions.violation) return { label: 'Continue to Atlas Contractor →', act: () => continueToScenario('violation') };
     return {
       label: 'Build the Launch Day disclosure bundle →',
-      act: () => { window.location.hash = formatAppRoute({ page: 'disclosure-builder' }); },
+      act: openDisclosureBuilder,
     };
   };
+
+  function continueToScenario(key: DemoScenarioKey) {
+    advanceActiveTour(key === 'approval' ? 2 : key === 'violation' ? 3 : 1, { page: 'payment-inbox' });
+    setSelectedScenario(key);
+    setTrackId(null);
+    setMissionOf(null);
+    setReasonVal(null);
+    navigate(formatAppRoute({ page: 'payment-inbox' }).slice(1));
+    requestAnimationFrame(() => inboxRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  }
 
   // ---------------- render ----------------
   return (
     <div className="paygrid">
       <div className="paymain">
-        {/* 3-step strip — only while something is actually processing */}
-        {inFlight && (
-          <div className="journey three">
-            <div className={`jstep ${stage === 1 ? 'active' : 'done'}`}><b><span className="jn">1</span>Submit payment</b>encrypted in your browser, then sent</div>
-            <div className={`jstep ${stage === 2 ? 'active' : ''}`}><b><span className="jn">2</span>Private policy check</b>TEE evaluates on ciphertext · proof lands on-chain (~15–40s)</div>
-            <div className="jstep"><b><span className="jn">3</span>Result</b>executed / needs approval / blocked</div>
-          </div>
+        {flow && (
+          <ActivePaymentOperationDock
+            flow={flow}
+            isDemo={isDemo}
+            story={activeOperationStory}
+            showReturn={!!activeOperationStory && selectedScenario !== activeOperationStory.key}
+            onReturn={() => activeOperationStory && setSelectedScenario(activeOperationStory.key)}
+          />
         )}
 
         {/* ---- receipt / live committee card ---- */}
         {latest && (terminal || escalated) && (
           <div ref={receiptRef} data-tour="outcome"
-            className={`receipt ${latest.state === 2 ? 'ok' : latest.state === 3 ? 'warn' : latest.state === 4 ? 'bad' : 'dim'}`}>
+            className={`receipt ${latest.state === 2 ? 'ok' : latest.state === 3 ? 'warn' : latest.state === 4 || latestIsAttestedReject ? 'bad' : 'dim'}`}>
             <div className="r-head">
               {latest.state === 2 && <b>✓ Payment completed privately</b>}
               {latest.state === 3 && <b>⏸ Payment held for approval</b>}
               {latest.state === 4 && <b>⛔ Payment blocked — treasury protected</b>}
-              {(latest.state === 5 || latest.state === 6) && <b>Request {latest.state === 5 ? 'cancelled' : 'expired'}</b>}
+              {(latest.state === 5 || latest.state === 6) && <b>{latest.state === 5 ? latestIsAttestedReject ? 'User rejected · funds returned' : 'Request cancelled · funds returned' : 'Request expired'}</b>}
               <span className="mono muted">#{String(latest.id)}</span>
             </div>
             <div className="r-rows">
-              {lastAmount && <div className="r-row"><span>Amount</span><span><b>{lastAmount} cUSDC</b> → {vName} <i className="muted">(visible only to you)</i></span></div>}
-              {!lastAmount && <div className="r-row"><span>Paid to</span><span>{vName} <span className="mono muted">{short(latest.recipient)}</span></span></div>}
-              <div className="r-row"><span>Policy result</span><span>{latest.state === 2 ? (confirmedApproval === 'approve' ? 'Committee approved the policy exception' : missionOf === 'routine' ? 'Within mandate' : 'Executed · path evidence indexing') : latest.state === 3 ? 'Committee sign-off required' : latest.state === 4 ? 'Blocked by the confidential policy' : latest.state === 5 ? (confirmedApproval === 'reject' ? 'Committee rejected the policy exception' : 'Cancelled and refunded; no user Reject is claimed') : '—'}</span></div>
+              <div className="r-row"><span>Amount</span><span>{authorizedAmountNode} → {vName} <i className="muted">(authorised view)</i></span></div>
+              <div className="r-row"><span>Policy result</span><span>{latest.state === 2 ? (confirmedApproval === 'approve' ? 'Committee approved the policy exception' : missionOf === 'routine' ? 'Within mandate' : 'Executed · path evidence indexing') : latest.state === 3 ? 'Committee sign-off required' : latest.state === 4 ? 'Blocked by the confidential policy' : latest.state === 5 ? (latestIsAttestedReject ? 'User-selected Reject · authenticated by the run-bound server receipt' : latestAttestation?.origin === 'timeout' ? 'Decision window expired · cancelled and refunded' : 'Cancelled and refunded; no user Reject is claimed') : '—'}</span></div>
               {latest.state === 3 && <div className="r-row"><span>Funds</span><span className="ok-text">reserved in escrow — nothing moves without the 2-of-2</span></div>}
               {latest.state === 4 && <div className="r-row"><span>Funds</span><span className="ok-text">untouched — budget intact, cooldown armed</span></div>}
               {latest.state === 5 && <div className="r-row"><span>Funds</span><span className="ok-text">returned from escrow · delegated budget restored</span></div>}
               {latest.state === 4 && (
                 <div className="r-row"><span>Private reason</span>
-                  <span>{reasonVal ? <b className="value">{reasonVal}</b> : <i className="muted">encrypted — only you can open it</i>}</span>
+                  <span>{reasonRequestId === String(latest.id) && reasonVal ? <b className="value">{reasonVal}</b> : <i className="muted">encrypted — only you can open it</i>}</span>
                 </div>
               )}
               {confirmedApproval === 'approve' && latest.state === 2 && (
@@ -760,7 +964,7 @@ export function DelegateView() {
             </div>
 
             {escalated && (() => {
-              const demoReq = isDemoAddr(latest.delegate);
+              const demoReq = demoRole === 'delegate' && latestStory?.key === 'approval';
               return (
                 <div className="committee-decision" data-tour="committee-decision">
                   <div className="decision-copy">
@@ -776,14 +980,14 @@ export function DelegateView() {
                     </p>
                   </div>
                   {demoReq ? (
-                    <div className="sticky-decision-bar">
-                      <button className="btn danger" disabled={!!decisionBusy} onClick={() => decideEscalation('reject')}>
+                    <SafeDecisionDock flow={decisionFlow}>
+                      <button className="btn danger" disabled={!!decisionBusy} aria-busy={decisionBusy === 'reject'} onClick={() => void decideEscalation(latest, 'reject')}>
                         {decisionBusy === 'reject' ? <><span className="spin" /> Returning funds…</> : 'Reject & return funds'}
                       </button>
-                      <button className="btn primary" disabled={!!decisionBusy} onClick={() => decideEscalation('approve')}>
+                      <button className="btn primary" disabled={!!decisionBusy} aria-busy={decisionBusy === 'approve'} onClick={() => void decideEscalation(latest, 'approve')}>
                         {decisionBusy === 'approve' ? <><span className="spin" /> Executing 2-of-2…</> : 'Approve payment'}
                       </button>
-                    </div>
+                    </SafeDecisionDock>
                   ) : <button className="btn primary" onClick={() => goTab('Signer')}>Open approval workspace →</button>}
                   {decisionError && <div className="inline-alert bad" role="alert">{decisionError} · Refresh or retry; escrow remains recoverable.</div>}
                 </div>
@@ -793,11 +997,11 @@ export function DelegateView() {
             {terminal && (
               <PrivacyLens
                 authorized={[
-                  { label: 'Amount', value: `${lastAmount || latestStory?.amount || 'Encrypted value'} cUSDC` },
+                  { label: 'Amount', value: authorizedAmountNode },
                   { label: 'Recipient', value: vName },
-                  { label: 'Purpose', value: latestStory?.purpose ?? 'Private payment memo' },
-                  { label: 'Outcome', value: latest.state === 2 ? 'Executed' : latest.state === 4 ? 'Blocked' : latest.state === 5 ? 'Rejected · funds returned' : 'Expired' },
-                  ...(latest.state === 4 ? [{ label: 'Reason', value: reasonVal ?? 'Encrypted · decrypt to inspect' }] : []),
+                  { label: 'Purpose', value: trustedPurpose },
+                  { label: 'Outcome', value: latest.state === 2 ? 'Executed' : latest.state === 4 ? 'Blocked' : latest.state === 5 ? latestIsAttestedReject ? 'User rejected · funds returned' : 'Cancelled · funds returned' : 'Expired' },
+                  ...(latest.state === 4 ? [{ label: 'Reason', value: reasonRequestId === String(latest.id) ? reasonVal ?? 'Encrypted · decrypt to inspect' : 'Encrypted · decrypt to inspect' }] : []),
                 ]}
                 publicView={[
                   { label: 'Amount', value: <span className="enc">Encrypted handle</span> },
@@ -811,16 +1015,19 @@ export function DelegateView() {
 
             {!escalated && (
               <div className="r-cta">
-                {latest.state === 4 && !reasonVal
-                  ? <button className="btn primary" disabled={reasonBusy} onClick={decryptReason}>{reasonBusy ? <><span className="spin" /> Decrypting…</> : '🔓 Decrypt the private reason'}</button>
+                {latest.state === 4 && !(reasonRequestId === String(latest.id) && reasonVal)
+                  ? <button className="btn primary" disabled={reasonBusy} onClick={() => void decryptReason(latest)}>{reasonBusy ? <><span className="spin" /> Decrypting…</> : '🔓 Decrypt the private reason'}</button>
                   : <button className="btn primary" disabled={!!busy} onClick={primaryNext().act}>{primaryNext().label}</button>}
                 <details className="more-menu">
                   <summary>More actions ▾</summary>
                   <div className="mm-body">
-                    <button className="mm-item" onClick={() => { setTrackId(null); setReasonVal(null); }}>Send another payment</button>
+                    <button className="mm-item" onClick={() => {
+                      setTrackId(null); setReasonVal(null); setLastAmount(''); setLastAmountRequestId(null); setLastTx(null); setLastTxRequestId(null);
+                    }}>Send another payment</button>
                     <button className="mm-item" onClick={() => loadScenario(amount || '25', 'Custom payment')}>Enter a custom amount</button>
-                    {lastTx && <a className="mm-item" href={scanTx(lastTx)} target="_blank" rel="noopener">View transaction proof ↗</a>}
-                    <button className="mm-item" onClick={() => goTab('Dashboard')}>See it in the evidence table</button>
+                    <button className="mm-item" onClick={() => navigate(formatAppRoute({ page: 'payment-detail', requestId: String(latest.id) }).slice(1))}>Open request detail</button>
+                    {(boundLocalTx ?? txs.get(String(latest.id))?.request) && <a className="mm-item" href={scanTx((boundLocalTx ?? txs.get(String(latest.id))!.request)!)} target="_blank" rel="noopener">View transaction proof ↗</a>}
+                    <button className="mm-item" onClick={() => navigate(formatAppRoute({ page: 'verify', flowId: `live-request-${latest.id}` }).slice(1))}>Verify this flow</button>
                   </div>
                 </details>
               </div>
@@ -838,7 +1045,7 @@ export function DelegateView() {
         )}
 
         {/* ---- payment inbox + selected request detail ---- */}
-        <section className="workbench payment-workbench" aria-labelledby="payment-inbox-title">
+        <section ref={inboxRef} className="workbench payment-workbench" aria-labelledby="payment-inbox-title">
           <div className="object-list">
             <div className="object-list-head">
               <div><h2 id="payment-inbox-title">Payment Inbox</h2><p>Launch Day Treasury Shift</p></div>
@@ -897,19 +1104,17 @@ export function DelegateView() {
               </div>
             </div>
 
-            {selectedOperationActive && flow && <PaymentProgress flow={flow} isDemo={isDemo} />}
-
             <div className="detail-actions">
               {!unlocked[selectedStory.key] ? (
                 <div className="inline-alert">Complete the previous invoice before submitting this one.</div>
               ) : (
                 <button
-                  className={`btn primary ${selectedOperationActive ? 'is-busy' : ''}`}
+                  className={`btn primary ${flow && activeOperationKey === selectedStory.key ? 'is-busy' : ''}`}
                   disabled={!!busy || submissionLock.current || !!flow || (!!blockingRequest && selectedStory.key !== 'violation')}
-                  aria-busy={selectedOperationActive}
+                  aria-busy={!!flow && activeOperationKey === selectedStory.key}
                   onClick={() => void runScenario(selectedStory.key)}
                 >
-                  {selectedOperationActive
+                  {flow && activeOperationKey === selectedStory.key
                     ? <><span className="spin" aria-hidden="true" /> {flow?.phase === 'preflight' ? 'Checking readiness…' : flow?.phase === 'encrypting' ? 'Encrypting payment…' : flow?.phase === 'recovering' ? 'Recovering request…' : 'Payment in progress…'}</>
                     : missions[selectedStory.key] ? 'Run this invoice again' : 'Submit confidential payment'}
                 </button>
@@ -953,15 +1158,14 @@ export function DelegateView() {
           <input ref={amountRef} value={amount} onChange={(e) => setAmount(e.target.value)} type="number" min="0" step="0.01" />
           <label>Memo (only its hash goes on-chain)</label>
           <input value={memo} onChange={(e) => setMemo(e.target.value)} placeholder="invoice #… (optional)" />
-          {freePlayOperationActive && flow && <PaymentProgress flow={flow} isDemo={isDemo} />}
           <div style={{ marginTop: 14 }}>
             <button
-              className={`btn primary ${freePlayOperationActive ? 'is-busy' : ''}`}
+              className={`btn primary ${flow && activeOperationKey === 'free' ? 'is-busy' : ''}`}
               disabled={!!busy || submissionLock.current || !!flow || !amount || (isDemo ? (!!freeplayBlocking || freeplayCoolLeft > 0) : (!!blockingRequest || mainCoolLeft > 0))}
-              aria-busy={freePlayOperationActive}
+              aria-busy={!!flow && activeOperationKey === 'free'}
               onClick={() => void runFreePlay()}
             >
-              {freePlayOperationActive ? <><span className="spin" aria-hidden="true" /> Payment in progress…</> : 'Submit confidential payment'}
+              {flow && activeOperationKey === 'free' ? <><span className="spin" aria-hidden="true" /> Payment in progress…</> : 'Submit confidential payment'}
             </button>
             {(isDemo ? freeplayBlocking : blockingRequest) && <p className="muted" style={{ fontSize: 12, marginTop: 7 }}>A payment is in flight — it clears automatically in under a minute.</p>}
           </div>
@@ -969,20 +1173,22 @@ export function DelegateView() {
 
         <details className="card prog-acc" {...(!isDemo || allCollected ? { open: true } : {})}>
           <summary><h3 style={{ display: 'inline' }}>My payments</h3></summary>
-          <div className="tbl"><table>
-            <thead><tr><th>ID</th><th>To</th><th>Outcome</th><th>Reason</th></tr></thead>
-            <tbody>
-              {myRequests.slice(0, 10).map((r) => (
-                <tr key={String(r.id)} className={flashIds.has(String(r.id)) ? 'row-flash' : ''}>
-                  <td className="mono">#{String(r.id)}</td>
-                  <td>{vendorName(r.recipient) ?? short(r.recipient)}</td>
-                  <td><RequestPill state={r.state} decisionReady={r.decisionReady} /></td>
-                  <td>{r.state === 4 ? <ReasonCell r={r} /> : <span className="muted">—</span>}</td>
-                </tr>
+          <nav aria-label="My payment requests">
+            <ul className="request-history-list">
+              {myRequests.slice(0, 10).map((request) => (
+                <li key={String(request.id)} className={flashIds.has(String(request.id)) ? 'row-flash' : ''}>
+                  <Link className="request-history-object" to={formatAppRoute({ page: 'payment-detail', requestId: String(request.id) }).slice(1)}>
+                    <span className="request-history-id mono">Request #{String(request.id)}</span>
+                    <span className="request-history-vendor">{vendorName(request.recipient) ?? short(request.recipient)}</span>
+                    <RequestPill state={request.state} decisionReady={request.decisionReady} />
+                    <span className="request-history-reason muted">{request.state === 4 ? 'Private reason · open detail to decrypt' : 'Open request detail'}</span>
+                    <span aria-hidden="true">→</span>
+                  </Link>
+                </li>
               ))}
-              {!myRequests.length && <tr><td colSpan={4} className="muted">No payments yet — run the first scenario above.</td></tr>}
-            </tbody>
-          </table></div>
+              {!myRequests.length && <li className="empty-state"><span>No payments yet — run the first scenario above.</span></li>}
+            </ul>
+          </nav>
         </details>
       </div>
 
@@ -1013,7 +1219,7 @@ export function DelegateView() {
           </div>
 
           {allCollected && !missions.audit && (
-            <button className="btn primary wide" style={{ marginTop: 12 }} onClick={() => { window.location.hash = formatAppRoute({ page: 'disclosure-builder' }); }}>
+            <button className="btn primary wide" style={{ marginTop: 12 }} onClick={openDisclosureBuilder}>
               Build the Launch Day disclosure bundle →
             </button>
           )}
@@ -1042,26 +1248,6 @@ export function DelegateView() {
         </div>
       </aside>
     </div>
-  );
-}
-
-/** Reason decryptor bound to the ROW's delegate identity (demo keys sign locally). */
-function ReasonCell({ r }: { r: SpendRequest }) {
-  const { toast } = useApp();
-  const [v, setV] = useState<string>();
-  const [b, setB] = useState(false);
-  if (v) return <span className="value">{v}</span>;
-  return (
-    <button className="btn small ghost" disabled={b} onClick={async () => {
-      setB(true);
-      try {
-        const c = await handleClientFor(r.delegate);
-        const { value } = await c.decrypt(r.blockedReason as any);
-        const n = Number(value);
-        setV(`${n} · ${REASONS[n] ?? 'unknown'}`);
-      } catch (e: any) { toast(`Decrypt refused: ${e?.message ?? e}`.slice(0, 200), true); }
-      finally { setB(false); }
-    }}>{b ? <span className="spin" /> : '🔓 Reason'}</button>
   );
 }
 

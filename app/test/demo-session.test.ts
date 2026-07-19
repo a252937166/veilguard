@@ -4,6 +4,7 @@ import {
   createDemoSession,
   demoCompleted,
   demoSessionReducer,
+  hasCompleteAuditPacketCoverage,
   isMissionComplete,
   loadDemoSession,
   saveDemoSession,
@@ -32,6 +33,23 @@ test('strict completion requires run-bound request and packet evidence', () => {
   state = reduce(state, { type: 'AUDIT_REQUEST_DISPOSITION', requestId: '13', disposition: 'reviewed', at: 11 });
   expect(demoCompleted(state)).toBe(true);
   expect(state.lifecycle).toBe('completed');
+});
+
+test('selective packet operations accumulate until all three mission requests are covered', () => {
+  let state = createDemoSession({ runId: 'scope-run', now: 1 });
+  state = reduce(state, { type: 'ROUTINE_EXECUTED', requestId: '11', at: 2 });
+  state = reduce(state, { type: 'BIND_REQUEST', mission: 'approval', requestId: '12', at: 3 });
+  state = reduce(state, { type: 'VIOLATION_BLOCKED', requestId: '13', at: 4 });
+
+  state = reduce(state, { type: 'AUDIT_PACKETS_CREATED', packetIds: ['8'], requestIds: ['11'], at: 5 });
+  expect(state.missions.audit.packetIds).toEqual(['8']);
+  expect(state.missions.audit.includedRequestIds).toEqual(['11']);
+  expect(hasCompleteAuditPacketCoverage(state)).toBe(false);
+
+  state = reduce(state, { type: 'AUDIT_PACKETS_CREATED', packetIds: ['9', '10'], requestIds: ['12', '13'], at: 6 });
+  expect(state.missions.audit.packetIds).toEqual(['8', '9', '10']);
+  expect(state.missions.audit.includedRequestIds).toEqual(['11', '12', '13']);
+  expect(hasCompleteAuditPacketCoverage(state)).toBe(true);
 });
 
 test('watchdog cancellation cannot masquerade as a user reject', () => {
@@ -63,6 +81,23 @@ test('tour pause and return restore the atomic route and role target', () => {
   expect(state.route).toEqual({ page: 'audit-packets' });
   expect(state.role).toBe('auditor');
   expect(state.tour.paused).toBe(false);
+});
+
+test('tour step atomically records the selected object with its route and role', () => {
+  let state = createDemoSession({ runId: 'atomic-tour', now: 1, route: { page: 'disclosure-builder' } });
+  state = reduce(state, {
+    type: 'TOUR_STEP', step: 5, route: { page: 'audit-packets' }, role: 'auditor',
+    selected: { packetId: '8' }, at: 2,
+  });
+  expect(state.route).toEqual({ page: 'audit-packets' });
+  expect(state.role).toBe('auditor');
+  expect(state.selected).toEqual({ packetId: '8' });
+  expect(state.tour).toEqual(expect.objectContaining({
+    step: 5,
+    paused: false,
+    expectedRoute: { page: 'audit-packets' },
+    expectedRole: 'auditor',
+  }));
 });
 
 test('restart is blocked until a pending approval is refunded', () => {
