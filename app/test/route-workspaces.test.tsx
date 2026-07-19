@@ -3,7 +3,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, expect, test, vi } from 'vitest';
-import { createDemoSession, saveDemoSession } from '../src/demo-session';
+import { createDemoSession, isMissionComplete, loadDemoSession, saveDemoSession } from '../src/demo-session';
 import { demoMemoHash } from '../src/demo-scenarios';
 
 const appContext = vi.hoisted(() => ({ current: {} as any }));
@@ -62,6 +62,7 @@ function setAppContext() {
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  sessionStorage.clear();
   vi.unstubAllGlobals();
 });
 
@@ -165,4 +166,77 @@ test('demo signer labels a cancellation as user Reject only after server attesta
   expect(await screen.findByText('USER REJECTED · REFUNDED')).toBeInTheDocument();
   expect(screen.getByText(/User selected Reject · authenticated by the run-bound server receipt/i)).toBeInTheDocument();
   expect(fetch).toHaveBeenCalledWith('/api/demo-decision?runId=launch-attested-run&requestId=10', expect.objectContaining({ method: 'GET' }));
+  await waitFor(() => expect(loadDemoSession()?.missions.approval).toEqual(expect.objectContaining({
+    requestId: '10',
+    decision: 'reject',
+    decisionConfirmed: true,
+    outcome: 'safe-rejected',
+  })));
+});
+
+test('demo signer restores an approved mission only from a matching user attestation', async () => {
+  const runId = 'launch-approved-run';
+  saveDemoSession(createDemoSession({ runId }));
+  const approved = {
+    ...requests[0],
+    state: 2,
+    memoHash: demoMemoHash(runId, 'approval', requests[0].mandateId, requests[0].delegate),
+  };
+  setAppContext();
+  appContext.current.demoRole = 'delegate';
+  appContext.current.requests = [approved];
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    ok: true,
+    requestId: 10,
+    chainState: 2,
+    origin: 'user',
+    action: 'approve',
+    hash: `0x${'8'.repeat(64)}`,
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+  const router = createMemoryRouter([{ path: '*', element: <SignerView /> }], {
+    initialEntries: ['/approvals/10'],
+  });
+  render(<RouterProvider router={router} />);
+
+  await waitFor(() => {
+    const session = loadDemoSession();
+    expect(session?.missions.approval).toEqual(expect.objectContaining({
+      requestId: '10',
+      decision: 'approve',
+      decisionConfirmed: true,
+      decisionTx: `0x${'8'.repeat(64)}`,
+      outcome: 'safe-approved',
+    }));
+    expect(isMissionComplete(session!, 'approval', { strict: true })).toBe(true);
+  });
+});
+
+test('timeout attestation never restores a user decision', async () => {
+  const runId = 'launch-timeout-run';
+  saveDemoSession(createDemoSession({ runId }));
+  const timedOut = {
+    ...requests[0],
+    state: 5,
+    memoHash: demoMemoHash(runId, 'approval', requests[0].mandateId, requests[0].delegate),
+  };
+  setAppContext();
+  appContext.current.demoRole = 'delegate';
+  appContext.current.requests = [timedOut];
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    ok: true,
+    requestId: 10,
+    chainState: 5,
+    origin: 'timeout',
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+  const router = createMemoryRouter([{ path: '*', element: <SignerView /> }], {
+    initialEntries: ['/approvals/10'],
+  });
+  render(<RouterProvider router={router} />);
+
+  expect(await screen.findByText(/Decision window timeout · no user Reject/i)).toBeInTheDocument();
+  const session = loadDemoSession()!;
+  expect(session.missions.approval.decisionConfirmed).not.toBe(true);
+  expect(isMissionComplete(session, 'approval', { strict: true })).toBe(false);
 });

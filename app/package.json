@@ -12,6 +12,7 @@
     "prebuild": "node ../scripts/check-runtime.mjs && node ../scripts/check-deployments.mjs",
     "build": "tsc --noEmit -p . && vite build",
     "preview": "vite preview",
+    "render:og": "node scripts/render-og.mjs",
     "test": "vitest run",
     "test:unit": "vitest run",
     "test:e2e": "NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost playwright test"

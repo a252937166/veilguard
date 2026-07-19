@@ -42,7 +42,7 @@ test('timeout cancellation is not reconciled as a user reject', () => {
   expect(isMissionComplete(next, 'approval', { strict: true })).toBe(false);
 });
 
-test('a newer same-run retry replaces an old cancelled approval request', () => {
+test('a cancelled approval is not rebound from a scan without explicit timeout recovery', () => {
   let session = createDemoSession({ runId: 'launch-retry', now: 1 });
   session = demoSessionReducer(session, {
     type: 'BIND_REQUEST', runId: session.runId, mission: 'approval', requestId: '42', at: 2,
@@ -53,8 +53,38 @@ test('a newer same-run retry replaces an old cancelled approval request', () => 
     request(session.runId, 'approval', 1, 43n),
   ]);
 
-  expect(next.missions.approval.requestId).toBe('43');
+  expect(next.missions.approval.requestId).toBe('42');
   expect(next.missions.approval.decision).toBeUndefined();
   expect(next.missions.approval.outcome).toBeUndefined();
   expect(isMissionComplete(next, 'approval', { strict: true })).toBe(false);
+});
+
+test('an explicitly expired incomplete attempt may recover its newer retry', () => {
+  let session = createDemoSession({ runId: 'launch-expired', now: 1 });
+  session = demoSessionReducer(session, {
+    type: 'BIND_REQUEST', runId: session.runId, mission: 'routine', requestId: '42', at: 2,
+  });
+
+  const next = reconcileRunBoundMissionEvidence(session, [
+    request(session.runId, 'routine', 6, 42n),
+    request(session.runId, 'routine', 1, 43n),
+  ]);
+
+  expect(next.missions.routine.requestId).toBe('43');
+  expect(next.missions.routine.outcome).toBeUndefined();
+});
+
+test('a completed mission never rebinds to a newer same-run request', () => {
+  let session = createDemoSession({ runId: 'launch-frozen', now: 1 });
+  session = demoSessionReducer(session, {
+    type: 'ROUTINE_EXECUTED', runId: session.runId, requestId: '42', at: 2,
+  });
+
+  const next = reconcileRunBoundMissionEvidence(session, [
+    request(session.runId, 'routine', 2, 42n),
+    request(session.runId, 'routine', 2, 43n),
+  ]);
+
+  expect(next.missions.routine.requestId).toBe('42');
+  expect(isMissionComplete(next, 'routine', { strict: true })).toBe(true);
 });

@@ -19,6 +19,7 @@ import {
 } from '../components/SafeDecisionProgress';
 import {
   fetchDemoDecisionAttestation,
+  isAttestedUserDecision,
   isAttestedUserReject,
   type DemoDecisionAttestation,
 } from '../demo-decision-attestation';
@@ -61,21 +62,39 @@ export function SignerView() {
   const selectedIdentity = signerRequestIdentity(demoRunId, isDemoMode, selected);
   const drafts = mandates.filter((mandate) => mandate.state === 1);
   const selectedEvidence = selected ? txs.get(String(selected.id)) : undefined;
-  const safeDecisionTx = selectedEvidence?.approval ?? selectedEvidence?.cancellation;
+  const safeDecisionTx = selectedEvidence?.approval ?? selectedEvidence?.cancellation ?? selectedAttestation?.hash;
+  const selectedIsAttestedApprove = isAttestedUserDecision(selectedAttestation, 'approve', 2);
   const selectedIsAttestedReject = isAttestedUserReject(selectedAttestation);
-  const safeAction = selectedIsAttestedReject ? 'reject' : selectedEvidence?.safeAction;
+  const safeAction = selectedIsAttestedApprove ? 'approve' : selectedIsAttestedReject ? 'reject' : selectedEvidence?.safeAction;
   const queueIsEmpty = queue.length === 0 && history.length === 0;
 
   useEffect(() => { fetchRequestTxs().then(setTxs).catch(() => {}); }, []);
   useEffect(() => {
-    if (!demoRunId || !selected || selected.state !== 5 || !isCurrentDemoApproval(selected)) {
+    if (!demoRunId || !selected || (selected.state !== 2 && selected.state !== 5) || !isCurrentDemoApproval(selected)) {
       setSelectedAttestation(undefined);
       return;
     }
     let stopped = false;
     setSelectedAttestation(undefined);
     void fetchDemoDecisionAttestation(demoRunId, selected.id).then((attestation) => {
-      if (!stopped) setSelectedAttestation(attestation);
+      if (stopped) return;
+      setSelectedAttestation(attestation);
+      const action = selected.state === 2 && isAttestedUserDecision(attestation, 'approve', 2)
+        ? 'approve'
+        : selected.state === 5 && isAttestedUserDecision(attestation, 'reject', 5)
+          ? 'reject'
+          : undefined;
+      if (!action) return;
+      confirmApprovalDecision(selected.id, action, {
+        runId: demoRunId,
+        transactionHash: attestation.hash,
+      });
+      completeMission('approval', {
+        requestId: selected.id,
+        outcome: action === 'reject' ? 'cancelled' : 'executed',
+        decision: action,
+        runId: demoRunId,
+      });
     });
     return () => { stopped = true; };
     // The trusted identity is fully determined by these primitive object fields.
@@ -151,15 +170,13 @@ export function SignerView() {
         onProgress: setDecisionFlow,
       });
       confirmApprovalDecision(selected.id, action, { runId, transactionHash: result.hash });
-      if (action === 'reject') {
-        setSelectedAttestation({
-          requestId: Number(selected.id),
-          chainState: 5,
-          origin: 'user',
-          action: 'reject',
-          hash: result.hash,
-        });
-      }
+      setSelectedAttestation({
+        requestId: Number(selected.id),
+        chainState: action === 'approve' ? 2 : 5,
+        origin: 'user',
+        action,
+        hash: result.hash,
+      });
       completeMission('approval', {
         requestId: selected.id,
         outcome: action === 'reject' ? 'cancelled' : 'executed',

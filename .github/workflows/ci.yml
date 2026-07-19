@@ -2,21 +2,26 @@ name: CI
 on:
   push: { branches: [main] }
   pull_request: { branches: [main] }
+permissions:
+  contents: read
 jobs:
   contracts-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with: { node-version: 22 }
       - run: npm ci
+      - run: node --test .github/test/*.test.mjs
       - run: npx hardhat build
       - run: node --test server/test/*.test.mjs
   app-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with: { node-version: 22 }
       - run: cd app && npm ci && npm test && npm run build
   app-e2e:
@@ -24,8 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -47,13 +52,15 @@ jobs:
             app/test-results
           if-no-files-found: ignore
   contract-tests:
+    name: contract-tests (advisory)
     # Full suite runs against the local Nox off-chain stack (Docker). Best-effort:
     # image pulls can be slow/flaky in CI, so this job does not gate merges.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with: { node-version: 22 }
       - run: npm ci
       - name: Run test suite (local Nox Docker stack)

@@ -1,4 +1,4 @@
-import { decodeEventLog, keccak256, stringToBytes, type TransactionReceipt } from 'viem';
+import { decodeEventLog, keccak256, parseAbiItem, stringToBytes, type TransactionReceipt } from 'viem';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SpendRequest } from '../App';
 import { useApp } from '../App';
@@ -45,6 +45,7 @@ type PacketResult = {
 };
 
 const TERMINAL_STATES = new Set([2, 4, 5, 6]);
+const ADMIN_DISCLOSURE_RUN_KEY = `wallet:${ADDR.VeilGuardModule.toLowerCase()}`;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 type AuditPacketCreatedArgs = {
@@ -63,6 +64,10 @@ type AuditPacketRead = readonly [
   readonly bigint[],
   readonly `0x${string}`[],
 ];
+
+const auditPacketCreatedEvent = parseAbiItem(
+  'event AuditPacketCreated(uint256 indexed packetId, address indexed auditor, uint256 indexed mandateId, bytes32 manifestHash)',
+);
 
 const sameAddress = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
 const sameHash = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
@@ -127,6 +132,49 @@ async function verifyAdminDisclosureGroup(options: {
   return { packetId: Number(event.packetId), manifestHash: event.manifestHash };
 }
 
+async function recoverUnknownAdminSignature(options: {
+  account: `0x${string}`;
+  auditor: `0x${string}`;
+  group: AdminDisclosureGroupCheckpoint;
+}): Promise<`0x${string}` | null> {
+  const { account, auditor, group } = options;
+  if (!group.signatureStartBlock) return null;
+  const latest = await publicClient.getBlockNumber();
+  const start = BigInt(group.signatureStartBlock);
+  if (start > latest) return null;
+  const matches: `0x${string}`[] = [];
+  const chunk = 9_000n;
+  for (let fromBlock = start; fromBlock <= latest; fromBlock += chunk) {
+    const toBlock = fromBlock + chunk - 1n > latest ? latest : fromBlock + chunk - 1n;
+    const logs = await publicClient.getLogs({
+      address: ADDR.VeilGuardModule,
+      event: auditPacketCreatedEvent,
+      args: { auditor, mandateId: BigInt(group.mandateId) },
+      fromBlock,
+      toBlock,
+    });
+    for (const log of logs) {
+      if (log.args.packetId == null || !log.transactionHash) continue;
+      const packet = await publicClient.readContract({
+        address: ADDR.VeilGuardModule,
+        abi: moduleAbi,
+        functionName: 'getAuditPacket',
+        args: [log.args.packetId],
+      }) as AuditPacketRead;
+      if (!sameAddress(packet[0], auditor)
+        || packet[1] !== BigInt(group.mandateId)
+        || !sameRequestIds(packet[5], group.requestIds)) continue;
+      const transaction = await publicClient.getTransaction({ hash: log.transactionHash });
+      if (sameAddress(transaction.from, account)) matches.push(log.transactionHash);
+    }
+  }
+  const uniqueMatches = [...new Set(matches.map((hash) => hash.toLowerCase()))];
+  if (uniqueMatches.length > 1) {
+    throw new Error(`Mandate #${group.mandateId} has multiple matching Audit Packet transactions after the unknown wallet prompt. Manual chain review is required before any new signature.`);
+  }
+  return matches[0] ?? null;
+}
+
 const guidedScope = (session: ReturnType<typeof loadDemoSession>, requests: SpendRequest[]): ScopeEntry[] => {
   if (!session) return [];
   return (['routine', 'approval', 'violation'] as const).flatMap((mission) => {
@@ -175,7 +223,7 @@ const packetResultFromCheckpoint = (
 };
 
 export function DisclosureView() {
-  const { account, financeAdmin, demoRole, requests, startDemo, toast } = useApp();
+  const { account, financeAdmin, demoRole, requests, run, startDemo, toast } = useApp();
   const [step, setStep] = useState<BuilderStep>('select');
   const [session, setSession] = useState(loadDemoSession);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -186,6 +234,11 @@ export function DisclosureView() {
   const [error, setError] = useState('');
   const [result, setResult] = useState<PacketResult | null>(null);
   const [adminCheckpoint, setAdminCheckpoint] = useState<AdminDisclosureCheckpoint | null>(null);
+  const adminSignaturePendingGroups = adminCheckpoint
+    ? Object.values(adminCheckpoint.groups).filter((group) => !!group.signaturePendingAt)
+    : [];
+  const adminCheckpointHasLockedPointers = !!adminCheckpoint
+    && Object.values(adminCheckpoint.groups).some((group) => !!group.transactionHash || !!group.signaturePendingAt);
 
   const mode: DisclosureMode = demoRole === 'delegate' && !!session
     ? 'guided-facilitated'
@@ -214,7 +267,9 @@ export function DisclosureView() {
     return [];
   }, [mode, requests, session]);
 
-  const adminRunKey = session?.runId ?? `wallet:${ADDR.VeilGuardModule.toLowerCase()}`;
+  // Browser-wallet packets are independent from guided demo runs. A stable
+  // module namespace prevents Restart/new-run state from hiding a broadcast.
+  const adminRunKey = ADMIN_DISCLOSURE_RUN_KEY;
 
   const scopeKey = `${mode}:${scope.map(({ id, request, identityError }) =>
     `${id}:${request?.state ?? 'loading'}:${request?.memoHash ?? 'none'}:${identityError ? 'mismatch' : 'trusted'}`).join(',')}`;
@@ -239,7 +294,10 @@ export function DisclosureView() {
         setSelected(new Set(checkpoint.selectedRequestIds));
         setAdminCheckpoint(checkpoint);
         const pointers = Object.values(checkpoint.groups).filter((group) => !!group.transactionHash).length;
-        setError(`Recovered ${pointers}/${Object.keys(checkpoint.groups).length} local transaction pointers. Continue to verify every receipt, event and Audit Packet on-chain before reuse.`);
+        const unknownPrompts = Object.values(checkpoint.groups).filter((group) => !!group.signaturePendingAt).length;
+        setError(unknownPrompts
+          ? `Recovered ${unknownPrompts} wallet request${unknownPrompts === 1 ? '' : 's'} with an unknown outcome and ${pointers} transaction pointer${pointers === 1 ? '' : 's'}. Resolve the original wallet prompt before any new signature.`
+          : `Recovered ${pointers}/${Object.keys(checkpoint.groups).length} local transaction pointers. Continue to verify every receipt, event and Audit Packet on-chain before reuse.`);
         setResult(null);
         setStep('review');
         return;
@@ -287,6 +345,10 @@ export function DisclosureView() {
   const toggle = (id: string) => {
     const entry = scope.find((candidate) => candidate.id === id);
     if (!entry || !terminal(entry) || (mode === 'guided-facilitated' && !guidedSelectable(entry))) return;
+    if (mode === 'admin-wallet' && adminCheckpointHasLockedPointers) {
+      setError('The selected scope is locked because a wallet request may still be pending or an Audit Packet transaction was broadcast. Resolve or verify every pointer before changing the scope.');
+      return;
+    }
     setSelected((current) => {
       const next = new Set(current);
       if (next.has(id)) next.delete(id);
@@ -349,31 +411,118 @@ export function DisclosureView() {
     });
     let checkpoint = loadAdminDisclosureCheckpoint(adminRunKey, account);
     if (!checkpoint || checkpoint.scopeKey !== freshCheckpoint.scopeKey) {
+      const broadcastGroups = checkpoint
+        ? Object.values(checkpoint.groups).filter((group) => !!group.transactionHash || !!group.signaturePendingAt)
+        : [];
+      if (broadcastGroups.length > 0) {
+        throw new Error(`A previous Audit Packet operation has ${broadcastGroups.length} locked wallet or transaction pointer${broadcastGroups.length === 1 ? '' : 's'}. Restore its original auditor and request scope, then resolve every wallet prompt and receipt before starting a different operation.`);
+      }
       checkpoint = freshCheckpoint;
-      saveAdminDisclosureCheckpoint(checkpoint);
       setAdminCheckpoint(checkpoint);
+      if (!saveAdminDisclosureCheckpoint(checkpoint)) {
+        throw new Error('Durable recovery storage is unavailable. No wallet request was opened; enable site storage before creating Audit Packets.');
+      }
     }
     const recoveredMandates = new Set<string>();
 
     for (const [mandateId] of groupEntries) {
       const savedGroup = checkpoint.groups[mandateId];
-      const recoveredPointer = !!savedGroup.transactionHash;
+      let recoveredPointer = !!savedGroup.transactionHash;
       let hash = savedGroup.transactionHash;
       let receipt: TransactionReceipt;
-      if (!hash) {
-        hash = await walletWrite({
+      if (!hash && savedGroup.signaturePendingAt) {
+        const recoveredHash = await recoverUnknownAdminSignature({
           account,
-          address: ADDR.VeilGuardModule,
-          abi: moduleAbi,
-          functionName: 'createAuditPacket',
-          args: [auditor as `0x${string}`, BigInt(mandateId), savedGroup.requestIds.map((id) => BigInt(id))],
-          onHint: (message) => toast(message),
+          auditor: auditor as `0x${string}`,
+          group: savedGroup,
         });
+        if (!recoveredHash) {
+          throw new Error(`Mandate #${mandateId} has a wallet request with an unknown outcome. Return to the original wallet prompt and approve or reject it, then retry recovery. If that prompt no longer exists, manual chain reconciliation is required; VeilGuard will not request another signature.`);
+        }
+        checkpoint = updateAdminDisclosureGroup(checkpoint, mandateId, {
+          signaturePendingAt: undefined,
+          signatureStartBlock: undefined,
+          transactionHash: recoveredHash,
+        });
+        setAdminCheckpoint(checkpoint);
+        if (!saveAdminDisclosureCheckpoint(checkpoint)) {
+          throw new Error(`Recovered Audit Packet transaction ${recoveredHash}, but durable storage could not save its hash. Keep this tab open; retry will use the in-memory pointer.`);
+        }
+        hash = recoveredHash;
+        recoveredPointer = true;
+      }
+      if (!hash) {
+        // Re-check durable storage immediately before every wallet prompt. A
+        // failed preflight may leave only an in-memory draft; it must never
+        // become signable on a later click until cross-tab storage succeeds.
+        if (!saveAdminDisclosureCheckpoint(checkpoint)) {
+          throw new Error('Durable recovery storage is unavailable. No wallet request was opened; enable site storage before creating Audit Packets.');
+        }
+        const signatureStartBlock = await publicClient.getBlockNumber();
+        try {
+          hash = await walletWrite({
+            account,
+            address: ADDR.VeilGuardModule,
+            abi: moduleAbi,
+            functionName: 'createAuditPacket',
+            args: [auditor as `0x${string}`, BigInt(mandateId), savedGroup.requestIds.map((id) => BigInt(id))],
+            onHint: (message) => toast(message),
+            onRequestStarted: () => {
+              const currentCheckpoint = checkpoint;
+              if (!currentCheckpoint) {
+                throw new Error('Audit Packet recovery checkpoint disappeared before the wallet request. No signature request was opened.');
+              }
+              checkpoint = updateAdminDisclosureGroup(currentCheckpoint, mandateId, {
+                signaturePendingAt: Date.now(),
+                signatureStartBlock: signatureStartBlock.toString(),
+              });
+              setAdminCheckpoint(checkpoint);
+              if (!saveAdminDisclosureCheckpoint(checkpoint)) {
+                // The callback runs before wallet_writeContract. Roll back the
+                // volatile marker and abort so no untracked prompt can open.
+                checkpoint = updateAdminDisclosureGroup(checkpoint, mandateId, {
+                  signaturePendingAt: undefined,
+                  signatureStartBlock: undefined,
+                });
+                saveAdminDisclosureCheckpoint(checkpoint);
+                setAdminCheckpoint(checkpoint);
+                throw new Error('Durable recovery storage became unavailable before the wallet prompt. No signature request was opened.');
+              }
+            },
+            // Never release the global wallet lease while an injected-wallet
+            // request can still be approved. The user must approve or reject it.
+            timeoutMs: 0,
+          });
+        } catch (reason: any) {
+          const signaturePending = !!checkpoint.groups[mandateId]?.signaturePendingAt;
+          const explicitlyRejected = reason?.code === 4001 || /user rejected|user denied/i.test(`${reason?.message ?? reason}`);
+          if (signaturePending && explicitlyRejected) {
+            checkpoint = updateAdminDisclosureGroup(checkpoint, mandateId, {
+              signaturePendingAt: undefined,
+              signatureStartBlock: undefined,
+            });
+            setAdminCheckpoint(checkpoint);
+            if (!saveAdminDisclosureCheckpoint(checkpoint)) {
+              throw new Error(`The mandate #${mandateId} wallet request was rejected, but durable recovery storage could not record that result. Keep this tab open and restore site storage before retrying.`);
+            }
+            throw new Error(`The mandate #${mandateId} wallet request was explicitly rejected. It is safe to retry when ready.`);
+          }
+          if (signaturePending) {
+            throw new Error(`The mandate #${mandateId} wallet request outcome is unknown. VeilGuard kept its recovery marker and will not request a second signature.`);
+          }
+          throw reason;
+        }
         // Persist the broadcast hash before waiting. Reloads and RPC timeouts
         // resume this exact transaction instead of creating a duplicate packet.
-        checkpoint = updateAdminDisclosureGroup(checkpoint, mandateId, { transactionHash: hash });
-        saveAdminDisclosureCheckpoint(checkpoint);
+        checkpoint = updateAdminDisclosureGroup(checkpoint, mandateId, {
+          signaturePendingAt: undefined,
+          signatureStartBlock: undefined,
+          transactionHash: hash,
+        });
         setAdminCheckpoint(checkpoint);
+        if (!saveAdminDisclosureCheckpoint(checkpoint)) {
+          throw new Error(`Audit Packet transaction ${hash} was broadcast, but durable recovery storage became unavailable. Keep this tab open; retry here will recover the in-memory hash and will not request another signature.`);
+        }
         receipt = await publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
       } else if (savedGroup.packetId != null && savedGroup.manifestHash) {
         // A complete local record is still only an untrusted recovery pointer.
@@ -388,12 +537,16 @@ export function DisclosureView() {
 
       if (receipt.status !== 'success') {
         checkpoint = updateAdminDisclosureGroup(checkpoint, mandateId, {
+          signaturePendingAt: undefined,
+          signatureStartBlock: undefined,
           transactionHash: undefined,
           packetId: undefined,
           manifestHash: undefined,
         });
-        saveAdminDisclosureCheckpoint(checkpoint);
         setAdminCheckpoint(checkpoint);
+        if (!saveAdminDisclosureCheckpoint(checkpoint)) {
+          throw new Error(`Mandate #${mandateId} packet transaction reverted, but recovery storage could not record the cleared pointer. Keep this tab open and retry after restoring site storage.`);
+        }
         throw new Error(`Mandate #${mandateId} packet transaction reverted. Retry will sign only this unfinished group.`);
       }
 
@@ -406,11 +559,72 @@ export function DisclosureView() {
         packetId: verified.packetId,
         manifestHash: verified.manifestHash,
       });
-      saveAdminDisclosureCheckpoint(checkpoint);
       setAdminCheckpoint(checkpoint);
+      if (!saveAdminDisclosureCheckpoint(checkpoint)) {
+        throw new Error(`Mandate #${mandateId} was verified on-chain, but its durable recovery metadata could not be saved. Keep this tab open and resume verification; no new signature is required.`);
+      }
       if (recoveredPointer) recoveredMandates.add(mandateId);
     }
-    return packetResultFromCheckpoint(checkpoint, recoveredMandates);
+    const verifiedResult = packetResultFromCheckpoint(checkpoint, recoveredMandates);
+    // Every group has now passed receipt + unique event + getAuditPacket.
+    // Archive the active recovery operation so a future, different scope can
+    // start without discarding an unverified broadcast pointer.
+    if (!removeAdminDisclosureCheckpoint(adminRunKey, account)) {
+      throw new Error('All Audit Packets were verified, but the active recovery checkpoint could not be archived. Restore site storage and resume once more; no new signature is required.');
+    }
+    setAdminCheckpoint(null);
+    return verifiedResult;
+  };
+
+  const createCoordinatedAdminPackets = async (): Promise<PacketResult> => {
+    if (!account) throw new Error('Connect the current on-chain Finance Admin wallet.');
+    const executeWithAppCoordinator = async (): Promise<PacketResult> => {
+      let output: PacketResult | undefined;
+      let failure: unknown;
+      const operation = await run({
+        key: 'audit-packet-create',
+        label: 'Create audit packets',
+        resources: [`wallet:${account.toLowerCase()}`],
+        feedback: 'inline',
+      }, async () => {
+        try {
+          output = await createAdminPackets();
+        } catch (reason) {
+          failure = reason;
+          throw reason;
+        }
+      });
+      if (!operation.accepted) {
+        throw new Error(`${operation.blocker.label} is using this wallet. Return to that operation before creating Audit Packets.`);
+      }
+      if (operation.status === 'failed') {
+        throw failure instanceof Error ? failure : new Error('Audit Packet creation failed before its evidence could be verified.');
+      }
+      if (!output) throw new Error('Audit Packet creation finished without a verified result. Resume the operation to recover its evidence.');
+      return output;
+    };
+
+    // The in-app coordinator owns the complete multi-mandate lease. Web Locks
+    // extends the same wallet resource across tabs, closing the last race where
+    // two tabs could both prompt before either persisted its broadcast hash.
+    const lockManager = typeof navigator === 'undefined' ? undefined : navigator.locks;
+    if (!lockManager) return executeWithAppCoordinator();
+    let acquired = false;
+    let output: PacketResult | undefined;
+    await lockManager.request(
+      `veilguard:audit-packet-create:${ADDR.VeilGuardModule.toLowerCase()}:${account.toLowerCase()}`,
+      { mode: 'exclusive', ifAvailable: true },
+      async (lock) => {
+        if (!lock) return;
+        acquired = true;
+        output = await executeWithAppCoordinator();
+      },
+    );
+    if (!acquired) {
+      throw new Error('Create audit packets is already using this Finance Admin wallet in another tab. Return to that tab and recover the active operation.');
+    }
+    if (!output) throw new Error('The cross-tab wallet operation ended without verified Audit Packet evidence.');
+    return output;
   };
 
   const create = async () => {
@@ -426,7 +640,7 @@ export function DisclosureView() {
     try {
       const output = mode === 'guided-facilitated'
         ? await createFacilitatedPackets()
-        : await createAdminPackets();
+        : await createCoordinatedAdminPackets();
       setResult(output);
       setStep('create');
       if (mode === 'guided-facilitated' && session) {
@@ -462,6 +676,10 @@ export function DisclosureView() {
 
   const discardAdminRecovery = () => {
     if (mode !== 'admin-wallet' || !account) return;
+    if (adminCheckpointHasLockedPointers) {
+      setError('Pending wallet requests and broadcast recovery pointers cannot be discarded. Resolve the original prompt, then verify each receipt; only a wallet rejection observed by this page before reload or a confirmed reverted receipt may clear its pointer.');
+      return;
+    }
     removeAdminDisclosureCheckpoint(adminRunKey, account);
     setAdminCheckpoint(null);
     setResult(null);
@@ -554,7 +772,7 @@ export function DisclosureView() {
             </div>
             {mode === 'admin-wallet' && (
               <div className="review-scope-facts">
-                <div><dt>Auditor address</dt><dd><input aria-label="Auditor address" className="mono" value={auditor} onChange={(event) => setAuditor(event.target.value)} /></dd></div>
+                <div><dt>Auditor address</dt><dd><input aria-label="Auditor address" className="mono" value={auditor} disabled={adminCheckpointHasLockedPointers} onChange={(event) => setAuditor(event.target.value)} /></dd></div>
                 <div><dt>Authority</dt><dd>Connected Finance Admin wallet</dd></div>
               </div>
             )}
@@ -566,7 +784,7 @@ export function DisclosureView() {
             <div className="disclosure-request-list">
               {scope.map(({ id, mission, scenario, request, identityError }) => (
                 <label key={id} className={`disclosure-request ${selected.has(id) ? 'selected' : ''}`}>
-                  <input type="checkbox" checked={selected.has(id)} disabled={!request || !TERMINAL_STATES.has(request.state) || !!identityError} onChange={() => toggle(id)} />
+                  <input type="checkbox" checked={selected.has(id)} disabled={!request || !TERMINAL_STATES.has(request.state) || !!identityError || (mode === 'admin-wallet' && adminCheckpointHasLockedPointers)} onChange={() => toggle(id)} />
                   <span>
                     <b>{scenario?.vendor ?? (identityError && mission ? `Unverified ${scenarioByKey(mission).vendor} binding` : vendorName(request?.recipient) ?? `Request #${id}`)}</b>
                     <small>{scenario ? `${scenario.amount} cUSDC · ` : request ? `Mandate #${request.mandateId} · ${short(request.recipient)} · ` : ''}Request #{id}</small>
@@ -607,8 +825,13 @@ export function DisclosureView() {
             {error && <div className="inline-alert error" role="alert">{error}</div>}
             {mode === 'admin-wallet' && adminCheckpoint && (
               <div className="inline-alert neutral" role="status">
-                <b>{completedAdminDisclosureGroups(adminCheckpoint)}/{Object.keys(adminCheckpoint.groups).length} local recovery pointers contain packet metadata.</b> Every stored receipt, event and Audit Packet is revalidated on-chain before reuse.
-                <button type="button" className="btn ghost small" disabled={busy} onClick={discardAdminRecovery}>Discard recovery pointers</button>
+                <b>{completedAdminDisclosureGroups(adminCheckpoint)}/{Object.keys(adminCheckpoint.groups).length} local recovery pointers contain packet metadata.</b> Every stored receipt, event and Audit Packet is revalidated on-chain before reuse. {adminCheckpointHasLockedPointers && 'Wallet or broadcast pointers remain locked until the prompt, receipt and packet are classified.'}
+                {adminSignaturePendingGroups.length > 0 && (
+                  <span className="inline-confirm" role="alert">
+                    An unknown wallet outcome cannot be cleared from this recovered page. Resolve the original prompt and retry chain recovery; if the prompt was lost, use manual chain reconciliation. No duplicate signature will be requested.
+                  </span>
+                )}
+                <button type="button" className="btn ghost small" disabled={busy || adminCheckpointHasLockedPointers} onClick={discardAdminRecovery}>{adminCheckpointHasLockedPointers ? 'Recovery pointers locked' : 'Discard recovery pointers'}</button>
               </div>
             )}
             <div className="sticky-actions">

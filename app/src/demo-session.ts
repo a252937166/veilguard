@@ -219,7 +219,7 @@ export type DemoSessionAction =
   | { type: 'NAVIGATE'; runId: string; route: AppRoute; selected?: RouteObjectSelection; at?: number }
   | { type: 'SET_ROLE'; runId: string; role: DemoRole; at?: number }
   | { type: 'BEGIN_MISSION'; runId: string; mission: DemoMissionKey; at?: number }
-  | { type: 'BIND_REQUEST'; runId: string; mission: Exclude<DemoMissionKey, 'audit'>; requestId: string; at?: number }
+  | { type: 'BIND_REQUEST'; runId: string; mission: Exclude<DemoMissionKey, 'audit'>; requestId: string; replaceRetryableAttempt?: boolean; at?: number }
   | { type: 'ROUTINE_EXECUTED'; runId: string; requestId: string; at?: number }
   | { type: 'APPROVAL_DECISION_CONFIRMED'; runId: string; requestId: string; decision: ApprovalDecision; transactionHash?: string; at?: number }
   | { type: 'APPROVAL_SETTLED'; runId: string; requestId: string; decision: ApprovalDecision; at?: number }
@@ -275,6 +275,17 @@ export function demoSessionReducer(state: DemoSessionV2, action: DemoSessionActi
       next = updateMission(state, action.mission, { status: 'active' }, at);
       break;
     case 'BIND_REQUEST':
+      // A strict terminal mission is immutable. Re-visiting an invoice, a
+      // delayed refresh, or a newer same-run request must never erase its
+      // decision/decryption evidence or silently replace its audit identity.
+      if (isMissionComplete(state, action.mission, { strict: true })) return state;
+      // An active or unknown terminal attempt remains the mission identity.
+      // Rebinding requires explicit authorization from the retry path after
+      // the prior request was proven Expired or timeout-cancelled.
+      if (state.missions[action.mission].requestId) {
+        if (state.missions[action.mission].requestId === action.requestId) return state;
+        if (action.replaceRetryableAttempt !== true) return state;
+      }
       next = updateMission(state, action.mission, {
         requestId: action.requestId,
         status: 'active',
@@ -295,6 +306,8 @@ export function demoSessionReducer(state: DemoSessionV2, action: DemoSessionActi
       }, at);
       break;
     case 'ROUTINE_EXECUTED':
+      if (state.missions.routine.requestId
+        && state.missions.routine.requestId !== action.requestId) return state;
       next = updateMission(state, 'routine', { requestId: action.requestId, outcome: 'executed' }, at);
       break;
     case 'APPROVAL_DECISION_CONFIRMED': {
@@ -319,6 +332,8 @@ export function demoSessionReducer(state: DemoSessionV2, action: DemoSessionActi
       }, at);
       break;
     case 'VIOLATION_BLOCKED':
+      if (state.missions.violation.requestId
+        && state.missions.violation.requestId !== action.requestId) return state;
       next = updateMission(state, 'violation', { requestId: action.requestId, outcome: 'blocked' }, at);
       break;
     case 'VIOLATION_REASON_DECRYPTED': {

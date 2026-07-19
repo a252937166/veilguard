@@ -9,7 +9,7 @@ import { publicClient } from './nox';
  *  rotate), so log queries use dedicated log-friendly endpoints. */
 const DEPLOY_BLOCK = 11_295_790n;
 const CHUNK = 9_500n;
-const LOG_RPCS = ['https://sepolia.drpc.org', 'https://ethereum-sepolia.blockpi.network/v1/rpc/public'];
+const LOG_RPCS = ['https://sepolia.drpc.org', 'https://gateway.tenderly.co/public/sepolia'];
 const logClients = LOG_RPCS.map((u) => createPublicClient({ chain: sepolia, transport: http(u) }));
 
 async function getLogsRobust(params: any): Promise<any[]> {

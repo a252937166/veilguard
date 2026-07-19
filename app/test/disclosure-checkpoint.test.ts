@@ -67,3 +67,24 @@ test('checkpoint becomes complete only after every mandate has a hash and packet
   expect(completedAdminDisclosureGroups(checkpoint)).toBe(2);
   expect(isAdminDisclosureCheckpointComplete(checkpoint)).toBe(true);
 });
+
+test('a newer durable cross-tab hash wins over an older volatile draft', () => {
+  const storage = memoryStorage();
+  const runKey = 'wallet:cross-tab';
+  const draft = createAdminDisclosureCheckpoint({
+    runKey,
+    account,
+    auditor,
+    groups: { 1: ['11'] },
+    now: 1,
+  });
+  expect(saveAdminDisclosureCheckpoint(draft, storage)).toBe(true);
+
+  const broadcast = updateAdminDisclosureGroup(draft, '1', { transactionHash: tx }, Date.now() + 1_000);
+  storage.setItem(
+    adminDisclosureCheckpointKey(runKey, account),
+    JSON.stringify(broadcast),
+  );
+
+  expect(loadAdminDisclosureCheckpoint(runKey, account, storage)?.groups['1'].transactionHash).toBe(tx);
+});

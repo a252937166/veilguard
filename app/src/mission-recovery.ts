@@ -1,4 +1,9 @@
-import { demoSessionReducer, type DemoMissionKey, type DemoSessionV2 } from './demo-session';
+import {
+  demoSessionReducer,
+  isMissionComplete,
+  type DemoMissionKey,
+  type DemoSessionV2,
+} from './demo-session';
 import {
   runBoundScenarioRequests,
   type DemoRequestIdentity,
@@ -27,16 +32,26 @@ export function reconcileRunBoundMissionEvidence<T extends DemoRequestIdentity>(
   for (const mission of REQUEST_MISSIONS) {
     const candidates = runBoundScenarioRequests(next.runId, mission, requests);
     const boundId = next.missions[mission].requestId;
-    // Retries create a new request under the same domain-separated run memo.
-    // The newest authenticated candidate is therefore the current attempt,
-    // even when an older cancelled request was already bound locally.
-    const request = newest(candidates);
+    // Strict completion freezes the request identity. Incomplete attempts also
+    // stay bound unless the chain explicitly marks the prior request Expired;
+    // timeout cancellation needs its server attestation and is rebound by the
+    // explicit retry submission path, not inferred from a scan.
+    if (isMissionComplete(next, mission, { strict: true })) continue;
+    const bound = boundId
+      ? candidates.find((candidate) => String(candidate.id) === boundId)
+      : undefined;
+    const request = !boundId
+      ? newest(candidates)
+      : bound?.state === 6
+        ? newest(candidates)
+        : bound;
     if (!request) continue;
 
     const requestId = String(request.id);
     if (boundId !== requestId) {
       next = demoSessionReducer(next, {
         type: 'BIND_REQUEST', runId: next.runId, mission, requestId,
+        ...(bound?.state === 6 ? { replaceRetryableAttempt: true } : {}),
       });
     }
 
