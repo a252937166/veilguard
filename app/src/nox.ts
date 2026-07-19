@@ -21,9 +21,12 @@ export function getActiveProvider(): Eip1193Provider | undefined {
 }
 
 const RPCS = [
-  RPC_URL, // publicnode
   'https://sepolia.drpc.org',
   'https://gateway.tenderly.co/public/sepolia',
+  // PublicNode supports browser CORS but intermittently rate-limits bursty
+  // dashboard reads with 403. Keep it as a tertiary fallback rather than
+  // allowing latency ranking to promote it ahead of the stable endpoints.
+  RPC_URL,
 ];
 
 export const publicClient: PublicClient = createPublicClient({
@@ -31,7 +34,7 @@ export const publicClient: PublicClient = createPublicClient({
   // JSON-RPC request batching per endpoint + Multicall3 aggregation: the dashboard's
   // ~20 getMandate/getRequest reads collapse into a single aggregate eth_call, so a
   // 10s poll no longer blows through free-tier rate limits.
-  transport: fallback(RPCS.map((u) => http(u, { batch: true })), { rank: true, retryCount: 2 }),
+  transport: fallback(RPCS.map((u) => http(u, { batch: true })), { retryCount: 2 }),
   batch: { multicall: { wait: 24 } },
   // receipt waits poll at this cadence — the default 4s adds needless perceived
   // latency on a 12s-block testnet
