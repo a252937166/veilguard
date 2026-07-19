@@ -126,6 +126,18 @@ match before the bundle can be shown as created or advance a mission.
 
 ### 2026-07-19
 
+- Production release acceptance exercised two independent run-bound ShieldOps
+  requests against the deployed Safe. Request #35 reached state 2 through
+  `executeEscalated` and `EscalationExecuted`; Request #37 reached state 5
+  through `cancelEscalated` and `EscalationCancelled`. Both outer transactions
+  called the threshold-2 Safe with two 65-byte signatures, and the read-only
+  decision endpoint attested `origin=user` with the matching action and hash.
+- Replaced the former live-E2E placeholder with an explicit opt-in release gate
+  that submits CloudNode before ShieldOps, verifies same-frame decision feedback,
+  records the run/request recovery pointer, checks Etherscan evidence, and reloads
+  the Reject path before accepting its persisted run-bound attestation. Live
+  tests are serial and never automatically retried.
+
 - Split Invoice drafts from true Request Detail routes and bound private
   presentation data to the exact run-bound Request object.
 - Reduced Payment to one five-stage progress system, kept active operations

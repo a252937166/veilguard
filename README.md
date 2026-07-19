@@ -237,6 +237,23 @@ The journal stores the first observed approval timestamp plus terminal decision
 receipts, so the three-minute window and idempotent retries survive a provisioner
 restart. The OS temporary-directory default is suitable only for local development.
 
+### Latest production release gate
+
+The 2026-07-19 release gate executed both visitor-selectable outcomes as separate
+run-bound requests on the deployed threshold-2 Safe; these are transaction
+receipts, not health-check results or client-side completion flags:
+
+| Path | Request | Terminal proof | Safe transaction |
+| --- | ---: | --- | --- |
+| Approve | #35 | state 2 · `executeEscalated` · `EscalationExecuted` · `origin:user` | [`0xe5d36e…90c6`](https://sepolia.etherscan.io/tx/0xe5d36e657fc77823871f72a2f6d690a9cbad35421af8a3a5e46a4f8f22c890c6) |
+| Reject | #37 | state 5 · `cancelEscalated` · `EscalationCancelled` · `origin:user` | [`0x53aaf5…8c75`](https://sepolia.etherscan.io/tx/0x53aaf51e5874ea929740b90781f2609dca259edd6e351cf7365fb8ed6fa28c75) |
+
+Both receipts target the deployed Safe, call the VeilGuard module with operation
+0, and carry 130 signature bytes (two 65-byte owner signatures). The opt-in
+Playwright gate is disabled in ordinary CI and can be invoked only with
+`VEILGUARD_LIVE_E2E=1`; it records run/request recovery pointers and disables
+automatic retries so a failed assertion cannot duplicate a testnet decision.
+
 ## Security & trust model
 
 VeilGuard provides **confidentiality, not anonymity**. Public by design:

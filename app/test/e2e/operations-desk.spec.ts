@@ -1,5 +1,5 @@
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 test('task routes survive refresh and fit the viewport', async ({ page }) => {
   await page.goto('/#/verify');
@@ -174,11 +174,108 @@ test('funds form and table expose names to assistive technology', async ({ page 
   expect(results.violations).toEqual([]);
 });
 
-test('live approve and reject acceptance is explicit opt-in', async ({ page }) => {
-  test.skip(process.env.VEILGUARD_LIVE_E2E !== '1', 'Requires funded Sepolia delegates and the provisioner with Safe owner secrets.');
-  await page.goto('/#/payments');
-  await expect(page.getByText('ShieldOps').first()).toBeVisible();
-  // The destructive testnet path is intentionally run only in the release gate.
-  // Its job is to submit independent run IDs and assert the resulting Safe and
-  // refund links in the Privacy Lens, not merely call /api/health.
+const LIVE_BASE_URL = process.env.VEILGUARD_LIVE_BASE_URL ?? 'https://veilguard.axiqo.xyz';
+
+async function startFreshLiveRun(page: Page) {
+  await page.goto(`${LIVE_BASE_URL}/?live-acceptance=${Date.now()}`);
+  const launch = page.getByRole('button', { name: /start interactive demo/i });
+  await expect(launch.first()).toBeVisible();
+  await launch.first().click();
+  await expect(page).toHaveURL(/#\/payments$/);
+  await expect(page.getByRole('heading', { name: /payment inbox/i, level: 2 })).toBeVisible();
+  await expect(page.getByRole('article', { name: /CloudNode payment detail/i })).toBeVisible();
+}
+
+async function submitSelectedInvoice(page: Page, expectedOutcome: RegExp) {
+  const submit = page.getByRole('button', { name: /submit confidential payment/i });
+  await expect(submit).toBeEnabled({ timeout: 30_000 });
+  await submit.click();
+  await expect(page.getByRole('region', { name: /active payment operation/i })).toBeVisible({ timeout: 8_000 });
+  await expect(page.getByText(expectedOutcome)).toBeVisible({ timeout: 300_000 });
+}
+
+async function readLiveEvidence(page: Page) {
+  return page.evaluate(() => {
+    const session = JSON.parse(sessionStorage.getItem('vg_demo_session_v2') ?? '{}');
+    return {
+      runId: session.runId,
+      requestId: session.missions?.approval?.requestId,
+      decision: session.missions?.approval?.decision,
+      transactionHash: session.missions?.approval?.decisionTx,
+    };
+  });
+}
+
+test.describe('live Sepolia release gate', () => {
+  test.describe.configure({ mode: 'serial', retries: 0 });
+
+  for (const action of ['approve', 'reject'] as const) {
+    test(`live ShieldOps ${action} executes an independent Safe path`, async ({ page }) => {
+    test.skip(process.env.VEILGUARD_LIVE_E2E !== '1', 'Requires funded Sepolia delegates and the provisioner with Safe owner secrets.');
+    test.setTimeout(720_000);
+
+    console.info(`[live-${action}] starting fresh production run`);
+    await startFreshLiveRun(page);
+    await submitSelectedInvoice(page, /payment completed privately/i);
+    console.info(`[live-${action}] CloudNode direct execution confirmed`);
+
+    const continueToShieldOps = page.getByRole('button', { name: /continue to shieldops/i });
+    await expect(continueToShieldOps).toBeVisible();
+    await continueToShieldOps.click();
+    await expect(page.getByRole('article', { name: /ShieldOps payment detail/i })).toBeVisible();
+    await submitSelectedInvoice(page, /payment held for approval/i);
+    const boundEvidence = await readLiveEvidence(page);
+    console.info(`[live-${action}] ShieldOps escrow reservation confirmed · ${JSON.stringify(boundEvidence)}`);
+
+    const decision = action === 'approve'
+      ? page.getByRole('button', { name: /approve payment/i })
+      : page.getByRole('button', { name: /reject & return funds/i });
+    await expect(decision).toBeEnabled();
+    await decision.click();
+
+    const activeDecision = action === 'approve'
+      ? page.getByRole('button', { name: /executing 2-of-2/i })
+      : page.getByRole('button', { name: /returning funds/i });
+    await expect(activeDecision).toHaveAttribute('aria-busy', 'true', { timeout: 3_000 });
+    console.info(`[live-${action}] decision accepted with visible busy state`);
+
+    if (action === 'approve') {
+      await expect(page.getByText(/committee approved the policy exception/i)).toBeVisible({ timeout: 240_000 });
+      const approvalLink = page.getByRole('link', { name: /view approval/i });
+      await expect(approvalLink).toHaveAttribute('href', /sepolia\.etherscan\.io\/tx\/0x[0-9a-f]{64}/i);
+    } else {
+      await expect(page.getByText(/user rejected · funds returned/i).first()).toBeVisible({ timeout: 240_000 });
+      const moreActions = page.locator('summary').filter({ hasText: 'More actions' });
+      await expect(moreActions).toBeVisible();
+      await moreActions.click();
+      await page.getByRole('button', { name: /open request detail/i }).click();
+      await expect(page.locator('header.request-detail-heading').getByRole('heading', { name: /request #\d+/i, level: 1 })).toBeVisible();
+      const cancellationRow = page.getByText('Safe cancellation', { exact: true }).locator('..');
+      await expect(cancellationRow.getByRole('link')).toHaveAttribute('href', /sepolia\.etherscan\.io\/tx\/0x[0-9a-f]{64}/i);
+    }
+
+    const evidence = await readLiveEvidence(page);
+    expect(evidence.runId).toMatch(/^[A-Za-z0-9_-]{8,96}$/);
+    expect(evidence.requestId).toMatch(/^\d+$/);
+    expect(evidence.decision).toBe(action);
+    expect(evidence.transactionHash).toMatch(/^0x[0-9a-f]{64}$/i);
+    if (action === 'reject') {
+      await page.reload();
+      const resume = page.getByRole('dialog', { name: /continue the unfinished launch day shift/i });
+      await expect(resume).toBeVisible();
+      await resume.getByRole('button', { name: /resume run/i }).click();
+      await expect(page.getByText(/user rejected · funds returned/i).first()).toBeVisible({ timeout: 60_000 });
+      const attestation = await page.evaluate(async ({ runId, requestId }) => {
+        const query = new URLSearchParams({ runId, requestId });
+        const response = await fetch(`/api/demo-decision?${query}`, { cache: 'no-store' });
+        return { status: response.status, body: await response.json() };
+      }, { runId: evidence.runId, requestId: evidence.requestId });
+      expect(attestation.status).toBe(200);
+      expect(attestation.body).toEqual(expect.objectContaining({
+        origin: 'user', action: 'reject', chainState: 5, hash: evidence.transactionHash,
+      }));
+    }
+    console.info(`[live-${action}] ${JSON.stringify(evidence)}`);
+    });
+  }
 });
