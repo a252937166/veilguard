@@ -22,6 +22,7 @@ export type RequestDetailViewProps = {
   decisionFlow?: SafeDecisionFlow | null;
   decisionError?: string | null;
   canDemoDecide?: boolean;
+  guidedActionId?: string;
   auditPacketIds?: string[];
   onBack: () => void;
   onRefresh: () => Promise<ChainRefreshResult>;
@@ -43,6 +44,7 @@ export function RequestDetailView({
   decisionFlow,
   decisionError,
   canDemoDecide,
+  guidedActionId,
   auditPacketIds = [],
   onBack,
   onRefresh,
@@ -104,9 +106,16 @@ export function RequestDetailView({
       </div>
 
       {request.state === 3 && canDemoDecide && onDecision && (
-        <section className="surface-section committee-decision" aria-labelledby="request-decision-title">
+        <section
+          className="surface-section committee-decision"
+          aria-labelledby="request-decision-title"
+        >
           <div className="section-heading"><div><h2 id="request-decision-title">Demo committee decision</h2><p>Your choice triggers the bounded, real Safe 2-of-2 path; it is not represented as your signature.</p></div></div>
-          <SafeDecisionDock flow={decisionFlow}>
+          <SafeDecisionDock
+            flow={decisionFlow}
+            guidedActionId={guidedActionId}
+            guidedInstruction="Choose “Approve payment” or “Reject & return funds”"
+          >
             <button className="btn danger" disabled={!!decisionBusy} aria-busy={decisionBusy === 'reject'} onClick={() => onDecision('reject')}>
               {decisionBusy === 'reject' ? <><span className="spin" /> Returning funds…</> : 'Reject & return funds'}
             </button>
@@ -119,7 +128,13 @@ export function RequestDetailView({
       )}
 
       {request.state === 4 && !reason && onDecryptReason && (
-        <button className="btn primary" disabled={reasonBusy} onClick={onDecryptReason}>
+        <button
+          className="btn primary"
+          data-guided-action={guidedActionId}
+          data-guided-instruction="Click “Decrypt the private reason”"
+          disabled={reasonBusy}
+          onClick={onDecryptReason}
+        >
           {reasonBusy ? <><span className="spin" /> Decrypting…</> : 'Decrypt the private reason'}
         </button>
       )}
@@ -144,7 +159,13 @@ export function RequestDetailView({
       )}
 
       <section className="surface-section" aria-labelledby="request-transactions-title">
-        <div className="section-heading"><div><h2 id="request-transactions-title">Transactions</h2><p>Evidence links are indexed from contract events, never synthesized.</p></div><button type="button" className="btn small ghost" disabled={refreshing} onClick={async () => {
+        <div className="section-heading"><div><h2 id="request-transactions-title">Transactions</h2><p>Evidence links are indexed from contract events, never synthesized.</p></div><button
+          type="button"
+          className="btn small ghost"
+          data-guided-action={guidedActionId && !(request.state === 3 && canDemoDecide && onDecision) && !(request.state === 4 && !reason && onDecryptReason) ? guidedActionId : undefined}
+          data-guided-instruction="Use “Refresh evidence” to reconcile the latest chain state"
+          disabled={refreshing}
+          onClick={async () => {
           if (refreshing) return;
           setRefreshing(true);
           try { setRefreshResult(await onRefresh()); }

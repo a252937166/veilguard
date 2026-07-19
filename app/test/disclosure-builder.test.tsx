@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 const appContext = vi.hoisted(() => ({ current: {} as any }));
@@ -158,6 +158,85 @@ test('guided builder submits and records the exact selected subset', async () =>
   }));
 });
 
+test('guided preparation restores Select, preselects the current uncovered scope and hands off Review to Create', async () => {
+  sessionState.current = {
+    ...sessionState.current,
+    tour: { ...sessionState.current.tour, active: true, step: 4 },
+  };
+  render(<DisclosureView />);
+  const cloud = await screen.findByRole('checkbox', { name: /CloudNode/i });
+  const shield = screen.getByRole('checkbox', { name: /ShieldOps/i });
+  const atlas = screen.getByRole('checkbox', { name: /Atlas Contractor/i });
+  await waitFor(() => {
+    expect(cloud).toBeChecked();
+    expect(shield).toBeChecked();
+    expect(atlas).toBeChecked();
+  });
+
+  // Simulate a user changing the prepared scope and progressing on the same
+  // route before pressing Launch again.
+  fireEvent.click(shield);
+  const reviewAction = screen.getByRole('button', { name: /review selected scope/i });
+  expect(reviewAction).toHaveAttribute('data-guided-action', 'mission-disclosure');
+  expect(reviewAction).toHaveAttribute('data-guided-follow', 'true');
+  fireEvent.click(reviewAction);
+
+  const createAction = screen.getByRole('button', { name: /request facilitated packet creation/i });
+  expect(createAction).toHaveAttribute('data-guided-action', 'mission-disclosure');
+  expect(createAction).not.toHaveAttribute('data-guided-follow');
+
+  act(() => {
+    window.dispatchEvent(new CustomEvent('vg-guided-prepare', {
+      detail: { targetId: 'mission-disclosure', role: 'delegate', step: 4 },
+    }));
+  });
+
+  expect(await screen.findByRole('heading', { name: /select terminal requests/i })).toBeInTheDocument();
+  await waitFor(() => {
+    expect(screen.getByRole('checkbox', { name: /CloudNode/i })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: /ShieldOps/i })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: /Atlas Contractor/i })).toBeChecked();
+  });
+
+  // The explicit command is idempotent while already on Select as well.
+  const preparedCloud = screen.getByRole('checkbox', { name: /CloudNode/i });
+  fireEvent.click(preparedCloud);
+  expect(preparedCloud).not.toBeChecked();
+  act(() => {
+    window.dispatchEvent(new CustomEvent('vg-guided-prepare', {
+      detail: { targetId: 'mission-disclosure', role: 'delegate', step: 4 },
+    }));
+  });
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: /CloudNode/i })).toBeChecked());
+});
+
+test('guided preparation safely resets a Result surface without creating another packet', async () => {
+  sessionState.current = {
+    ...sessionState.current,
+    tour: { ...sessionState.current.tour, active: true, step: 4 },
+  };
+  render(<DisclosureView />);
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: /CloudNode/i })).toBeChecked());
+  fireEvent.click(screen.getByRole('button', { name: /review selected scope/i }));
+  fireEvent.click(screen.getByRole('button', { name: /request facilitated packet creation/i }));
+  expect(await screen.findByText(/Review Bundle updated/i)).toBeInTheDocument();
+  expect(fetch).toHaveBeenCalledTimes(1);
+
+  act(() => {
+    window.dispatchEvent(new CustomEvent('vg-guided-prepare', {
+      detail: { targetId: 'mission-disclosure', role: 'delegate', step: 4 },
+    }));
+  });
+
+  expect(await screen.findByRole('heading', { name: /select terminal requests/i })).toBeInTheDocument();
+  await waitFor(() => {
+    expect(screen.getByRole('checkbox', { name: /CloudNode/i })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: /ShieldOps/i })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: /Atlas Contractor/i })).toBeChecked();
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
 test('missing mission IDs never shift approval and violation scenario labels', async () => {
   sessionState.current = guidedSession({ includeRoutine: false });
   appContext.current.requests = [request(1, 12n, 5), request(2, 13n, 4)];
@@ -233,12 +312,12 @@ test('Continue as Auditor atomically advances tour role, route and selected pack
   fireEvent.click(await screen.findByRole('button', { name: /continue as auditor/i }));
   expect(advanceGuidedMission).toHaveBeenCalledWith({
     step: 5,
-    route: { page: 'audit-packets' },
+    route: { page: 'audit-detail', packetId: '8' },
     role: 'auditor',
     selected: { packetId: '8' },
   });
   expect(appContext.current.startDemo).toHaveBeenCalledWith('auditor');
-  expect(window.location.hash).toBe('#/audit');
+  expect(window.location.hash).toBe('#/audit/8');
 });
 
 const packetLog = (packetId: bigint, mandateId: bigint) => ({

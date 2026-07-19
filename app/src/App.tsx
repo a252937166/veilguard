@@ -3,7 +3,13 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { ADDR, CHAIN_ID, ROLES, moduleAbi, safeAbi, short } from './config';
 import { handlesResolved, publicClient } from './nox';
 import { Landing } from './views/Landing';
-import { MissionDrawer } from './GuidedTour';
+import {
+  MissionDrawer,
+  MISSION_STEPS,
+  deriveGuidedStepPreparation,
+  type ActiveGuidedFocusIntent,
+  type GuidedFocusIntent,
+} from './GuidedTour';
 import { WalletMenu } from './WalletMenu';
 import { Logo } from './Logo';
 import { WaveField } from './WaveField';
@@ -16,6 +22,8 @@ import {
   createDemoSession,
   demoCompleted,
   demoSessionReducer,
+  hasCompleteAuditPacketCoverage,
+  isMissionComplete,
   loadDemoSession,
   saveDemoSession,
   type DemoSessionAction,
@@ -33,6 +41,7 @@ import {
 } from './routes';
 import { Icon, type IconName } from './icons';
 import { ModalDialog } from './components/ModalDialog';
+import { GuidedActionPointer } from './components/GuidedActionPointer';
 import { runBoundScenarioRequests } from './demo-scenarios';
 import { reconcileRunBoundMissionEvidence } from './mission-recovery';
 import { OperationCoordinator, type OperationSpec } from './operation-lock';
@@ -112,6 +121,9 @@ export function App() {
   const [demoSession, setDemoSession] = useState<DemoSessionV2 | null>(() => loadDemoSession());
   const [resumeOpen, setResumeOpen] = useState(false);
   const [restartBusy, setRestartBusy] = useState(false);
+  const [guidedFocus, setGuidedFocus] = useState<ActiveGuidedFocusIntent | null>(null);
+  const [guidedFocusStatus, setGuidedFocusStatus] = useState<'idle' | 'locating' | 'found' | 'missing'>('idle');
+  const guidedFocusSequence = useRef(0);
   const startupChecked = useRef(false);
 
   const goRoute = useCallback((target: AppRoute, options: { replace?: boolean } = {}) => {
@@ -147,14 +159,43 @@ export function App() {
 
   useEffect(() => {
     if (!demoSession || stage !== 'app') return;
+    const routeSelection = selectionFromRoute(route);
+    const preserveGuidedScenario = demoSession.tour.active
+      && !!demoSession.selected.scenarioKey
+      && (route.page === 'payment-inbox' || route.page === 'payment-detail');
     dispatchDemo({
       type: 'NAVIGATE', runId: demoSession.runId,
-      route, selected: selectionFromRoute(route),
+      route,
+      selected: preserveGuidedScenario
+        ? { ...demoSession.selected, ...routeSelection }
+        : routeSelection,
     });
     // Route changes are the only trigger; the session event emitted by the
     // reducer must not create a navigation feedback loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname]);
+
+  const activateGuidedFocus = useCallback((intent: GuidedFocusIntent | null) => {
+    if (!intent) {
+      setGuidedFocus(null);
+      setGuidedFocusStatus('idle');
+      return;
+    }
+    guidedFocusSequence.current += 1;
+    const activeIntent = { ...intent, id: guidedFocusSequence.current };
+    setGuidedFocus(activeIntent);
+    setGuidedFocusStatus('locating');
+    // Routed pages can use this read-only command to reset local form state to
+    // the exact guided scope. It never clicks, signs or starts an API request.
+    window.dispatchEvent(new CustomEvent('vg-guided-prepare', { detail: activeIntent }));
+  }, []);
+  const clearGuidedFocus = useCallback(() => activateGuidedFocus(null), [activateGuidedFocus]);
+
+  useEffect(() => {
+    if (demoSession?.tour.active && !demoSession.tour.paused) return;
+    setGuidedFocus(null);
+    setGuidedFocusStatus('idle');
+  }, [demoSession?.runId, demoSession?.tour.active, demoSession?.tour.paused]);
 
   const enterDemo = useCallback((role: DemoRole) => {
     setDemoRole(role);
@@ -494,19 +535,29 @@ export function App() {
 
   const resumeDemo = useCallback(() => {
     if (!demoSession) { startFreshDemo(); return; }
-    const target = demoSession.tour.expectedRoute ?? demoSession.route;
     const step = demoSession.tour.step;
+    const prepared = deriveGuidedStepPreparation(demoSession, requests, step);
+    const missionStep = MISSION_STEPS[step];
+    const stepComplete = missionStep?.mission
+      ? isMissionComplete(demoSession, missionStep.mission, { strict: true })
+      : missionStep?.gate === 'audit-packets-created'
+        ? hasCompleteAuditPacketCoverage(demoSession)
+        : true;
+    const target = prepared?.route ?? demoSession.tour.expectedRoute ?? demoSession.route;
+    const role = prepared?.role ?? demoSession.tour.expectedRole ?? demoSession.role;
     let next = demoSessionReducer(demoSession, { type: 'RESUME_SESSION', runId: demoSession.runId });
     next = demoSessionReducer(next, {
       type: 'TOUR_STEP', runId: next.runId, step, route: target,
-      role: demoSession.tour.expectedRole ?? demoSession.role,
+      role,
+      selected: prepared?.selected ?? demoSession.selected,
     });
     saveDemoSession(next);
     setDemoSession(next);
     setResumeOpen(false);
-    enterDemo(next.role);
+    enterDemo(role);
     goRoute(target);
-  }, [demoSession, enterDemo, goRoute, startFreshDemo]);
+    if (prepared && !stepComplete) activateGuidedFocus(prepared);
+  }, [activateGuidedFocus, demoSession, enterDemo, goRoute, requests, startFreshDemo]);
 
   const restartDemo = useCallback(async () => {
     if (!demoSession || restartBusy) return;
@@ -842,6 +893,7 @@ export function App() {
                 <DelegateView
                   key={demoSession?.runId ?? 'no-demo-run'}
                   detailRequestId={route.page === 'payment-detail' ? route.requestId : undefined}
+                  guidedScenarioKey={demoSession?.tour.active ? demoSession.selected.scenarioKey : undefined}
                 />
               )}
               {['policies', 'policy-new', 'policy-detail', 'policy-new-version'].includes(route.page) && <PoliciesView />}
@@ -873,12 +925,22 @@ export function App() {
           dispatch={dispatchDemo}
           currentRoute={route}
           currentRole={demoRole}
+          requests={requests}
           onNavigate={({ route: target, role }) => {
             if (role && role !== demoRole) enterDemo(role);
             goRoute(target);
           }}
           onRefresh={refresh}
+          onGuide={activateGuidedFocus}
+          guideStatus={guidedFocus?.step === demoSession.tour.step ? guidedFocusStatus : 'idle'}
           onClose={() => undefined}
+        />
+      )}
+      {guidedFocus && demoSession?.tour.active && !demoSession.tour.paused && (
+        <GuidedActionPointer
+          intent={guidedFocus}
+          onStatusChange={setGuidedFocusStatus}
+          onComplete={clearGuidedFocus}
         />
       )}
       {resumeOpen && demoSession && (

@@ -34,6 +34,29 @@ Attempt may be replaced only through an explicit retry after `Expired` or an
 authenticated timeout cancellation. Unknown or temporarily unavailable decision
 origin stays attached to the current Request and cannot enable another spend.
 
+The Mission Drawer is an action handoff, not an automatic executor. Its primary
+button resolves the next step from the current run-bound Request or Packet,
+applies route, role and object selection together, then moves keyboard focus to
+one real control. Draft invoices select their fixed vendor, amount, purpose and
+mandate preset; an escalated Request opens the two-choice Safe decision group; a
+blocked Request opens its scoped decrypt action; disclosure preselects every
+eligible uncovered Request; and Audit opens a Packet ID bound to this run. The
+handoff never submits, decrypts, approves, rejects or writes a wallet transaction.
+The visitor must activate the highlighted control explicitly.
+
+The target is exposed through `aria-describedby` and a non-intercepting local
+coachmark. The drawer collapses after a successful handoff so it cannot cover the
+workspace, but remains expandable. Target discovery observes asynchronous route
+content for at most 2.5 seconds before reporting a recoverable loading state.
+Replacing a target during evidence reconciliation transfers focus and semantics
+to the replacement. Safe local transitions keep the same intent alive across
+Disclosure Review → Create and Audit Unlock → Review → per-Request disposition →
+next Packet. Consequential submit, decrypt, packet-create and Safe-decision
+activation ends that pointer and waits for real evidence. `Escape`, closing the
+tour or pausing the mission also removes it. Reduced-motion uses immediate
+scrolling and no coachmark entrance animation; forced-colors retains a visible
+system outline.
+
 ## Visual direction
 
 The operations desk uses the original VeilGuard visual identity rather than a
@@ -178,6 +201,10 @@ CI uses a 0.2 perceptual threshold with at most 0.003 differing-pixel ratio.
 
 ### 2026-07-19
 
+- Upgraded the Mission Drawer into a run-aware action handoff: it atomically
+  opens and preselects the exact Invoice, Request, disclosure scope or Audit
+  Packet, then points keyboard and visual focus at the real next control without
+  executing that control for the visitor.
 - Froze strict guided Attempt bindings, added symmetric user-attested Approve and
   Reject recovery, and routed completed Invoices to their bound Request instead
   of allowing a duplicate `requestSpend`.

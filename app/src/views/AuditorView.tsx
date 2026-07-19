@@ -165,9 +165,12 @@ export function AuditorView() {
     [packets, account],
   );
   const packet = useMemo(
-    () => mine.find((candidate) => candidate.id === selected) ?? mine[mine.length - 1],
+    () => selected === null
+      ? mine[mine.length - 1]
+      : mine.find((candidate) => candidate.id === selected),
     [mine, selected],
   );
+  const selectedPacketUnavailable = selected !== null && !packetsLoading && !packetsError && !packet;
   const storageKey = account && packet ? reviewStorageKey(account, packet.id) : '';
 
   useEffect(() => {
@@ -194,6 +197,7 @@ export function AuditorView() {
   const gateReady = packetUnlocked && handleShapeValid && manifestMatches && terminalReconciled && allDispositioned && hasRequestScope;
   const reviewedCount = packet?.requestIds.filter((id) => reviews[String(id)] === 'reviewed').length ?? 0;
   const flaggedCount = packet?.requestIds.filter((id) => reviews[String(id)] === 'flagged').length ?? 0;
+  const firstPendingReviewIndex = packet?.requestIds.findIndex((id) => !reviews[String(id)]) ?? -1;
 
   const session = loadDemoSession();
   const demoRequestIds = session
@@ -248,6 +252,9 @@ export function AuditorView() {
     && bundleCoverage
     && bundleChecks.length > 0
     && bundleChecks.every((check) => check.ready);
+  const nextIncompleteBundlePacket = gateReady
+    ? bundleChecks.find((check) => check.packet.id !== packet?.id && !check.ready)?.packet
+    : undefined;
 
   useEffect(() => {
     if (!account || !packet || !bundleGateReady) return;
@@ -435,6 +442,20 @@ export function AuditorView() {
           <p className="muted">The finance admin must create an on-chain packet for <span className="mono">{short(account)}</span>. This workspace does not synthesize sample packets.</p>
         </div>
       )}
+      {selectedPacketUnavailable && mine.length > 0 && (
+        <div className="card audit-empty" role="status">
+          <h3>Packet #{String(selected)} is unavailable to this auditor</h3>
+          <p className="muted">The requested packet was not returned in this auditor's granted on-chain scope. VeilGuard will not substitute another packet.</p>
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() => {
+              setSelected(null);
+              window.location.hash = formatAppRoute({ page: 'audit-packets' });
+            }}
+          >Open granted packet list</button>
+        </div>
+      )}
 
       {packet && (
         <Workbench className="audit-workbench">
@@ -468,13 +489,38 @@ export function AuditorView() {
                 <span className={`pill ${gateReady ? 'ok' : packetUnlocked ? 'warn' : 'dim'}`}>
                   {gateReady ? 'REVIEW COMPLETE' : packetUnlocked ? 'REVIEW IN PROGRESS' : 'LOCKED'}
                 </span>
-                <button type="button" className="btn primary" disabled={bulk || packetUnlocked} onClick={unlockPacket}>
+                <button
+                  type="button"
+                  className="btn primary"
+                  data-guided-action={!packetUnlocked ? 'mission-audit' : undefined}
+                  data-guided-instruction="Click “Unlock disclosed values”"
+                  data-guided-follow={!packetUnlocked ? 'true' : undefined}
+                  disabled={bulk || packetUnlocked}
+                  onClick={unlockPacket}
+                >
                   {bulk ? <><span className="spin" /> Unlocking {bulkDone}/{packet.snapshotHandles.length}</> : packetUnlocked ? 'Values unlocked' : 'Unlock disclosed values'}
                 </button>
               </div>
             </header>
 
             <WorkbenchTabs tabs={tabs} active={tab} onChange={setTab} label={`Packet ${packet.id} sections`} idPrefix={`audit-${packet.id}`} />
+
+            {nextIncompleteBundlePacket && (
+              <section className="notice audit-bundle-handoff" aria-label="Continue the Launch Day Review bundle">
+                <div>
+                  <b>Packet #{String(packet.id)} is ready.</b>{' '}
+                  Continue with the remaining on-chain packet before the review bundle can complete.
+                </div>
+                <button
+                  type="button"
+                  className="btn primary"
+                  data-guided-action="mission-audit"
+                  data-guided-instruction={`Click “Continue to Packet #${nextIncompleteBundlePacket.id}”`}
+                  data-guided-follow="true"
+                  onClick={() => selectPacket(nextIncompleteBundlePacket.id)}
+                >Continue to Packet #{String(nextIncompleteBundlePacket.id)}</button>
+              </section>
+            )}
 
             <div id={`audit-${packet.id}-panel`} className="workbench-panel" role="tabpanel" aria-labelledby={`audit-${packet.id}-tab-${tab.toLowerCase()}`}>
               {tab === 'Overview' && (
@@ -532,7 +578,14 @@ export function AuditorView() {
                       <span><b>{flaggedCount}</b> follow-up</span>
                       <span><b>{packet.requestIds.length - reviewedCount - flaggedCount}</b> pending</span>
                     </div>
-                    <button type="button" className="btn" onClick={() => setTab('Requests')}>Review included requests</button>
+                    <button
+                      type="button"
+                      className="btn"
+                      data-guided-action={packetUnlocked && !allDispositioned ? 'mission-audit' : undefined}
+                      data-guided-instruction="Click “Review included requests”"
+                      data-guided-follow={packetUnlocked && !allDispositioned ? 'true' : undefined}
+                      onClick={() => setTab('Requests')}
+                    >Review included requests</button>
                   </section>
                 </div>
               )}
@@ -573,7 +626,14 @@ export function AuditorView() {
                                 </div>
                               </td>
                               <td>
-                                <div className="audit-review-actions" role="group" aria-label={`Review request ${requestId}`}>
+                                <div
+                                  className="audit-review-actions"
+                                  role="group"
+                                  aria-label={`Review request ${requestId}`}
+                                  data-guided-action={packetUnlocked && index === firstPendingReviewIndex ? 'mission-audit' : undefined}
+                                  data-guided-instruction={`Mark request #${requestId} Reviewed or Flag follow-up`}
+                                  data-guided-follow={packetUnlocked && index === firstPendingReviewIndex ? 'true' : undefined}
+                                >
                                   <button
                                     type="button"
                                     className={`btn small ${disposition === 'reviewed' ? 'audit-choice-active' : 'ghost'}`}

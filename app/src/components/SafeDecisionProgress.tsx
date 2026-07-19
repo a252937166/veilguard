@@ -179,14 +179,27 @@ export function SafeDecisionProgress({ flow }: { flow: SafeDecisionFlow }) {
 export function SafeDecisionDock({
   flow,
   children,
+  guidedActionId,
+  guidedInstruction,
+  guidedFollow,
 }: {
   flow?: SafeDecisionFlow | null;
   children: ReactNode;
+  guidedActionId?: string;
+  guidedInstruction?: string;
+  guidedFollow?: boolean;
 }) {
   return (
     <section className="safe-decision-dock" aria-label="Safe decision actions">
       {flow && <SafeDecisionProgress flow={flow} />}
-      <div className="safe-decision-dock__actions">{children}</div>
+      <div
+        className="safe-decision-dock__actions"
+        role="group"
+        aria-label="Approve or return the reserved payment"
+        data-guided-action={guidedActionId}
+        data-guided-instruction={guidedInstruction}
+        data-guided-follow={guidedFollow ? 'true' : undefined}
+      >{children}</div>
     </section>
   );
 }

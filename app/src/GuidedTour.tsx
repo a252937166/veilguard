@@ -12,12 +12,15 @@ import {
   type DemoSessionV2,
 } from './demo-session';
 import { loadMissions, type MissionKey } from './missions';
+import { scenarioByKey, type DemoScenarioKey } from './demo-scenarios';
+import { Icon } from './icons';
 import {
   legacyTabToRoute,
   routeToLegacyTab,
   sameAppRoute,
   type AppRoute,
   type LegacyTabName,
+  type RouteObjectSelection,
 } from './routes';
 
 export type TabName = LegacyTabName;
@@ -47,7 +50,7 @@ export const MISSION_STEPS: readonly MissionStep[] = [
   },
   {
     title: 'CloudNode · routine payment',
-    tab: 'Delegate', route: { page: 'payment-inbox' }, target: 'scenario-routine', mission: 'routine',
+    tab: 'Delegate', route: { page: 'payment-inbox' }, role: 'delegate', target: 'scenario-routine', mission: 'routine',
     body: 'Open the 25 cUSDC infrastructure invoice, review its request detail, then submit it. The TEE evaluates three private rules and the admissible payment executes.',
     waiting: 'Waiting for the executed request evidence…',
     mobileActionLabel: 'Submit the CloudNode payment',
@@ -55,7 +58,7 @@ export const MISSION_STEPS: readonly MissionStep[] = [
   },
   {
     title: 'ShieldOps · choose the consequence',
-    tab: 'Delegate', route: { page: 'payment-inbox' }, target: 'scenario-approval', mission: 'approval',
+    tab: 'Delegate', route: { page: 'payment-inbox' }, role: 'delegate', target: 'scenario-approval', mission: 'approval',
     body: 'Open the 60 cUSDC emergency security request. Once the TEE reserves it in escrow, choose Approve or Reject. Your choice drives a real Safe 2-of-2 execution or refund.',
     hint: 'The constrained demo endpoint performs the selected committee action; the browser never receives a Safe owner key.',
     waiting: 'Waiting for your decision and its Safe receipt…',
@@ -64,7 +67,7 @@ export const MISSION_STEPS: readonly MissionStep[] = [
   },
   {
     title: 'Atlas Contractor · inspect the block',
-    tab: 'Delegate', route: { page: 'payment-inbox' }, target: 'scenario-violation', mission: 'violation',
+    tab: 'Delegate', route: { page: 'payment-inbox' }, role: 'delegate', target: 'scenario-violation', mission: 'violation',
     body: 'Submit the 600 cUSDC new-vendor invoice. After the TEE blocks it, decrypt the private reason as the Delegate and compare it with the public chain view.',
     hint: 'The isolated violation delegate absorbs the anti-probing cooldown without freezing the other requests.',
     waiting: 'Waiting for the block and private-reason disclosure…',
@@ -97,27 +100,217 @@ export const MISSION_STEPS: readonly MissionStep[] = [
   },
 ] as const;
 
+export type GuidedFocusIntent = {
+  step: number;
+  route: AppRoute;
+  role?: DemoRole;
+  selected: RouteObjectSelection;
+  targetId: string;
+  instruction: string;
+};
+
+export type ActiveGuidedFocusIntent = GuidedFocusIntent & { id: number };
+
+export type GuidedStepPreparation = GuidedFocusIntent & {
+  label: string;
+  detail: string;
+  phase: 'ready' | 'waiting';
+};
+
+const PAYMENT_MISSIONS = new Set<DemoMissionKey>(['routine', 'approval', 'violation']);
+
+/**
+ * Resolve the next safe guided action from run-bound evidence. This never
+ * submits, signs or decrypts: it only names the exact object and control that
+ * the user must act on next.
+ */
+export function deriveGuidedStepPreparation(
+  session: DemoSessionV2,
+  requests: readonly SpendRequest[],
+  step: number,
+): GuidedStepPreparation | null {
+  const bounded = Math.min(Math.max(step, 0), MISSION_STEPS.length - 1);
+  const missionStep = MISSION_STEPS[bounded];
+
+  if (missionStep.mission && PAYMENT_MISSIONS.has(missionStep.mission)) {
+    const mission = missionStep.mission as DemoScenarioKey;
+    const scenario = scenarioByKey(mission);
+    const progress = session.missions[mission];
+    const request = progress.requestId
+      ? requests.find((candidate) => String(candidate.id) === progress.requestId)
+      : undefined;
+    const selected: RouteObjectSelection = {
+      scenarioKey: mission,
+      ...(progress.requestId ? { requestId: progress.requestId } : {}),
+    };
+    const base = {
+      step: bounded,
+      role: 'delegate' as const,
+      selected,
+      targetId: `mission-${mission}`,
+    };
+
+    if (!progress.requestId) {
+      return {
+        ...base,
+        route: { page: 'payment-inbox' },
+        phase: 'ready',
+        label: `Open ${scenario.vendor} invoice`,
+        instruction: `Click “Submit confidential payment”`,
+        detail: `Selects ${scenario.vendor} · ${scenario.amount} cUSDC · ${scenario.purpose}, then points to the submit button.`,
+      };
+    }
+
+    if (mission === 'approval' && request?.state === 3) {
+      return {
+        ...base,
+        route: { page: 'payment-detail', requestId: progress.requestId },
+        phase: 'ready',
+        label: `Open decision for request #${progress.requestId}`,
+        instruction: 'Choose “Approve payment” or “Reject & return funds”',
+        detail: 'Opens the reserved ShieldOps request and points to the real Safe 2-of-2 decision controls.',
+      };
+    }
+
+    if (mission === 'violation' && request?.state === 4 && !progress.reasonDecrypted) {
+      return {
+        ...base,
+        route: { page: 'payment-detail', requestId: progress.requestId },
+        phase: 'ready',
+        label: `Open blocked request #${progress.requestId}`,
+        instruction: 'Click “Decrypt the private reason”',
+        detail: 'Opens the run-bound Atlas request and points to the authorised Delegate-only disclosure action.',
+      };
+    }
+
+    if (mission === 'approval' && request?.state === 2) {
+      return {
+        ...base,
+        route: { page: 'payment-inbox' },
+        phase: 'ready',
+        label: 'Recover decision evidence',
+        instruction: 'Click “Recover decision evidence”',
+        detail: `Selects ShieldOps request #${progress.requestId}; recovery reuses its authenticated server attestation and never resubmits payment.`,
+      };
+    }
+
+    if (mission === 'approval' && request?.state === 5) {
+      return {
+        ...base,
+        route: { page: 'payment-inbox' },
+        phase: 'ready',
+        label: `Open cancelled request #${progress.requestId}`,
+        instruction: 'Use the invoice action after receipt origin is verified',
+        detail: 'Selects the cancelled ShieldOps attempt. Its run-bound attestation decides whether the safe next action is Recover, Retry or Open; timeout and unknown receipts are never presented as a user Reject.',
+      };
+    }
+
+    if (request?.state === 6) {
+      return {
+        ...base,
+        route: { page: 'payment-inbox' },
+        phase: 'ready',
+        label: `Retry ${scenario.vendor} invoice`,
+        instruction: `Click “Retry invoice”`,
+        detail: `Selects the explicitly expired request #${progress.requestId}; the existing duplicate-submission guard remains active.`,
+      };
+    }
+
+    return {
+      ...base,
+      route: { page: 'payment-detail', requestId: progress.requestId },
+      phase: 'waiting',
+      label: `Open current request #${progress.requestId}`,
+      instruction: 'Use “Refresh evidence” to reconcile the latest chain state',
+      detail: `Opens the exact run-bound ${scenario.vendor} request. No new payment or wallet action is created.`,
+    };
+  }
+
+  if (missionStep.gate === 'audit-packets-created') {
+    return {
+      step: bounded,
+      route: { page: 'disclosure-builder' },
+      role: 'delegate',
+      selected: {},
+      targetId: 'mission-disclosure',
+      instruction: 'Click “Review selected scope”',
+      phase: 'ready',
+      label: 'Open preselected disclosure scope',
+      detail: 'Selects every uncovered, terminal request in this run and points to the irreversible-scope review.',
+    };
+  }
+
+  if (missionStep.mission === 'audit') {
+    const runPacketIds = session.missions.audit.packetIds;
+    const packetId = session.selected.packetId && runPacketIds.includes(session.selected.packetId)
+      ? session.selected.packetId
+      : runPacketIds[0];
+    return {
+      step: bounded,
+      route: packetId ? { page: 'audit-detail', packetId } : { page: 'audit-packets' },
+      role: 'auditor',
+      selected: packetId ? { packetId } : {},
+      targetId: 'mission-audit',
+      instruction: packetId ? 'Click “Unlock disclosed values”' : 'Refresh the packet index',
+      phase: packetId ? 'ready' : 'waiting',
+      label: packetId ? `Open run packet #${packetId}` : 'Open Audit Packet Review',
+      detail: packetId
+        ? 'Opens a packet bound to this Launch Day run and points to its next incomplete review control.'
+        : 'The run has no verified packet ID yet; the packet list remains read-only until chain evidence arrives.',
+    };
+  }
+
+  return null;
+}
+
+export function isMissionRouteCompatible(
+  step: MissionStep,
+  route: AppRoute,
+  session: DemoSessionV2,
+): boolean {
+  if (sameAppRoute(route, session.tour.expectedRoute ?? step.route)) return true;
+  if (step.mission && PAYMENT_MISSIONS.has(step.mission)) {
+    return route.page === 'payment-inbox'
+      || (route.page === 'payment-detail'
+        && session.missions[step.mission].requestId === route.requestId);
+  }
+  if (step.gate === 'audit-packets-created') return route.page === 'disclosure-builder';
+  if (step.mission === 'audit') {
+    return route.page === 'audit-packets'
+      || (route.page === 'audit-detail' && session.missions.audit.packetIds.includes(route.packetId));
+  }
+  return sameAppRoute(route, step.route);
+}
+
 type DrawerSurfaceProps = {
   step: number;
   paused: boolean;
   missionDone: boolean;
   checking: boolean;
   checkResult: ChainRefreshResult | null;
+  preparation: GuidedStepPreparation | null;
+  guideStatus: 'idle' | 'locating' | 'found' | 'missing';
   onBack: () => void;
   onNext: () => void;
+  onPrepare: () => void;
   onReturn: () => void;
   onCheckEvidence: () => void;
   onClose: () => void;
 };
 
 function DrawerSurface({
-  step, paused, missionDone, checking, checkResult, onBack, onNext, onReturn, onCheckEvidence, onClose,
+  step, paused, missionDone, checking, checkResult, preparation, guideStatus,
+  onBack, onNext, onPrepare, onReturn, onCheckEvidence, onClose,
 }: DrawerSurfaceProps) {
   const s = MISSION_STEPS[step];
   const gated = !!(s.mission || s.gate) && !missionDone;
   const actionStep = !!(s.mission || s.gate);
-  const [expanded, setExpanded] = useState(false);
-  useEffect(() => setExpanded(false), [step]);
+  const [expanded, setExpanded] = useState(true);
+  useEffect(() => setExpanded(true), [step]);
+  useEffect(() => {
+    if (guideStatus === 'missing') setExpanded(true);
+    else if (guideStatus === 'found' && actionStep && !paused) setExpanded(false);
+  }, [actionStep, guideStatus, paused]);
   const compactTitle = missionDone
     ? `${s.title} complete`
     : s.mobileActionLabel ?? s.title;
@@ -167,7 +360,7 @@ function DrawerSurface({
             />
           ))}
         </div>
-        <div className="tour-step-of">Launch Day · {step + 1} / {MISSION_STEPS.length}</div>
+        <div className="tour-step-of">{step + 1} / {MISSION_STEPS.length}</div>
         {actionStep && !paused && (
           <button
             type="button"
@@ -201,14 +394,31 @@ function DrawerSurface({
           <button className="btn small primary" onClick={onReturn}>Return to current mission</button>
         ) : (
           <>
-            <button className="btn small ghost" disabled={step === 0} onClick={onBack}>← Back</button>
             {gated && (
-              <span className="muted tour-wait" role="status">
-                <span className="spin" aria-hidden="true" /> {s.waiting ?? 'Waiting for on-chain evidence…'}
+              <div className={`tour-next-action ${preparation?.phase ?? 'waiting'}`} role="status">
+                <span className="tour-next-icon" aria-hidden="true">
+                  {preparation?.phase === 'ready' ? <Icon name="tour" size={16} /> : <span className="spin" />}
+                </span>
+                <span>
+                  <b>{preparation?.phase === 'ready' ? 'Ready · your action is needed' : 'Waiting for chain evidence'}</b>
+                  <small>{preparation?.detail ?? s.waiting ?? 'Waiting for on-chain evidence…'}</small>
+                </span>
+              </div>
+            )}
+            {gated && preparation && (
+              <button className="btn small primary tour-prepare" onClick={() => { setExpanded(false); onPrepare(); }}>
+                <Icon name="tour" size={15} /> {preparation.label}
+              </button>
+            )}
+            {gated && guideStatus !== 'idle' && (
+              <span className={`tour-guide-result ${guideStatus === 'missing' ? 'bad' : ''}`} role={guideStatus === 'missing' ? 'alert' : 'status'}>
+                {guideStatus === 'locating' && 'Opening the object and locating its next control…'}
+                {guideStatus === 'found' && 'Next action highlighted · keyboard focus moved to the real control.'}
+                {guideStatus === 'missing' && 'The action is still loading. Use the button above to try locating it again.'}
               </span>
             )}
             {gated && (
-              <button className="btn small ghost tour-recheck" disabled={checking} onClick={onCheckEvidence}>
+              <button className="btn small ghost tour-recheck" hidden={preparation?.phase !== 'waiting'} disabled={checking} onClick={onCheckEvidence}>
                 {checking ? <><span className="spin" aria-hidden="true" /> Checking chain…</> : checkResult?.status === 'failed' ? 'Retry chain check' : 'Check chain state'}
               </button>
             )}
@@ -220,6 +430,7 @@ function DrawerSurface({
             {!gated && actionStep && missionDone && (
               <span className="status-badge ok" role="status">Evidence confirmed</span>
             )}
+            <button className="btn small ghost" disabled={step === 0} onClick={onBack}>← Back</button>
             {!gated && step < MISSION_STEPS.length - 1 && (
               <button className="btn small primary" onClick={onNext}>{s.nextLabel ?? 'Continue'}</button>
             )}
@@ -239,9 +450,12 @@ export type MissionDrawerProps = {
   dispatch: (action: DemoSessionAction) => void;
   currentRoute: AppRoute;
   currentRole: DemoRole | null;
+  requests: SpendRequest[];
   /** Route + role must be applied as one navigation intent by the App shell. */
   onNavigate: (target: { route: AppRoute; role?: DemoRole }) => void;
   onRefresh: () => Promise<ChainRefreshResult>;
+  onGuide: (intent: GuidedFocusIntent | null) => void;
+  guideStatus?: 'idle' | 'locating' | 'found' | 'missing';
   onClose: () => void;
 };
 
@@ -250,34 +464,41 @@ export type MissionDrawerProps = {
  * request/packet evidence and pauses after the user leaves an arrived target.
  */
 export function MissionDrawer({
-  session, dispatch, currentRoute, currentRole, onNavigate, onRefresh, onClose,
+  session, dispatch, currentRoute, currentRole, requests, onNavigate, onRefresh,
+  onGuide, guideStatus = 'idle', onClose,
 }: MissionDrawerProps) {
   const step = Math.min(Math.max(session.tour.step, 0), MISSION_STEPS.length - 1);
   const s = MISSION_STEPS[step];
   const arrived = useRef(false);
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<ChainRefreshResult | null>(null);
+  const preparation = deriveGuidedStepPreparation(session, requests, step);
   const missionDone = s.mission
     ? isMissionComplete(session, s.mission, { strict: true })
     : s.gate === 'audit-packets-created'
       ? hasCompleteAuditPacketCoverage(session)
       : true;
 
-  const enterStep = useCallback((nextStep: number) => {
+  const enterStep = useCallback((nextStep: number, guide = false) => {
     const bounded = Math.min(Math.max(nextStep, 0), MISSION_STEPS.length - 1);
     const target = MISSION_STEPS[bounded];
+    const prepared = deriveGuidedStepPreparation(session, requests, bounded);
+    const route = prepared?.route ?? target.route;
+    const role = prepared?.role ?? target.role;
     arrived.current = false;
     dispatch(guidedTourStepAction(session, {
       step: bounded,
-      route: target.route,
-      role: target.role,
+      route,
+      role,
+      selected: prepared?.selected,
     }));
-    onNavigate({ route: target.route, role: target.role });
-  }, [dispatch, onNavigate, session.runId]);
+    onGuide(guide && prepared ? prepared : null);
+    onNavigate({ route, role });
+  }, [dispatch, onGuide, onNavigate, requests, session]);
 
   useEffect(() => {
     if (session.tour.paused) return;
-    const routeMatches = sameAppRoute(currentRoute, s.route);
+    const routeMatches = isMissionRouteCompatible(s, currentRoute, session);
     const roleMatches = !s.role || currentRole === s.role;
     if (routeMatches && roleMatches) {
       arrived.current = true;
@@ -287,9 +508,13 @@ export function MissionDrawer({
         reason: routeMatches ? 'role-change' : 'navigation',
       });
     }
-  }, [currentRole, currentRoute, dispatch, s.role, s.route, session.runId, session.tour.paused]);
+  }, [currentRole, currentRoute, dispatch, s, session]);
 
   useEffect(() => setCheckResult(null), [step]);
+
+  useEffect(() => {
+    if (missionDone) onGuide(null);
+  }, [missionDone, onGuide]);
 
   const checkEvidence = async () => {
     if (checking) return;
@@ -308,7 +533,32 @@ export function MissionDrawer({
 
   const returnToMission = () => {
     dispatch({ type: 'RETURN_TO_MISSION', runId: session.runId });
-    onNavigate({ route: s.route, role: s.role });
+    if (preparation) {
+      dispatch(guidedTourStepAction(session, {
+        step,
+        route: preparation.route,
+        role: preparation.role,
+        selected: preparation.selected,
+      }));
+      onGuide(preparation);
+      onNavigate({ route: preparation.route, role: preparation.role });
+    } else {
+      onGuide(null);
+      onNavigate({ route: s.route, role: s.role });
+    }
+    arrived.current = false;
+  };
+
+  const prepareCurrent = () => {
+    if (!preparation) return;
+    dispatch(guidedTourStepAction(session, {
+      step,
+      route: preparation.route,
+      role: preparation.role,
+      selected: preparation.selected,
+    }));
+    onGuide(preparation);
+    onNavigate({ route: preparation.route, role: preparation.role });
     arrived.current = false;
   };
 
@@ -319,11 +569,15 @@ export function MissionDrawer({
       missionDone={missionDone}
       checking={checking}
       checkResult={checkResult}
+      preparation={preparation}
+      guideStatus={guideStatus}
       onBack={() => enterStep(step - 1)}
-      onNext={() => enterStep(step + 1)}
+      onNext={() => enterStep(step + 1, true)}
+      onPrepare={prepareCurrent}
       onReturn={returnToMission}
       onCheckEvidence={checkEvidence}
       onClose={() => {
+        onGuide(null);
         dispatch({ type: 'CLOSE_TOUR', runId: session.runId });
         onClose();
       }}
@@ -387,7 +641,10 @@ export function GuidedTour({
       const element = document.querySelector(`[data-tour="${s.target}"]`);
       if (element) {
         element.classList.add('tour-target');
-        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        element.scrollIntoView({
+          behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+          block: 'center',
+        });
       }
     }, 300);
     return () => {
@@ -420,8 +677,11 @@ export function GuidedTour({
       missionDone={missionDone}
       checking={false}
       checkResult={null}
+      preparation={null}
+      guideStatus="idle"
       onBack={() => setStep(Math.max(0, boundedStep - 1))}
       onNext={() => setStep(Math.min(MISSION_STEPS.length - 1, boundedStep + 1))}
+      onPrepare={() => navigate(s)}
       onReturn={() => { setPaused(false); arrived.current = false; navigate(s); }}
       onCheckEvidence={() => window.dispatchEvent(new CustomEvent('vg-refresh-requested'))}
       onClose={onClose}

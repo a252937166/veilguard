@@ -549,7 +549,18 @@ function hydrateSession(value: unknown): DemoSessionV2 | null {
   const lifecycle: DemoSessionLifecycle = ['active', 'paused', 'completed'].includes(raw.lifecycle ?? '')
     ? raw.lifecycle as DemoSessionLifecycle
     : 'active';
-  const selected = raw.selected && typeof raw.selected === 'object' ? raw.selected : {};
+  const rawSelected = raw.selected && typeof raw.selected === 'object'
+    ? raw.selected as RouteObjectSelection
+    : {};
+  const selected: RouteObjectSelection = {
+    ...(typeof rawSelected.requestId === 'string' ? { requestId: rawSelected.requestId } : {}),
+    ...(typeof rawSelected.policyId === 'string' ? { policyId: rawSelected.policyId } : {}),
+    ...(typeof rawSelected.packetId === 'string' ? { packetId: rawSelected.packetId } : {}),
+    ...(typeof rawSelected.flowId === 'string' ? { flowId: rawSelected.flowId } : {}),
+    ...(['routine', 'approval', 'violation'].includes(rawSelected.scenarioKey ?? '')
+      ? { scenarioKey: rawSelected.scenarioKey }
+      : {}),
+  };
   const session: DemoSessionV2 = {
     ...fresh,
     ...raw,

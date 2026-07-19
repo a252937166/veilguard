@@ -509,11 +509,47 @@ function sessionFor(fixture: VisualFixtureV1, surface: VisualSurface, role: 'del
   };
 }
 
-export async function installVisualFixture(page: Page, surface: VisualSurface) {
+export type VisualFixtureInstallOptions = {
+  guidedMission?: 'routine' | 'approval' | 'violation';
+};
+
+export async function installVisualFixture(
+  page: Page,
+  surface: VisualSurface,
+  options: VisualFixtureInstallOptions = {},
+) {
   const fixture = createVisualFixture(surface);
   const logs = visualLogs(fixture);
   const role = surface === 'audit-review' ? 'auditor' : 'delegate';
-  const session = surface === 'landing' ? null : sessionFor(fixture, surface, role);
+  const baseSession = surface === 'landing' ? null : sessionFor(fixture, surface, role);
+  const guidedStep = options.guidedMission
+    ? ({ routine: 1, approval: 2, violation: 3 } as const)[options.guidedMission]
+    : null;
+  const session = baseSession && options.guidedMission && guidedStep
+    ? {
+        ...baseSession,
+        currentMission: options.guidedMission,
+        route: { page: 'payment-inbox' },
+        // Begin on a deliberately different invoice. The E2E assertion proves
+        // the Launch handoff changes both the route and selected object.
+        selected: { scenarioKey: 'approval', requestId: '2' },
+        missions: {
+          ...baseSession.missions,
+          [options.guidedMission]: {
+            ...baseSession.missions[options.guidedMission],
+            status: 'active',
+            ...(options.guidedMission === 'violation' ? { reasonDecrypted: false } : {}),
+          },
+        },
+        tour: {
+          active: true,
+          step: guidedStep,
+          paused: false,
+          expectedRoute: { page: 'payment-inbox' },
+          expectedRole: 'delegate',
+        },
+      }
+    : baseSession;
   const unexpectedNetwork: string[] = [];
 
   const disclosedValues = Object.fromEntries([
@@ -580,6 +616,7 @@ export async function installVisualFixture(page: Page, surface: VisualSurface) {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
+          ok: true,
           requestId: 2,
           chainState: 2,
           origin: 'user',
