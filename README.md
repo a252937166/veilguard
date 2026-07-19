@@ -170,6 +170,15 @@ be resumed. Restart is refused until any old pending escalation has been really
 cancelled and its escrow refund confirmed. The public view never receives
 plaintext amounts, policy values or blocked reasons.
 
+Each guided Invoice owns one immutable Attempt once its mission is strictly
+complete. A newer Request with the same run memo cannot replace that Request ID
+or erase its receipt, decision or disclosure identity. An incomplete Attempt is
+retryable only after an authenticated timeout cancellation or an on-chain
+`Expired` state; an unavailable decision attestation remains recoverable and is
+never treated as permission to submit again. Completed Invoice actions open the
+bound Request Detail, while “Start a new demo run” always enters the same guarded
+Restart flow rather than clearing browser state directly.
+
 Payment submission acknowledges the first click immediately and reports the
 single truthful Preflight → Encrypt → Submit → Private check → Publish result
 flow. The transaction hash is persisted at broadcast time; refresh recovery stays
@@ -219,6 +228,22 @@ handoff unlocks only after CloudNode, ShieldOps and Atlas Contractor are all
 covered. Packets are still grouped by mandate and the displayed bundle remains a
 UI aggregate rather than a fabricated contract object.
 
+A connected Finance Admin's complete multi-mandate packet loop holds one
+resource-scoped Operation Coordinator lease for its wallet from the first nonce
+read through the last receipt, reinforced by an origin-wide Web Lock. Conflicting
+wallet operations remain on Review and perform no write. Immediately before
+`wallet_writeContract`, the app durably records an unknown-signature marker and
+starting block. A reload therefore cannot open a second prompt: it must recover a
+unique matching `AuditPacketCreated` transaction from chain. A rejection caught
+by the still-open page clears the pre-broadcast marker; after reload, an unknown
+outcome has no user-asserted clear path and requires manual chain reconciliation.
+A broadcast hash is a non-discardable recovery pointer and is checked against the
+receipt, the unique event and `getAuditPacket`. Only a reverted receipt clears
+that group for a new signature; fully verified success is archived before a new
+scope can begin.
+Guided facilitated creation continues to use the independent server-side Admin
+mutex and never claims the browser wallet resource.
+
 Policies expose the complete authority model without publishing privileged keys:
 the connected Finance Admin may propose a new encrypted mandate or replacement
 Draft and pause the module; a current Safe owner may activate, retire or resume
@@ -237,7 +262,7 @@ The journal stores the first observed approval timestamp plus terminal decision
 receipts, so the three-minute window and idempotent retries survive a provisioner
 restart. The OS temporary-directory default is suitable only for local development.
 
-### Latest production release gate
+### Historical production acceptance
 
 The 2026-07-19 release gate executed both visitor-selectable outcomes as separate
 run-bound requests on the deployed threshold-2 Safe; these are transaction
@@ -249,10 +274,35 @@ receipts, not health-check results or client-side completion flags:
 | Reject | #37 | state 5 · `cancelEscalated` · `EscalationCancelled` · `origin:user` | [`0x53aaf5…8c75`](https://sepolia.etherscan.io/tx/0x53aaf51e5874ea929740b90781f2609dca259edd6e351cf7365fb8ed6fa28c75) |
 
 Both receipts target the deployed Safe, call the VeilGuard module with operation
-0, and carry 130 signature bytes (two 65-byte owner signatures). The opt-in
-Playwright gate is disabled in ordinary CI and can be invoked only with
-`VEILGUARD_LIVE_E2E=1`; it records run/request recovery pointers and disables
-automatic retries so a failed assertion cannot duplicate a testnet decision.
+0, and carry 130 signature bytes (two 65-byte owner signatures). They are
+historical acceptance evidence for this PR, not a claim that the new manual Gate
+has already run.
+
+### Manual Production Release Gate
+
+`.github/workflows/production-release-gate.yml` is intentionally separate from
+ordinary pull-request CI. It becomes manually dispatchable only after the
+workflow exists on the default branch. Before either live action it requires the
+explicit mutation confirmation and verifies that the production UI footer SHA
+equals the selected commit. The blocking order is the 17-test local Nox suite,
+one `live-sepolia` desktop Approve run, then one independent Reject run; neither
+action retries automatically and each has a 15-minute ceiling.
+
+The Actions runner receives no Safe owner or Finance Admin private key. It calls
+only the bounded production API, while keys remain in the production service.
+Each action emits versioned JSON, trace/report files and Etherscan links; the
+final manifest is retained for 90 days. If an assertion fails after broadcast,
+inspect the recovery artifact before any manual rerun instead of blindly creating
+another request.
+
+Ordinary desktop/mobile Playwright never collects the live file. It runs only
+against the local app and includes deterministic dark/reduced-motion visual
+baselines for Landing, Payments, Request Detail, Approval Decision, Disclosure
+Builder and Audit Review at 1366×768 and 390×844. Expected images are reviewed
+and committed; CI uses `threshold: 0.2` and `maxDiffPixelRatio: 0.003` and never
+updates them automatically. The public client uses only browser-CORS-verified
+PublicNode, dRPC and Tenderly endpoints; historical log reads use dRPC and
+Tenderly.
 
 ## Security & trust model
 

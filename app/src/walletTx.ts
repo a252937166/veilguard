@@ -24,11 +24,20 @@ export async function walletWrite(opts: {
   args: readonly unknown[];
   /** live status line updater (flowbar) */
   onHint?: (msg: string) => void;
+  /** Called after gas preflight and immediately before the wallet RPC opens. */
+  onRequestStarted?: () => void;
   /** wallet-popup hints only make sense for injected wallets, not demo local keys */
   injected?: boolean;
+  /**
+   * Hard wallet-confirmation timeout. Set to 0 for operations where an
+   * unresolved injected-wallet request must keep its global wallet lease.
+   */
   timeoutMs?: number;
 }): Promise<`0x${string}`> {
-  const { account, address, abi, functionName, args, onHint, injected = true, timeoutMs = 150_000 } = opts;
+  const {
+    account, address, abi, functionName, args, onHint, onRequestStarted,
+    injected = true, timeoutMs = 150_000,
+  } = opts;
 
   // 1) pre-flight on our RPC: early revert detection + a gas limit for the wallet
   const gas = await publicClient.estimateContractGas({
@@ -47,17 +56,21 @@ export async function walletWrite(opts: {
     ), 40_000));
   }
   try {
-    const hash = await Promise.race([
-      wallet.writeContract({
-        address, abi: abi as Abi, functionName: functionName as any, args: args as any,
-        gas: (gas * 125n) / 100n,
-        chain: wallet.chain, account: wallet.account!,
-      }),
-      new Promise<never>((_, rej) => timers.push(setTimeout(
-        () => rej(new Error('wallet confirmation timed out — open your wallet from the toolbar icon and check for a pending request. If you approve it later, the transaction still goes through.')),
-        timeoutMs,
-      ))),
-    ]);
+    onRequestStarted?.();
+    const walletRequest = wallet.writeContract({
+      address, abi: abi as Abi, functionName: functionName as any, args: args as any,
+      gas: (gas * 125n) / 100n,
+      chain: wallet.chain, account: wallet.account!,
+    });
+    const hash = timeoutMs > 0
+      ? await Promise.race([
+          walletRequest,
+          new Promise<never>((_, rej) => timers.push(setTimeout(
+            () => rej(new Error('wallet confirmation timed out — open your wallet from the toolbar icon and check for a pending request. If you approve it later, the transaction still goes through.')),
+            timeoutMs,
+          ))),
+        ])
+      : await walletRequest;
     console.info(`[walletTx] ${functionName} confirmed in wallet after ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     return hash;
   } finally {

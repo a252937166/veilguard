@@ -122,11 +122,13 @@ export function bindMissionRequest(
   mission: Exclude<MissionKey, 'audit'>,
   requestId: string | bigint | number,
   runId = getOrCreateDemoSession().runId,
+  options: { replaceRetryableAttempt?: boolean } = {},
 ): DemoSessionV2 {
   const session = getOrCreateDemoSession();
   if (runId !== session.runId) return session;
   const next = demoSessionReducer(session, {
     type: 'BIND_REQUEST', runId, mission, requestId: String(requestId),
+    ...(options.replaceRetryableAttempt ? { replaceRetryableAttempt: true } : {}),
   });
   saveDemoSession(next);
   emit(next);

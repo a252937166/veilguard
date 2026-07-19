@@ -48,6 +48,16 @@ export async function fetchDemoDecisionAttestation(
   }
 }
 
+export function isAttestedUserDecision(
+  attestation: DemoDecisionAttestation | undefined,
+  action: 'approve' | 'reject',
+  chainState: 2 | 5,
+): boolean {
+  return attestation?.origin === 'user'
+    && attestation.action === action
+    && attestation.chainState === chainState;
+}
+
 export function isAttestedUserReject(attestation: DemoDecisionAttestation | undefined): boolean {
-  return attestation?.origin === 'user' && attestation.action === 'reject' && attestation.chainState === 5;
+  return isAttestedUserDecision(attestation, 'reject', 5);
 }

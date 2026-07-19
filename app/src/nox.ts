@@ -23,10 +23,7 @@ export function getActiveProvider(): Eip1193Provider | undefined {
 const RPCS = [
   RPC_URL, // publicnode
   'https://sepolia.drpc.org',
-  'https://ethereum-sepolia.blockpi.network/v1/rpc/public',
-  'https://endpoints.omniatech.io/v1/eth/sepolia/public',
   'https://gateway.tenderly.co/public/sepolia',
-  'https://rpc.sepolia.org',
 ];
 
 export const publicClient: PublicClient = createPublicClient({

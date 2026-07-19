@@ -27,6 +27,13 @@ does not complete until its reason is explicitly decrypted. Evidence may mark a
 mission complete, but navigation never advances by timer: the user keeps the
 Receipt, Privacy Lens or packet result until they explicitly continue.
 
+Each guided Invoice has one strict Attempt invariant. Once a mission is complete,
+its `requestId` is immutable: reducer actions, recovery scans and newer same-run
+Requests must leave that binding and its evidence untouched. An incomplete
+Attempt may be replaced only through an explicit retry after `Expired` or an
+authenticated timeout cancellation. Unknown or temporarily unavailable decision
+origin stays attached to the current Request and cannot enable another spend.
+
 ## Visual direction
 
 The operations desk uses the original VeilGuard visual identity rather than a
@@ -84,6 +91,12 @@ and the transaction hash appears as soon as broadcast returns it.
   validates and writes the fixed-Auditor packet. A connected real Finance Admin
   signs its own packet action directly. Neither path implies that the Delegate
   holds an Admin key.
+- A connected Finance Admin holds one `audit-packet-create` Operation Coordinator
+  lease on `wallet:<account>` for the complete mandate-group loop, plus an
+  origin-wide Web Lock for cross-tab exclusion. Route changes and component
+  unmounts cannot release that wallet nonce while a receipt is pending.
+  Facilitated guided creation uses the server Admin mutex instead and does not
+  claim a browser wallet resource.
 - Finance Admin may propose encrypted drafts and tighten with `pauseAll`. Safe
   2-of-2 activates, retires or resumes. Finance Admin rotation remains a managed
   Safe/deployment operation and is not added to the public automatic co-sign list.
@@ -104,9 +117,48 @@ retry the idempotent endpoint.
 State 5 proves cancellation and refund, not who initiated it. The UI upgrades it
 to a user Reject only after the read-only decision endpoint validates the same
 run-bound request against a persisted user receipt; timeout and unknown origins
-remain neutral. Likewise, an Admin disclosure checkpoint is only a recovery
-pointer: receipt, `AuditPacketCreated` fields and `getAuditPacket` scope must all
-match before the bundle can be shown as created or advance a mission.
+remain neutral. State 2 similarly restores an Approve mission only when the
+attestation proves `origin=user`, `action=approve` and `chainState=2`. Likewise,
+an Admin disclosure checkpoint is only a recovery pointer: receipt,
+`AuditPacketCreated` fields and `getAuditPacket` scope must all match before the
+bundle can be shown as created or advance a mission. A broadcast hash cannot be
+discarded or overwritten by an auditor/scope change; only an explicitly reverted
+receipt clears its group for a new signature. Before the injected-wallet RPC is
+opened, the app durably saves `signaturePendingAt` and `signatureStartBlock`.
+After reload, that unknown outcome blocks another signature and is reconciled
+only by one exact on-chain event/packet/transaction match. A rejection caught by
+the still-open page may clear the pre-broadcast marker; after reload there is no
+user-asserted clear path because the old prompt may still be approved later.
+That case requires manual chain reconciliation. Verified success is archived so
+a later, intentionally different scope is not locked by a stale completed
+checkpoint.
+
+The Invoice CTA is derived from that Attempt rather than from a page-local busy
+flag: strict completion opens the completed Request; state 1/3 opens the current
+Request; a blocked Request opens its scoped reason action; state 2 with missing
+receipt evidence recovers the decision; authenticated timeout or `Expired`
+retries; and no binding submits a new confidential payment. Free Play is the only
+surface that deliberately permits repeated submissions.
+
+## Release and visual gate
+
+Ordinary pull-request CI never mutates Sepolia. Its desktop and mobile projects
+exclude the live test file; the live mode contains exactly one serial
+`live-sepolia` desktop project with no retry. The manual Production Release Gate
+can be dispatched only after its workflow reaches the default branch. It first
+matches the deployed UI SHA to the selected commit, then treats the 17 Nox tests
+as blocking and executes one Approve followed by one Reject, each within 15
+minutes. GitHub stores no Safe/Admin key: the runner reaches only the bounded
+production decision API and retains versioned evidence JSON, Etherscan links,
+traces and a manifest for 90 days.
+
+The sharing identity is `VeilGuard — Confidential Operations Desk for Safe`.
+The versioned 1200×630 PNG depicts only the real Confidential payment → Safe
+2-of-2 decision → Selective disclosure flow. Twelve deterministic visual
+baselines cover Landing, Payments, Request Detail, Approval Decision, Disclosure
+Builder and Audit Review at desktop and mobile sizes. Fixtures are test-only,
+fixed to UTC/dark/reduced-motion, make no Sepolia calls, and mask only the UI SHA;
+CI uses a 0.2 perceptual threshold with at most 0.003 differing-pixel ratio.
 
 ## Authenticity boundaries
 
@@ -125,6 +177,16 @@ match before the bundle can be shown as created or advance a mission.
 ## Change log
 
 ### 2026-07-19
+
+- Froze strict guided Attempt bindings, added symmetric user-attested Approve and
+  Reject recovery, and routed completed Invoices to their bound Request instead
+  of allowing a duplicate `requestSpend`.
+- Serialized the whole connected-Admin packet loop under one wallet lease and
+  made every broadcast checkpoint non-discardable until success or explicit
+  revert is proven.
+- Isolated live Sepolia mutations in a single-project manual Release Gate, added
+  deterministic visual baselines and replaced favicon sharing with the
+  versioned Operations Desk social image.
 
 - Production release acceptance exercised two independent run-bound ShieldOps
   requests against the deployed Safe. Request #35 reached state 2 through

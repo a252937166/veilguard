@@ -15,6 +15,9 @@ vi.mock('../src/demo-session', async () => {
 });
 vi.mock('../src/missions', () => ({ completeMission, advanceGuidedMission }));
 vi.mock('../src/nox', () => ({ publicClient: {
+  getBlockNumber: vi.fn(async () => 100n),
+  getLogs: vi.fn(),
+  getTransaction: vi.fn(),
   waitForTransactionReceipt: vi.fn(),
   getTransactionReceipt: vi.fn(),
   readContract: vi.fn(),
@@ -30,6 +33,8 @@ import { walletWrite } from '../src/walletTx';
 import { ADDR, moduleAbi } from '../src/config';
 import {
   createAdminDisclosureCheckpoint,
+  loadAdminDisclosureCheckpoint,
+  removeAdminDisclosureCheckpoint,
   saveAdminDisclosureCheckpoint,
   updateAdminDisclosureGroup,
 } from '../src/disclosure-checkpoint';
@@ -37,6 +42,7 @@ import { encodeAbiParameters, encodeEventTopics } from 'viem';
 
 const handle = `0x${'1'.repeat(64)}` as `0x${string}`;
 const liveFinanceAdmin = '0x4444444444444444444444444444444444444444' as const;
+const walletRunKey = `wallet:${ADDR.VeilGuardModule.toLowerCase()}`;
 
 function guidedSession(options: { includeRoutine?: boolean } = {}) {
   let session = createDemoSession({ runId: 'launch-selection-test', now: 1 });
@@ -69,6 +75,8 @@ function request(index: number, id: bigint, state: number) {
 
 beforeEach(() => {
   sessionStorage.clear();
+  localStorage.clear();
+  removeAdminDisclosureCheckpoint(walletRunKey, liveFinanceAdmin);
   window.location.hash = '';
   sessionState.current = guidedSession();
   appContext.current = {
@@ -76,6 +84,14 @@ beforeEach(() => {
     financeAdmin: liveFinanceAdmin,
     demoRole: 'delegate',
     requests: [request(0, 11n, 2), request(1, 12n, 5), request(2, 13n, 4)],
+    run: vi.fn(async (_operation, fn) => {
+      try {
+        await fn();
+        return { accepted: true, status: 'succeeded' };
+      } catch {
+        return { accepted: true, status: 'failed' };
+      }
+    }),
     startDemo: vi.fn(),
     toast: vi.fn(),
   };
@@ -83,6 +99,9 @@ beforeEach(() => {
   advanceGuidedMission.mockReset();
   vi.mocked(walletWrite).mockReset();
   vi.mocked(publicClient.waitForTransactionReceipt).mockReset();
+  vi.mocked(publicClient.getBlockNumber).mockClear();
+  vi.mocked(publicClient.getLogs).mockReset();
+  vi.mocked(publicClient.getTransaction).mockReset();
   vi.mocked(publicClient.getTransactionReceipt).mockReset();
   vi.mocked(publicClient.readContract).mockReset();
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
@@ -101,6 +120,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   sessionStorage.clear();
+  localStorage.clear();
+  removeAdminDisclosureCheckpoint(walletRunKey, liveFinanceAdmin);
   vi.unstubAllGlobals();
 });
 
@@ -248,7 +269,9 @@ function seedAdminCheckpoint(options: {
   runKey: string;
   packetId?: number;
   manifestHash?: `0x${string}`;
-  transactionHash: `0x${string}`;
+  transactionHash?: `0x${string}`;
+  signaturePendingAt?: number;
+  signatureStartBlock?: string;
 }) {
   let checkpoint = createAdminDisclosureCheckpoint({
     runKey: options.runKey,
@@ -258,6 +281,8 @@ function seedAdminCheckpoint(options: {
   });
   checkpoint = updateAdminDisclosureGroup(checkpoint, '1', {
     transactionHash: options.transactionHash,
+    signaturePendingAt: options.signaturePendingAt,
+    signatureStartBlock: options.signatureStartBlock,
     packetId: options.packetId,
     manifestHash: options.manifestHash,
   });
@@ -290,6 +315,13 @@ test('Admin multi-mandate retry reuses checkpointed hashes and skips completed p
   fireEvent.click(screen.getByRole('button', { name: /create packets with admin wallet/i }));
   expect(await screen.findByRole('alert')).toHaveTextContent(/rpc interrupted/i);
   expect(walletWrite).toHaveBeenCalledTimes(2);
+  expect(walletWrite).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 0 }));
+  expect(appContext.current.run).toHaveBeenNthCalledWith(1, {
+    key: 'audit-packet-create',
+    label: 'Create audit packets',
+    resources: [`wallet:${liveFinanceAdmin.toLowerCase()}`],
+    feedback: 'inline',
+  }, expect.any(Function));
 
   fireEvent.click(screen.getByRole('button', { name: /create packets with admin wallet/i }));
   await screen.findByText(/Review Bundle updated/i);
@@ -299,6 +331,134 @@ test('Admin multi-mandate retry reuses checkpointed hashes and skips completed p
   expect(publicClient.getTransactionReceipt).toHaveBeenCalledWith({ hash: firstHash });
   expect(publicClient.readContract).toHaveBeenCalledTimes(3);
   expect(screen.getByText(/2 packets/i)).toBeInTheDocument();
+  expect(appContext.current.run).toHaveBeenCalledTimes(2);
+  expect(loadAdminDisclosureCheckpoint(walletRunKey, liveFinanceAdmin)).toBeNull();
+});
+
+test('a conflicting wallet operation keeps Admin creation in Review and performs no wallet write', async () => {
+  sessionState.current = null;
+  appContext.current.demoRole = null;
+  appContext.current.account = liveFinanceAdmin;
+  appContext.current.requests = [request(0, 11n, 2)];
+  appContext.current.run = vi.fn().mockResolvedValue({
+    accepted: false,
+    status: 'blocked',
+    blocker: { key: 'mandate-proposal', label: 'Propose encrypted mandate', startedAt: 10 },
+  });
+
+  render(<DisclosureView />);
+  fireEvent.click(await screen.findByRole('checkbox', { name: /CloudNode/i }));
+  fireEvent.click(screen.getByRole('button', { name: /review selected scope/i }));
+  fireEvent.click(screen.getByRole('button', { name: /create packets with admin wallet/i }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/Propose encrypted mandate is using this wallet/i);
+  expect(screen.getByRole('button', { name: /create packets with admin wallet/i })).toBeEnabled();
+  expect(walletWrite).not.toHaveBeenCalled();
+});
+
+test('Admin creation aborts before the wallet when durable recovery storage is unavailable', async () => {
+  sessionState.current = null;
+  appContext.current.demoRole = null;
+  appContext.current.account = liveFinanceAdmin;
+  appContext.current.requests = [request(0, 11n, 2)];
+  const nativeSetItem = Storage.prototype.setItem;
+  const storageSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function(key, value) {
+    if (this === localStorage) throw new DOMException('storage disabled', 'QuotaExceededError');
+    return nativeSetItem.call(this, key, value);
+  });
+
+  try {
+    render(<DisclosureView />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: /CloudNode/i }));
+    fireEvent.click(screen.getByRole('button', { name: /review selected scope/i }));
+    fireEvent.click(screen.getByRole('button', { name: /create packets with admin wallet/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/durable recovery storage is unavailable/i);
+    expect(walletWrite).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: /create packets with admin wallet/i }));
+    await waitFor(() => expect(walletWrite).not.toHaveBeenCalled());
+  } finally {
+    storageSpy.mockRestore();
+  }
+});
+
+test('an unknown wallet prompt survives reload and cannot be cleared or signed again', async () => {
+  sessionState.current = null;
+  appContext.current.demoRole = null;
+  appContext.current.account = liveFinanceAdmin;
+  appContext.current.requests = [request(0, 11n, 2)];
+  seedAdminCheckpoint({
+    runKey: walletRunKey,
+    signaturePendingAt: Date.now(),
+    signatureStartBlock: '99',
+  });
+  vi.mocked(publicClient.getLogs).mockResolvedValue([] as any);
+
+  render(<DisclosureView />);
+  expect(await screen.findByText(/wallet request.*unknown outcome/i)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /create packets with admin wallet/i }));
+  expect(await screen.findByText(/will not request another signature/i)).toBeInTheDocument();
+  expect(walletWrite).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: /clear marker|i rejected/i })).not.toBeInTheDocument();
+  expect(screen.getByText(/cannot be cleared from this recovered page/i)).toBeInTheDocument();
+  expect(loadAdminDisclosureCheckpoint(walletRunKey, liveFinanceAdmin)?.groups['1'].signaturePendingAt).toBeTypeOf('number');
+  expect(walletWrite).not.toHaveBeenCalled();
+});
+
+test('the unknown-signature marker is durable before the wallet RPC and clears on explicit rejection', async () => {
+  sessionState.current = null;
+  appContext.current.demoRole = null;
+  appContext.current.account = liveFinanceAdmin;
+  appContext.current.requests = [request(0, 11n, 2)];
+  let observedPending = false;
+  vi.mocked(walletWrite).mockImplementationOnce(async (options: any) => {
+    options.onRequestStarted();
+    observedPending = !!loadAdminDisclosureCheckpoint(walletRunKey, liveFinanceAdmin)
+      ?.groups['1'].signaturePendingAt;
+    throw Object.assign(new Error('User rejected the request'), { code: 4001 });
+  });
+
+  render(<DisclosureView />);
+  fireEvent.click(await screen.findByRole('checkbox', { name: /CloudNode/i }));
+  fireEvent.click(screen.getByRole('button', { name: /review selected scope/i }));
+  fireEvent.click(screen.getByRole('button', { name: /create packets with admin wallet/i }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/explicitly rejected/i);
+  expect(observedPending).toBe(true);
+  expect(loadAdminDisclosureCheckpoint(walletRunKey, liveFinanceAdmin)?.groups['1'].signaturePendingAt).toBeUndefined();
+});
+
+test('an approved unknown wallet prompt is recovered from its exact packet event without re-signing', async () => {
+  const hash = `0x${'8'.repeat(64)}` as `0x${string}`;
+  sessionState.current = null;
+  appContext.current.demoRole = null;
+  appContext.current.account = liveFinanceAdmin;
+  appContext.current.requests = [request(0, 11n, 2)];
+  seedAdminCheckpoint({
+    runKey: walletRunKey,
+    signaturePendingAt: Date.now(),
+    signatureStartBlock: '99',
+  });
+  vi.mocked(publicClient.getLogs).mockResolvedValueOnce([{
+    args: { packetId: 8n },
+    transactionHash: hash,
+  }] as any);
+  vi.mocked(publicClient.getTransaction).mockResolvedValueOnce({ from: liveFinanceAdmin } as any);
+  vi.mocked(publicClient.readContract)
+    .mockResolvedValueOnce(packetRead(1n, [11n]) as any)
+    .mockResolvedValueOnce(packetRead(1n, [11n]) as any);
+  vi.mocked(publicClient.waitForTransactionReceipt)
+    .mockResolvedValueOnce({ status: 'success', logs: [packetLog(8n, 1n)] } as any);
+
+  render(<DisclosureView />);
+  await screen.findByText(/wallet request.*unknown outcome/i);
+  fireEvent.click(screen.getByRole('button', { name: /create packets with admin wallet/i }));
+
+  await screen.findByText(/Review Bundle updated/i);
+  expect(walletWrite).not.toHaveBeenCalled();
+  expect(publicClient.getTransaction).toHaveBeenCalledWith({ hash });
+  expect(loadAdminDisclosureCheckpoint(walletRunKey, liveFinanceAdmin)).toBeNull();
 });
 
 test('a locally complete Admin checkpoint stays in Review until its chain evidence is verified', async () => {
@@ -307,7 +467,7 @@ test('a locally complete Admin checkpoint stays in Review until its chain eviden
   appContext.current.account = liveFinanceAdmin;
   appContext.current.requests = [request(0, 11n, 2)];
   seedAdminCheckpoint({
-    runKey: 'launch-selection-test',
+    runKey: walletRunKey,
     transactionHash: hash,
     packetId: 8,
     manifestHash: handle,
@@ -341,7 +501,7 @@ test('tampered Admin checkpoint metadata cannot be rendered or complete the miss
   appContext.current.account = liveFinanceAdmin;
   appContext.current.requests = [request(0, 11n, 2)];
   seedAdminCheckpoint({
-    runKey: 'launch-selection-test',
+    runKey: walletRunKey,
     transactionHash: hash,
     packetId: 999,
     manifestHash: handle,
@@ -366,7 +526,7 @@ test('stale reverted Admin checkpoint cannot be reused as a successful packet', 
   appContext.current.account = liveFinanceAdmin;
   appContext.current.requests = [request(0, 11n, 2)];
   seedAdminCheckpoint({
-    runKey: 'launch-selection-test',
+    runKey: walletRunKey,
     transactionHash: hash,
     packetId: 8,
     manifestHash: handle,
@@ -383,4 +543,54 @@ test('stale reverted Admin checkpoint cannot be reused as a successful packet', 
   expect(publicClient.readContract).not.toHaveBeenCalled();
   expect(walletWrite).not.toHaveBeenCalled();
   expect(completeMission).not.toHaveBeenCalled();
+
+  const replacementHash = `0x${'9'.repeat(64)}` as `0x${string}`;
+  vi.mocked(walletWrite).mockResolvedValueOnce(replacementHash);
+  vi.mocked(publicClient.waitForTransactionReceipt)
+    .mockResolvedValueOnce({ status: 'success', logs: [packetLog(10n, 1n)] } as any);
+  vi.mocked(publicClient.readContract).mockResolvedValueOnce(packetRead(1n, [11n]) as any);
+  fireEvent.click(screen.getByRole('button', { name: /create packets with admin wallet/i }));
+
+  await screen.findByText(/Review Bundle updated/i);
+  expect(walletWrite).toHaveBeenCalledTimes(1);
+  expect(walletWrite).toHaveBeenCalledWith(expect.objectContaining({
+    functionName: 'createAuditPacket',
+    args: [ROLES.auditor, 1n, [11n]],
+  }));
+});
+
+test('broadcast Admin pointers cannot be discarded or replaced by another scope', async () => {
+  const hash = `0x${'7'.repeat(64)}` as `0x${string}`;
+  sessionState.current = null;
+  appContext.current.demoRole = null;
+  appContext.current.account = liveFinanceAdmin;
+  appContext.current.requests = [request(2, 13n, 4)];
+  seedAdminCheckpoint({
+    runKey: walletRunKey,
+    transactionHash: hash,
+  });
+
+  render(<DisclosureView />);
+  fireEvent.click(await screen.findByRole('checkbox', { name: /Atlas Contractor/i }));
+  fireEvent.click(screen.getByRole('button', { name: /review selected scope/i }));
+  fireEvent.click(screen.getByRole('button', { name: /create packets with admin wallet/i }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/previous Audit Packet operation has 1 locked wallet or transaction pointer/i);
+  expect(walletWrite).not.toHaveBeenCalled();
+  expect(loadAdminDisclosureCheckpoint(walletRunKey, liveFinanceAdmin)?.groups['1']?.transactionHash).toBe(hash);
+});
+
+test('restored broadcast pointers lock auditor, scope and discard controls until verification', async () => {
+  const hash = `0x${'6'.repeat(64)}` as `0x${string}`;
+  appContext.current.demoRole = null;
+  appContext.current.account = liveFinanceAdmin;
+  appContext.current.requests = [request(0, 11n, 2)];
+  seedAdminCheckpoint({ runKey: walletRunKey, transactionHash: hash });
+
+  render(<DisclosureView />);
+  await screen.findByText(/local transaction pointers/i);
+  expect(screen.getByRole('button', { name: /recovery pointers locked/i })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: /back to selection/i }));
+  expect(screen.getByRole('textbox', { name: /auditor address/i })).toBeDisabled();
+  expect(screen.getByRole('checkbox', { name: /CloudNode/i })).toBeDisabled();
 });

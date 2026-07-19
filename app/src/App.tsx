@@ -37,6 +37,7 @@ import { runBoundScenarioRequests } from './demo-scenarios';
 import { reconcileRunBoundMissionEvidence } from './mission-recovery';
 import { OperationCoordinator, type OperationSpec } from './operation-lock';
 import { chainSnapshotFingerprint, changedRequestIds as diffChangedRequestIds, requestStateSnapshot } from './chain-refresh';
+import { loadPaymentTrack, savePaymentTrack, unresolvedRunBroadcast } from './payment-track';
 
 const EVIDENCE_COMMIT = evidence.commit;
 
@@ -77,6 +78,7 @@ type Ctx = {
   busy: string | null;
   demoRole: DemoRole | null;
   startDemo: (role: DemoRole) => void;
+  requestDemoRestart: () => void;
   openRolePicker: () => void;
   goTab: (tab: string) => void;
   lastUpdated: number | null;
@@ -173,7 +175,7 @@ export function App() {
     // the one-time startup recovery check as handled before navigation so the
     // route effect cannot mistake this newly saved session for stale work.
     startupChecked.current = true;
-    try { sessionStorage.removeItem('vg_track'); } catch { /* ignore */ }
+    savePaymentTrack(null);
     const next = createDemoSession({ route: { page: 'payment-inbox' }, role: 'delegate', tourActive: true });
     saveDemoSession(next);
     setDemoSession(next);
@@ -195,9 +197,11 @@ export function App() {
   const launch = useCallback((withTour: boolean, target?: LegacyTabName) => {
     if (withTour) {
       const existing = loadDemoSession();
+      const tracked = loadPaymentTrack();
       const hasProgress = !!existing && (
         existing.tour.active
         || Object.values(existing.missions).some((mission) => mission.requestId || mission.packetIds.length)
+        || (!!tracked?.tx && tracked.runId === existing.runId)
       );
       if (existing && !demoCompleted(existing) && hasProgress) {
         setDemoSession(existing);
@@ -488,8 +492,6 @@ export function App() {
     if ((TABS as readonly string[]).includes(nextTab)) goRoute(legacyTabToRoute(nextTab as LegacyTabName));
   }, [goRoute]);
 
-  const ctx: Ctx = { account, financeAdmin, chainOk, owners, paused, mandates, requests, refresh, toast, run, busy, demoRole, startDemo: enterDemo, openRolePicker: () => setTryOpen(true), goTab: goLegacy, lastUpdated, loadError };
-
   const resumeDemo = useCallback(() => {
     if (!demoSession) { startFreshDemo(); return; }
     const target = demoSession.tour.expectedRoute ?? demoSession.route;
@@ -513,6 +515,11 @@ export function App() {
     let pending: string | undefined;
 
     try {
+      const paymentTrack = loadPaymentTrack();
+      const tracked = unresolvedRunBroadcast(current.runId, paymentTrack);
+      if (tracked?.tx) {
+        throw new Error(`transaction ${short(tracked.tx)} was already broadcast but its request ID is still being recovered; Resume this run until the receipt is classified`);
+      }
       const scenarioKeys = ['routine', 'approval', 'violation'] as const;
       const runRequests: Array<SpendRequest & { scenario: typeof scenarioKeys[number] }> = [];
       for (const scenario of scenarioKeys) {
@@ -537,6 +544,28 @@ export function App() {
         };
         if (!runBoundScenarioRequests(current.runId, scenario, [resolved]).length) {
           throw new Error(`bound ${scenario} request #${boundId} does not belong to this demo run`);
+        }
+        runRequests.push({ ...resolved, scenario });
+      }
+
+      if (paymentTrack?.runId === current.runId
+        && paymentTrack.id
+        && ['routine', 'approval', 'violation'].includes(paymentTrack.mission)
+        && !runRequests.some((request) => String(request.id) === paymentTrack.id)) {
+        const scenario = paymentTrack.mission as typeof scenarioKeys[number];
+        const raw = await publicClient.readContract({
+          address: ADDR.VeilGuardModule,
+          abi: moduleAbi,
+          functionName: 'getRequest',
+          args: [BigInt(paymentTrack.id)],
+        }) as any[];
+        const resolved: SpendRequest = {
+          id: BigInt(paymentTrack.id), mandateId: raw[0], delegate: raw[1], recipient: raw[2],
+          memoHash: raw[3], createdAt: raw[4], state: Number(raw[5]), amount: raw[6],
+          decision: raw[7], blockedReason: raw[8],
+        };
+        if (!runBoundScenarioRequests(current.runId, scenario, [resolved]).length) {
+          throw new Error(`tracked ${scenario} request #${paymentTrack.id} does not belong to this demo run`);
         }
         runRequests.push({ ...resolved, scenario });
       }
@@ -594,7 +623,7 @@ export function App() {
       const restarted = demoSessionReducer(current, {
         type: 'CONFIRM_RESTART', runId: current.runId,
       });
-      try { sessionStorage.removeItem('vg_track'); } catch { /* ignore */ }
+      savePaymentTrack(null);
       saveDemoSession(restarted);
       setDemoSession(restarted);
       setResumeOpen(false);
@@ -615,6 +644,22 @@ export function App() {
       setRestartBusy(false);
     }
   }, [demoSession, enterDemo, goRoute, lastUpdated, loadError, refresh, requests, restartBusy, toast]);
+
+  const requestDemoRestart = useCallback(() => {
+    const current = loadDemoSession() ?? demoSession;
+    if (!current) {
+      startFreshDemo();
+      return;
+    }
+    setDemoSession(current);
+    setResumeOpen(true);
+  }, [demoSession, startFreshDemo]);
+
+  const ctx: Ctx = {
+    account, financeAdmin, chainOk, owners, paused, mandates, requests, refresh, toast, run, busy,
+    demoRole, startDemo: enterDemo, requestDemoRestart, openRolePicker: () => setTryOpen(true),
+    goTab: goLegacy, lastUpdated, loadError,
+  };
 
   const tryModal = tryOpen && (
     <ModalDialog
@@ -662,7 +707,7 @@ export function App() {
           <header className="topbar">
             <div>
               <Logo />
-              <div className="tagline">Confidential spending policies for Safe treasuries · Ethereum Sepolia · powered by iExec Nox</div>
+              <div className="tagline">Confidential Operations Desk for Safe treasuries · Ethereum Sepolia · powered by iExec Nox</div>
             </div>
             <div className="row">
               <button className="btn ghost" onClick={() => launch(false, 'Verify')}>Verify on-chain</button>
@@ -844,10 +889,12 @@ export function App() {
           onClose={() => setResumeOpen(false)}
         >
           <div className="modal-title-row">
-            <div><p className="workspace-kicker">Run {demoSession.runId}</p><h2 id="resume-title">Continue the unfinished Launch Day shift?</h2></div>
+            <div><p className="workspace-kicker">Run {demoSession.runId}</p><h2 id="resume-title">{demoCompleted(demoSession) ? 'Start a new Launch Day shift?' : 'Continue the unfinished Launch Day shift?'}</h2></div>
             <button className="icon-button" aria-label="Close resume dialog" onClick={() => setResumeOpen(false)}><Icon name="close" /></button>
           </div>
-          <p id="resume-description" className="muted">Your request and packet evidence remains bound to this run. Restarting is safe only after any pending ShieldOps escrow is rejected and the refund is confirmed on-chain.</p>
+          <p id="resume-description" className="muted">{demoCompleted(demoSession)
+            ? 'This completed run and its evidence remain available until the safe Restart flow creates a new run.'
+            : 'Your request and packet evidence remains bound to this run. Restarting is safe only after any pending ShieldOps escrow is rejected and the refund is confirmed on-chain.'}</p>
           <dl className="resume-facts">
             <div><dt>Current mission</dt><dd>{demoSession.currentMission}</dd></div>
             <div><dt>Role</dt><dd>{DEMO_ROLES[demoSession.role].label}</dd></div>
@@ -857,7 +904,7 @@ export function App() {
           {restartBusy && <div className="inline-alert neutral" role="status"><span className="spin" /> Rejecting pending escrow and confirming the refund before reset…</div>}
           <div className="modal-actions">
             <button className="btn ghost" disabled={restartBusy || demoSession.restart.status === 'failed'} onClick={restartDemo}>Restart safely</button>
-            <button className="btn primary" data-dialog-initial-focus disabled={restartBusy} onClick={resumeDemo}>Resume run</button>
+            <button className="btn primary" data-dialog-initial-focus disabled={restartBusy} onClick={demoCompleted(demoSession) ? () => setResumeOpen(false) : resumeDemo}>{demoCompleted(demoSession) ? 'Keep completed run' : 'Resume run'}</button>
           </div>
         </ModalDialog>
       )}

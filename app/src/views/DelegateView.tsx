@@ -10,7 +10,7 @@ import { Decrypt, NoRole, RequestPill } from '../ui';
 import { FREEPLAY_DELEGATE, VIOLATION_DELEGATE, demoWalletByAddress } from '../demo';
 import { MISSIONS, advanceGuidedMission, bindMissionRequest, completeMission, confirmApprovalDecision, getOrCreateDemoSession, loadMissions, type MissionKey, type MissionState } from '../missions';
 import { DEMO_SCENARIOS, demoMemoHash, scenarioByKey, trustedDemoScenarioForRequest, type DemoScenarioKey } from '../demo-scenarios';
-import { loadDemoSession } from '../demo-session';
+import { isMissionComplete, loadDemoSession } from '../demo-session';
 import { formatAppRoute, isDecimalObjectId, parseAppHash } from '../routes';
 import { PrivacyLens } from '../components/PrivacyLens';
 import { PaymentProgress, type PaymentFlow, type PaymentPhase } from '../components/PaymentProgress';
@@ -20,19 +20,21 @@ import { deriveRequestDetailModel, resolveRequestContexts } from '../domain';
 import { RequestDetailView } from './RequestDetailView';
 import {
   fetchDemoDecisionAttestation,
+  isAttestedUserDecision,
   isAttestedUserReject,
   type DemoDecisionAttestation,
 } from '../demo-decision-attestation';
+import { deriveGuidedInvoiceAction, type GuidedInvoiceAction } from '../guided-invoice-action';
+import {
+  loadPaymentTrack as loadTrack,
+  savePaymentTrack as saveTrack,
+} from '../payment-track';
 
 const REASONS: Record<number, string> = {
   1: 'over the delegated budget',
   2: 'treasury balance too low',
   3: 'would breach the reserve floor',
 };
-
-type Track = { id?: string; mission: MissionKey | 'free'; amount: string; tx?: `0x${string}`; delegate?: `0x${string}`; at: number; runId?: string };
-const loadTrack = (): Track | null => { try { return JSON.parse(sessionStorage.getItem('vg_track') ?? 'null'); } catch { return null; } };
-const saveTrack = (t: Track | null) => { try { t ? sessionStorage.setItem('vg_track', JSON.stringify(t)) : sessionStorage.removeItem('vg_track'); } catch { /* ignore */ } };
 
 const MAIN_DEMO = '0x17ee5ad7e4b40cadafad27c5f68f74d02c7fd532';
 const isDemoAddr = (a?: string) => !!a && [MAIN_DEMO, VIOLATION_DELEGATE.address.toLowerCase(), FREEPLAY_DELEGATE.address.toLowerCase()].includes(a.toLowerCase());
@@ -79,7 +81,10 @@ function ActivePaymentOperationDock({
 }
 
 export function DelegateView({ detailRequestId }: { detailRequestId?: string } = {}) {
-  const { account, mandates, requests, run, busy, refresh, toast, goTab, startDemo, demoRole, lastUpdated, loadError } = useApp();
+  const {
+    account, mandates, requests, run, busy, refresh, toast, goTab, startDemo,
+    requestDemoRestart, demoRole, lastUpdated, loadError,
+  } = useApp();
   const location = useLocation();
   const navigate = useNavigate();
   const route = useMemo(() => parseAppHash(`#${location.pathname}`), [location.pathname]);
@@ -107,6 +112,7 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
   const [decisionBusy, setDecisionBusy] = useState<'approve' | 'reject' | null>(null);
   const [decisionError, setDecisionError] = useState<string | null>(null);
   const [decisionFlow, setDecisionFlow] = useState<SafeDecisionFlow | null>(null);
+  const [recoveringDecisionId, setRecoveringDecisionId] = useState<string | null>(null);
   const decisionLock = useRef(false);
 
   const [flow, setFlowState] = useState<PaymentFlow | null>(null);
@@ -253,7 +259,11 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
         const id = event.args.requestId as bigint;
         const runId = tracked.runId ?? activeRunId();
         saveTrack({ ...tracked, id: String(id), at: Date.now(), runId });
-        if (tracked.mission !== 'free' && tracked.mission !== 'audit') bindMissionRequest(tracked.mission, id, runId);
+        if (tracked.mission !== 'free' && tracked.mission !== 'audit') {
+          bindMissionRequest(tracked.mission, id, runId, {
+            replaceRetryableAttempt: tracked.replaceRetryableAttempt === true,
+          });
+        }
         setReasonVal(null);
         setLastAmount(tracked.amount);
         setLastAmountRequestId(String(id));
@@ -334,17 +344,25 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
       setMissions(completeMission('routine', { requestId: latest.id, outcome: 'executed', runId }));
       completed = true;
     }
-    const attestedReject = latest.state === 5
-      && isAttestedUserReject(decisionAttestations.get(String(latest.id)));
-    if ((latest.state === 2 || attestedReject) && attributedMission === 'approval') {
+    const attestation = decisionAttestations.get(String(latest.id));
+    const attestedDecision = latest.state === 2 && isAttestedUserDecision(attestation, 'approve', 2)
+      ? 'approve'
+      : latest.state === 5 && isAttestedUserDecision(attestation, 'reject', 5)
+        ? 'reject'
+        : undefined;
+    if (attestedDecision && attributedMission === 'approval') {
+      confirmApprovalDecision(latest.id, attestedDecision, {
+        runId,
+        transactionHash: attestation?.hash,
+      });
       setMissions(completeMission('approval', {
         requestId: latest.id,
-        outcome: attestedReject ? 'cancelled' : 'executed',
-        decision: attestedReject ? 'reject' : 'approve',
+        outcome: attestedDecision === 'reject' ? 'cancelled' : 'executed',
+        decision: attestedDecision,
         runId,
       }));
       fetchRequestTxs(true).then(setTxs).catch(() => {});
-      completed = session?.missions.approval.decisionConfirmed === true;
+      completed = true;
     }
     if (attributedMission === 'free' || completed) saveTrack(null);
     clearFlow();
@@ -355,8 +373,12 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
   useEffect(() => {
     const session = loadDemoSession();
     if (!session) return;
-    const candidates = requests.filter((request) => request.state === 5
+    const runCandidates = requests.filter((request) => (request.state === 2 || request.state === 5)
       && trustedDemoScenarioForRequest(session.runId, request)?.key === 'approval');
+    const boundId = session.missions.approval.requestId;
+    const candidates = boundId
+      ? runCandidates.filter((request) => String(request.id) === boundId)
+      : [...runCandidates].sort((a, b) => Number(b.id - a.id)).slice(0, 1);
     if (!candidates.length) return;
     let stopped = false;
     void Promise.all(candidates.map(async (request) => [
@@ -368,6 +390,26 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
         const next = new Map(current);
         entries.forEach(([id, attestation]) => next.set(id, attestation));
         return next;
+      });
+      entries.forEach(([id, attestation]) => {
+        const request = candidates.find((candidate) => String(candidate.id) === id);
+        if (!request) return;
+        const action = request.state === 2 && isAttestedUserDecision(attestation, 'approve', 2)
+          ? 'approve'
+          : request.state === 5 && isAttestedUserDecision(attestation, 'reject', 5)
+            ? 'reject'
+            : undefined;
+        if (!action) return;
+        confirmApprovalDecision(request.id, action, {
+          runId: session.runId,
+          transactionHash: attestation.hash,
+        });
+        setMissions(completeMission('approval', {
+          requestId: request.id,
+          outcome: action === 'reject' ? 'cancelled' : 'executed',
+          decision: action,
+          runId: session.runId,
+        }));
       });
     });
     return () => { stopped = true; };
@@ -427,7 +469,14 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
   };
 
   /** Shared submit pipeline — works for the page identity AND the hidden violation delegate. */
-  const submitCore = async (who: `0x${string}`, mandateId: bigint, recipient: `0x${string}`, amt: string, mission: MissionKey | 'free'): Promise<'bound' | 'recovering' | 'failed'> => {
+  const submitCore = async (
+    who: `0x${string}`,
+    mandateId: bigint,
+    recipient: `0x${string}`,
+    amt: string,
+    mission: MissionKey | 'free',
+    replaceRetryableAttempt = false,
+  ): Promise<'bound' | 'recovering' | 'failed'> => {
     let requestBound = false;
     let recoveryPending = false;
     await run({
@@ -467,7 +516,10 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
         }
         // Persist at broadcast time, not receipt time. A slow RPC can no longer
         // erase the only recovery pointer after the transaction is already live.
-        saveTrack({ mission, amount: amt, tx: hash, delegate: who, at: Date.now(), runId });
+        saveTrack({
+          mission, amount: amt, tx: hash, delegate: who, at: Date.now(), runId,
+          ...(replaceRetryableAttempt ? { replaceRetryableAttempt: true } : {}),
+        });
         setLastAmount(amt); setLastAmountRequestId(null); setLastTx(hash); setLastTxRequestId(null); setMissionOf(mission);
         setFlow('confirming', 'Sepolia is including your transaction…', 13, hash);
         let receipt;
@@ -491,8 +543,13 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
           throw new Error('transaction confirmed without a SpendRequested event; no request was created and it is safe to retry');
         }
         const id = ev.args.requestId as bigint;
-        saveTrack({ id: String(id), mission, amount: amt, tx: hash, delegate: who, at: Date.now(), runId });
-        if (mission !== 'free' && mission !== 'audit') bindMissionRequest(mission, id, runId);
+        saveTrack({
+          id: String(id), mission, amount: amt, tx: hash, delegate: who, at: Date.now(), runId,
+          ...(replaceRetryableAttempt ? { replaceRetryableAttempt: true } : {}),
+        });
+        if (mission !== 'free' && mission !== 'audit') {
+          bindMissionRequest(mission, id, runId, { replaceRetryableAttempt });
+        }
         setReasonVal(null); setLastAmount(amt); setLastAmountRequestId(String(id));
         setLastTx(hash); setLastTxRequestId(String(id)); setMissionOf(mission); setTrackId(id);
         requestBound = true;
@@ -594,7 +651,122 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
     if (result === 'failed') clearFlow();
   };
 
+  const guidedActionFor = (key: Exclude<MissionKey, 'audit'>): GuidedInvoiceAction => {
+    const session = loadDemoSession() ?? getOrCreateDemoSession();
+    const progress = session.missions[key];
+    const request = progress.requestId
+      ? requests.find((candidate) => String(candidate.id) === progress.requestId)
+      : undefined;
+    return deriveGuidedInvoiceAction({
+      mission: key,
+      progress,
+      request,
+      attestation: progress.requestId ? decisionAttestations.get(progress.requestId) : undefined,
+      complete: isMissionComplete(session, key, { strict: true }),
+    });
+  };
+
+  const openGuidedRequest = (requestId: string) => {
+    navigate(formatAppRoute({ page: 'payment-detail', requestId }).slice(1));
+  };
+
+  const recoverGuidedDecision = async (requestId: string) => {
+    const session = loadDemoSession();
+    const request = requests.find((candidate) => String(candidate.id) === requestId);
+    if (!session || !request || trustedDemoScenarioForRequest(session.runId, request)?.key !== 'approval') {
+      toast('The bound ShieldOps request is not available yet. Refresh its request detail before retrying recovery.', true);
+      return;
+    }
+    setRecoveringDecisionId(requestId);
+    try {
+      const attestation = await fetchDemoDecisionAttestation(session.runId, request.id);
+      setDecisionAttestations((current) => new Map(current).set(requestId, attestation));
+      const action = request.state === 2 && isAttestedUserDecision(attestation, 'approve', 2)
+        ? 'approve'
+        : request.state === 5 && isAttestedUserDecision(attestation, 'reject', 5)
+          ? 'reject'
+          : undefined;
+      if (!action) {
+        toast(attestation.origin === 'timeout'
+          ? 'The decision window timed out; no user decision is claimed. This invoice can now be retried.'
+          : 'No authenticated user decision receipt is available yet. The current request remains bound and no payment was resubmitted.', true);
+        return;
+      }
+      confirmApprovalDecision(request.id, action, {
+        runId: session.runId,
+        transactionHash: attestation.hash,
+      });
+      setMissions(completeMission('approval', {
+        requestId: request.id,
+        outcome: action === 'reject' ? 'cancelled' : 'executed',
+        decision: action,
+        runId: session.runId,
+      }));
+      toast(action === 'approve'
+        ? 'Recovered the authenticated user approval and Safe execution evidence.'
+        : 'Recovered the authenticated user rejection and refund evidence.');
+      await refresh();
+      await fetchRequestTxs(true).then(setTxs).catch(() => {});
+      openGuidedRequest(requestId);
+    } finally {
+      setRecoveringDecisionId(null);
+    }
+  };
+
+  const handleGuidedInvoiceAction = (key: Exclude<MissionKey, 'audit'>, action: GuidedInvoiceAction) => {
+    if (action.kind === 'open') {
+      openGuidedRequest(action.requestId);
+      return;
+    }
+    if (action.kind === 'recover') {
+      void recoverGuidedDecision(action.requestId);
+      return;
+    }
+    void runScenario(key);
+  };
+
   const runScenario = async (key: MissionKey) => {
+    let replaceRetryableAttempt = false;
+    if (isDemo && key !== 'audit') {
+      const action = guidedActionFor(key);
+      if (action.kind !== 'submit' && action.kind !== 'retry') {
+        if ('requestId' in action) openGuidedRequest(action.requestId);
+        toast('This invoice already has a bound request. Open that attempt instead of creating a duplicate.');
+        return;
+      }
+      replaceRetryableAttempt = action.kind === 'retry';
+
+      // Synchronous recovery guard: React effects may not have restored the
+      // visual flow yet after refresh, but a run-bound broadcast pointer is
+      // already authoritative. Never open a second requestSpend while that
+      // transaction can still create (or has created) this mission attempt.
+      const session = loadDemoSession();
+      const tracked = loadTrack();
+      if (session && tracked?.mission === key && tracked.runId === session.runId && tracked.tx) {
+        const retryingBoundAttempt = action.kind === 'retry'
+          && !!tracked.id
+          && tracked.id === action.requestId;
+        if (retryingBoundAttempt) {
+          // The bound state-5 timeout/state-6 attempt is explicitly retryable;
+          // its old terminal pointer must not shadow the next attempt.
+          saveTrack(null);
+        } else if (tracked.id) {
+          bindMissionRequest(key, tracked.id, session.runId, {
+            replaceRetryableAttempt: tracked.replaceRetryableAttempt === true,
+          });
+          openGuidedRequest(tracked.id);
+          toast('Recovered the already submitted request. No duplicate payment was created.');
+          return;
+        } else {
+          setMissionOf(key);
+          setLastAmount(tracked.amount);
+          setLastTx(tracked.tx);
+          setFlow('recovering', 'Recovering the broadcast request from Sepolia…', 30, tracked.tx);
+          toast('The payment transaction was already broadcast. VeilGuard is recovering that exact request instead of submitting again.');
+          return;
+        }
+      }
+    }
     if (!myMandate || busy || submissionLock.current) return;
     if (blockingRequest) { toast('A payment is still in flight — it clears in under a minute.', true); return; }
     if (key === 'routine' || key === 'approval') {
@@ -609,7 +781,7 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
           toast('The demo treasury is refreshing its recipient policy. Try again in about two minutes.', true);
           return;
         }
-        result = await submitCore(account!, myMandate.id, scenario.recipient, amt, key);
+        result = await submitCore(account!, myMandate.id, scenario.recipient, amt, key, replaceRetryableAttempt);
       } finally {
         finishSubmission(result);
       }
@@ -626,7 +798,14 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
           toast('The isolated demo mandate is refreshing its recipient policy. Try again shortly.', true);
           return;
         }
-        result = await submitCore(VIOLATION_DELEGATE.address, violationMandate.id, scenario.recipient, scenario.amount, 'violation');
+        result = await submitCore(
+          VIOLATION_DELEGATE.address,
+          violationMandate.id,
+          scenario.recipient,
+          scenario.amount,
+          'violation',
+          replaceRetryableAttempt,
+        );
       } finally {
         finishSubmission(result);
       }
@@ -718,15 +897,13 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
         onProgress: setDecisionFlow,
       });
       confirmApprovalDecision(request.id, action, { runId, transactionHash: data.hash });
-      if (action === 'reject') {
-        setDecisionAttestations((current) => new Map(current).set(String(request.id), {
-          requestId: Number(request.id),
-          chainState: 5,
-          origin: 'user',
-          action: 'reject',
-          hash: data.hash,
-        }));
-      }
+      setDecisionAttestations((current) => new Map(current).set(String(request.id), {
+        requestId: Number(request.id),
+        chainState: action === 'approve' ? 2 : 5,
+        origin: 'user',
+        action,
+        hash: data.hash,
+      }));
       setMissions(completeMission('approval', {
         requestId: request.id,
         outcome: action === 'reject' ? 'cancelled' : 'executed',
@@ -793,7 +970,11 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
       transactions: detailTx,
       events: {
         outcomePath: detailTx?.outcomePath,
-        safeAction: isAttestedUserReject(detailAttestation) ? 'reject' : detailTx?.safeAction,
+        safeAction: isAttestedUserDecision(detailAttestation, 'approve', 2)
+          ? 'approve'
+          : isAttestedUserDecision(detailAttestation, 'reject', 5)
+            ? 'reject'
+            : detailTx?.safeAction,
         decisionOrigin: detailAttestation?.origin,
       },
       actor: {
@@ -857,6 +1038,26 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
 
   const selectedStory = scenarioByKey(selectedScenario);
   const sessionSnapshot = loadDemoSession();
+  const selectedProgress = isDemo ? sessionSnapshot?.missions[selectedStory.key] : undefined;
+  const selectedBoundRequest = selectedProgress?.requestId
+    ? requests.find((request) => String(request.id) === selectedProgress.requestId)
+    : undefined;
+  const selectedInvoiceAction: GuidedInvoiceAction = selectedProgress
+    ? deriveGuidedInvoiceAction({
+      mission: selectedStory.key,
+      progress: selectedProgress,
+      request: selectedBoundRequest,
+      attestation: selectedProgress.requestId
+        ? decisionAttestations.get(selectedProgress.requestId)
+        : undefined,
+      complete: !!sessionSnapshot
+        && isMissionComplete(sessionSnapshot, selectedStory.key, { strict: true }),
+    })
+    : { kind: 'submit', label: 'Submit confidential payment', enabled: true };
+  const selectedActionIsSubmission = selectedInvoiceAction.kind === 'submit'
+    || selectedInvoiceAction.kind === 'retry';
+  const selectedActionIsRecovering = selectedInvoiceAction.kind === 'recover'
+    && recoveringDecisionId === selectedInvoiceAction.requestId;
   const latestStory = trustedDemoScenarioForRequest(sessionSnapshot?.runId, latest);
   const boundLocalAmount = latest && lastAmountRequestId === String(latest.id) ? lastAmount : '';
   const boundLocalTx = latest && lastTxRequestId === String(latest.id) ? lastTx : null;
@@ -1109,17 +1310,26 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
                 <div className="inline-alert">Complete the previous invoice before submitting this one.</div>
               ) : (
                 <button
-                  className={`btn primary ${flow && activeOperationKey === selectedStory.key ? 'is-busy' : ''}`}
-                  disabled={!!busy || submissionLock.current || !!flow || (!!blockingRequest && selectedStory.key !== 'violation')}
-                  aria-busy={!!flow && activeOperationKey === selectedStory.key}
-                  onClick={() => void runScenario(selectedStory.key)}
+                  className={`btn ${selectedInvoiceAction.kind === 'open' ? 'ghost' : 'primary'} ${flow && activeOperationKey === selectedStory.key ? 'is-busy' : ''}`}
+                  disabled={selectedActionIsRecovering || (selectedActionIsSubmission
+                    && (!!busy || submissionLock.current || !!flow
+                      || (!!blockingRequest && selectedStory.key !== 'violation')))}
+                  aria-busy={selectedActionIsRecovering || (!!flow && activeOperationKey === selectedStory.key)}
+                  onClick={() => handleGuidedInvoiceAction(selectedStory.key, selectedInvoiceAction)}
                 >
-                  {flow && activeOperationKey === selectedStory.key
+                  {selectedActionIsRecovering
+                    ? <><span className="spin" aria-hidden="true" /> Recovering decision evidence…</>
+                    : flow && activeOperationKey === selectedStory.key
                     ? <><span className="spin" aria-hidden="true" /> {flow?.phase === 'preflight' ? 'Checking readiness…' : flow?.phase === 'encrypting' ? 'Encrypting payment…' : flow?.phase === 'recovering' ? 'Recovering request…' : 'Payment in progress…'}</>
-                    : missions[selectedStory.key] ? 'Run this invoice again' : 'Submit confidential payment'}
+                    : selectedInvoiceAction.label}
                 </button>
               )}
-              <span className="muted">Review first, then submit. The policy never reveals its thresholds.</span>
+              {selectedInvoiceAction.kind === 'open' && selectedInvoiceAction.label === 'Open completed request' && (
+                <button type="button" className="btn ghost" onClick={requestDemoRestart}>Start a new demo run</button>
+              )}
+              <span className="muted">{selectedInvoiceAction.kind === 'retry'
+                ? 'The prior attempt is explicitly expired or timed out; retry creates the next bound attempt.'
+                : 'Review first, then submit. The policy never reveals its thresholds.'}</span>
             </div>
             {selectedStory.key === 'violation' && isDemo && violationCoolLeft > 0 && (
               <div className="inline-alert">The isolated stress-test delegate is cooling down. A verified recent block can be reviewed now; a fresh run is available in {mmss(violationCoolLeft)}.</div>

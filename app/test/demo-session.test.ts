@@ -60,6 +60,45 @@ test('watchdog cancellation cannot masquerade as a user reject', () => {
   expect(isMissionComplete(state, 'approval', { strict: true })).toBe(false);
 });
 
+test('strictly completed missions keep their original request binding and evidence', () => {
+  let state = createDemoSession({ runId: 'frozen-bindings', now: 1 });
+  state = reduce(state, { type: 'ROUTINE_EXECUTED', requestId: '35', at: 2 });
+  state = reduce(state, { type: 'BIND_REQUEST', mission: 'approval', requestId: '36', at: 3 });
+  state = reduce(state, {
+    type: 'APPROVAL_DECISION_CONFIRMED', requestId: '36', decision: 'approve',
+    transactionHash: '0xapproved', at: 4,
+  });
+  state = reduce(state, { type: 'APPROVAL_SETTLED', requestId: '36', decision: 'approve', at: 5 });
+  state = reduce(state, { type: 'VIOLATION_BLOCKED', requestId: '37', at: 6 });
+  state = reduce(state, { type: 'VIOLATION_REASON_DECRYPTED', requestId: '37', at: 7 });
+
+  const frozen = state;
+  state = reduce(state, { type: 'BIND_REQUEST', mission: 'routine', requestId: '38', at: 8 });
+  state = reduce(state, { type: 'BIND_REQUEST', mission: 'approval', requestId: '39', at: 9 });
+  state = reduce(state, { type: 'BIND_REQUEST', mission: 'violation', requestId: '40', at: 10 });
+
+  expect(state.missions.routine).toEqual(frozen.missions.routine);
+  expect(state.missions.approval).toEqual(frozen.missions.approval);
+  expect(state.missions.violation).toEqual(frozen.missions.violation);
+  expect(state.missions.approval.decisionTx).toBe('0xapproved');
+});
+
+test('an incomplete attempt cannot rebind without an explicit retry authorization', () => {
+  let state = createDemoSession({ runId: 'active-binding', now: 1 });
+  state = reduce(state, { type: 'BIND_REQUEST', mission: 'approval', requestId: '41', at: 2 });
+
+  const unchanged = reduce(state, {
+    type: 'BIND_REQUEST', mission: 'approval', requestId: '42', at: 3,
+  });
+  expect(unchanged.missions.approval.requestId).toBe('41');
+
+  const retried = reduce(state, {
+    type: 'BIND_REQUEST', mission: 'approval', requestId: '42',
+    replaceRetryableAttempt: true, at: 4,
+  });
+  expect(retried.missions.approval.requestId).toBe('42');
+});
+
 test('late events from an old run cannot advance the active run', () => {
   const state = createDemoSession({ runId: 'current', now: 1 });
   const next = demoSessionReducer(state, {

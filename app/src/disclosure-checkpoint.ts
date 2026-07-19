@@ -3,6 +3,9 @@ export const ADMIN_DISCLOSURE_CHECKPOINT_VERSION = 1 as const;
 export type AdminDisclosureGroupCheckpoint = {
   mandateId: number;
   requestIds: string[];
+  /** Wallet prompt opened but no transaction hash has been observed yet. */
+  signaturePendingAt?: number;
+  signatureStartBlock?: string;
   transactionHash?: `0x${string}`;
   packetId?: number;
   manifestHash?: `0x${string}`;
@@ -21,8 +24,16 @@ export type AdminDisclosureCheckpoint = {
 
 type StorageLike = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
+// Keeps a known broadcast pointer alive across SPA route unmounts even if the
+// browser starts rejecting durable-storage writes after the wallet prompt.
+// Durable localStorage remains mandatory before the first signature.
+const volatileCheckpoints = new Map<string, string>();
+
 const storageOrUndefined = (): StorageLike | undefined => {
-  try { return typeof sessionStorage === 'undefined' ? undefined : sessionStorage; }
+  // A broadcast transaction can outlive the current tab and demo session.
+  // Keep its recovery pointer in durable origin storage so closing the tab or
+  // starting another guided run cannot make the pending hash disappear.
+  try { return typeof localStorage === 'undefined' ? undefined : localStorage; }
   catch { return undefined; }
 };
 
@@ -99,6 +110,10 @@ function hydrateCheckpoint(value: unknown, runKey: string, account: string): Adm
     groups[key] = {
       mandateId: group.mandateId!,
       requestIds: normalizedIds(group.requestIds as string[]),
+      ...(typeof group.signaturePendingAt === 'number' && Number.isFinite(group.signaturePendingAt)
+        ? { signaturePendingAt: group.signaturePendingAt } : {}),
+      ...(typeof group.signatureStartBlock === 'string' && /^\d+$/.test(group.signatureStartBlock)
+        ? { signatureStartBlock: group.signatureStartBlock } : {}),
       ...(isHexHash(group.transactionHash) ? { transactionHash: group.transactionHash } : {}),
       ...(Number.isSafeInteger(group.packetId) ? { packetId: group.packetId } : {}),
       ...(isHexHash(group.manifestHash) ? { manifestHash: group.manifestHash } : {}),
@@ -126,25 +141,42 @@ export function loadAdminDisclosureCheckpoint(
   account: string,
   storage: StorageLike | undefined = storageOrUndefined(),
 ): AdminDisclosureCheckpoint | null {
-  if (!storage) return null;
+  const key = adminDisclosureCheckpointKey(runKey, account);
+  const candidates: AdminDisclosureCheckpoint[] = [];
+  const addCandidate = (encoded: string | null | undefined) => {
+    if (!encoded) return;
+    try {
+      const hydrated = hydrateCheckpoint(JSON.parse(encoded), runKey, account);
+      if (hydrated) candidates.push(hydrated);
+    } catch { /* ignore malformed recovery data */ }
+  };
+  addCandidate(volatileCheckpoints.get(key));
   try {
-    const encoded = storage.getItem(adminDisclosureCheckpointKey(runKey, account));
-    return encoded ? hydrateCheckpoint(JSON.parse(encoded), runKey, account) : null;
-  } catch {
-    return null;
-  }
+    if (storage) addCandidate(storage.getItem(key));
+  } catch { /* volatile candidate remains available */ }
+  // A second tab may have persisted a broadcast after this tab cached the
+  // pre-sign checkpoint. Never let the older volatile value hide the newer
+  // durable hash.
+  const evidenceWeight = (checkpoint: AdminDisclosureCheckpoint) => Object.values(checkpoint.groups)
+    .reduce((weight, group) => weight
+      + (group.transactionHash ? 16 : 0)
+      + (group.signaturePendingAt ? 8 : 0)
+      + (group.packetId != null ? 2 : 0)
+      + (group.manifestHash ? 1 : 0), 0);
+  return candidates.sort((left, right) =>
+    (right.updatedAt - left.updatedAt) || (evidenceWeight(right) - evidenceWeight(left)))[0] ?? null;
 }
 
 export function saveAdminDisclosureCheckpoint(
   checkpoint: AdminDisclosureCheckpoint,
   storage: StorageLike | undefined = storageOrUndefined(),
 ): boolean {
+  const key = adminDisclosureCheckpointKey(checkpoint.runKey, checkpoint.account);
+  const encoded = JSON.stringify({ ...checkpoint, updatedAt: Date.now() });
+  volatileCheckpoints.set(key, encoded);
   if (!storage) return false;
   try {
-    storage.setItem(
-      adminDisclosureCheckpointKey(checkpoint.runKey, checkpoint.account),
-      JSON.stringify({ ...checkpoint, updatedAt: Date.now() }),
-    );
+    storage.setItem(key, encoded);
     return true;
   } catch {
     return false;
@@ -156,9 +188,11 @@ export function removeAdminDisclosureCheckpoint(
   account: string,
   storage: StorageLike | undefined = storageOrUndefined(),
 ): boolean {
+  const key = adminDisclosureCheckpointKey(runKey, account);
   if (!storage) return false;
   try {
-    storage.removeItem(adminDisclosureCheckpointKey(runKey, account));
+    storage.removeItem(key);
+    volatileCheckpoints.delete(key);
     return true;
   } catch {
     return false;
