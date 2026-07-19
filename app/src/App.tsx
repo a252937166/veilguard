@@ -839,7 +839,7 @@ export function App() {
 
         <main className="main" id="main-content" tabIndex={-1}>
           <div className="main-top">
-            <div className="crumb"><span className="crumb-parent">Confidential Operations Desk</span><Icon name="chevron" size={14} /><span className="crumb-page">{appRouteLabel(route)}</span></div>
+            <div className="crumb"><span className="crumb-parent">Confidential Operations Desk</span><Icon name="chevron" size={14} /><span className="crumb-page" title={appRouteLabel(route)}>{appRouteLabel(route)}</span></div>
             <div className="row">
               {paused && <span className="pill bad">PAUSED</span>}
               {!demoSession?.tour.active && (

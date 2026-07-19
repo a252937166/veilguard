@@ -7,6 +7,7 @@ import type { RequestTxs } from '../txlog';
 import { PrivacyLens } from '../components/PrivacyLens';
 import { RequestPill } from '../ui';
 import { SafeDecisionDock, type SafeDecisionFlow } from '../components/SafeDecisionProgress';
+import { PanelBody } from '../components/workbench';
 
 export type RequestDetailViewProps = {
   request: SpendRequest;
@@ -80,28 +81,32 @@ export function RequestDetailView({
             <div><h2 id="request-summary-title">Request summary</h2><p>Object identity and current settlement state from Sepolia.</p></div>
             <span className={`status-badge pill ${model.statusTone === 'success' ? 'ok' : model.statusTone === 'warning' ? 'warn' : model.statusTone === 'danger' ? 'bad' : model.statusTone === 'progress' ? 'tee' : 'dim'}`}>{model.statusLabel}</span>
           </div>
-          <dl className="data-list">
-            <div><dt>Recipient</dt><dd>{recipientName}<span className="mono muted">{short(request.recipient)}</span></dd></div>
-            <div><dt>Amount</dt><dd>{authorizedAmount}</dd></div>
-            <div><dt>Purpose</dt><dd>{purpose}</dd></div>
-            <div><dt>Escrow</dt><dd>{model.escrow.replaceAll('-', ' ')}</dd></div>
-            <div><dt>Public outcome</dt><dd>{outcome}</dd></div>
-            <div><dt>Memo hash</dt><dd className="mono">{short(request.memoHash)}</dd></div>
-            <div><dt>Audit inclusion</dt><dd>{auditPacketIds.length ? `Current run bundle · ${auditPacketIds.map((id) => `Packet #${id}`).join(' · ')}` : 'Not included in the current run packet set'}</dd></div>
-          </dl>
-          {trustedStory && <p className="trust-note">Demo story metadata verified against this run's memo, scenario, mandate, delegate and recipient.</p>}
+          <PanelBody>
+            <dl className="data-list">
+              <div><dt>Recipient</dt><dd>{recipientName}<span className="mono muted">{short(request.recipient)}</span></dd></div>
+              <div><dt>Amount</dt><dd>{authorizedAmount}</dd></div>
+              <div><dt>Purpose</dt><dd>{purpose}</dd></div>
+              <div><dt>Escrow</dt><dd>{model.escrow.replaceAll('-', ' ')}</dd></div>
+              <div><dt>Public outcome</dt><dd>{outcome}</dd></div>
+              <div><dt>Memo hash</dt><dd className="mono">{short(request.memoHash)}</dd></div>
+              <div><dt>Audit inclusion</dt><dd>{auditPacketIds.length ? `Current run bundle · ${auditPacketIds.map((id) => `Packet #${id}`).join(' · ')}` : 'Not included in the current run packet set'}</dd></div>
+            </dl>
+            {trustedStory && <p className="trust-note">Demo story metadata verified against this run's memo, scenario, mandate, delegate and recipient.</p>}
+          </PanelBody>
         </section>
 
         <section className="surface-section" aria-labelledby="request-timeline-title">
           <div className="section-heading"><div><h2 id="request-timeline-title">Request timeline</h2><p>Public stages and transaction evidence for this object only.</p></div></div>
-          <ol className="signature-timeline request-timeline">
-            {model.timeline.map((stage) => (
-              <li key={stage.id} className={stage.state === 'complete' ? 'done' : stage.state === 'current' ? 'active' : stage.state === 'failed' ? 'failed' : ''}>
-                <b>{stage.label}</b>
-                <span>{stage.detail}{stage.transactionHash && <> · <a href={scanTx(stage.transactionHash)} target="_blank" rel="noopener">view transaction ↗</a></>}</span>
-              </li>
-            ))}
-          </ol>
+          <PanelBody>
+            <ol className="signature-timeline request-timeline">
+              {model.timeline.map((stage) => (
+                <li key={stage.id} className={stage.state === 'complete' ? 'done' : stage.state === 'current' ? 'active' : stage.state === 'failed' ? 'failed' : ''}>
+                  <b>{stage.label}</b>
+                  <span>{stage.detail}{stage.transactionHash && <> · <a href={scanTx(stage.transactionHash)} target="_blank" rel="noopener">view transaction ↗</a></>}</span>
+                </li>
+              ))}
+            </ol>
+          </PanelBody>
         </section>
       </div>
 
@@ -171,24 +176,26 @@ export function RequestDetailView({
           try { setRefreshResult(await onRefresh()); }
           finally { setRefreshing(false); }
         }}>{refreshing ? <><span className="spin" /> Checking chain…</> : 'Refresh evidence'}</button></div>
-        {refreshResult && (
-          <div className={`inline-alert ${refreshResult.status === 'failed' ? 'bad' : ''}`} role={refreshResult.status === 'failed' ? 'alert' : 'status'}>
-            {refreshResult.status === 'changed' ? 'New on-chain evidence found'
-              : refreshResult.status === 'unchanged' ? 'No new on-chain evidence'
-                : `Chain check failed · ${'message' in refreshResult ? refreshResult.message : 'Unknown chain reader error'}`}
-            {' · checked '}{new Date(refreshResult.checkedAt).toLocaleTimeString()}
-          </div>
-        )}
-        <dl className="data-list transaction-list">
-          {([
-            ['Request', transactions?.request],
-            ['Finalize', transactions?.finalize],
-            ['Safe approval', transactions?.approval],
-            ['Safe cancellation', transactions?.cancellation],
-          ] as const).map(([label, hash]) => (
-            <div key={label}><dt>{label}</dt><dd>{hash ? <a className="mono" href={scanTx(hash)} target="_blank" rel="noopener">{short(hash)} ↗</a> : <span className="muted">Not indexed</span>}</dd></div>
-          ))}
-        </dl>
+        <PanelBody>
+          {refreshResult && (
+            <div className={`inline-alert ${refreshResult.status === 'failed' ? 'bad' : ''}`} role={refreshResult.status === 'failed' ? 'alert' : 'status'}>
+              {refreshResult.status === 'changed' ? 'New on-chain evidence found'
+                : refreshResult.status === 'unchanged' ? 'No new on-chain evidence'
+                  : `Chain check failed · ${'message' in refreshResult ? refreshResult.message : 'Unknown chain reader error'}`}
+              {' · checked '}{new Date(refreshResult.checkedAt).toLocaleTimeString()}
+            </div>
+          )}
+          <dl className="data-list transaction-list">
+            {([
+              ['Request', transactions?.request],
+              ['Finalize', transactions?.finalize],
+              ['Safe approval', transactions?.approval],
+              ['Safe cancellation', transactions?.cancellation],
+            ] as const).map(([label, hash]) => (
+              <div key={label}><dt>{label}</dt><dd>{hash ? <a className="mono" href={scanTx(hash)} target="_blank" rel="noopener">{short(hash)} ↗</a> : <span className="muted">Not indexed</span>}</dd></div>
+            ))}
+          </dl>
+        </PanelBody>
       </section>
     </div>
   );

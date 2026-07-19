@@ -183,6 +183,14 @@ Builder and Audit Review at desktop and mobile sizes. Fixtures are test-only,
 fixed to UTC/dark/reduced-motion, make no Sepolia calls, and mask only the UI SHA;
 CI uses a 0.2 perceptual threshold with at most 0.003 differing-pixel ratio.
 
+Narrow reflow is a structural contract, not a root-level clipping trick. Detail
+headings and `PanelBody` content share the same gutter; definition rows can
+shrink and wrap; Privacy Lens facts stack below 480px; and action-bearing Funds,
+Verify and Audit tables become labelled record cards below 720px. Regression
+coverage includes the reported 292px viewport as well as 320px, and rejects
+uncontrolled descendants outside the viewport instead of relying only on the
+document scroll width.
+
 ## Authenticity boundaries
 
 - The v1 contract ABI and existing Sepolia addresses are unchanged.
@@ -240,6 +248,8 @@ CI uses a 0.2 perceptual threshold with at most 0.003 differing-pixel ratio.
   surfaces without exposing privileged demo keys.
 - Added mobile mission/action-dock collision rules and density-based translucent
   surface tokens.
+- Replaced the 320px root floor and global horizontal clipping with real 292px
+  reflow, shared detail gutters, wrapping fact rows and mobile record cards.
 
 - Restored the WaveField, translucent panel hierarchy and original VeilGuard
   wordmark treatment throughout the operations desk.

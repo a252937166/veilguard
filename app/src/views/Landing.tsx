@@ -127,12 +127,12 @@ export function Landing({ onLaunch, onVerify, onConnect }: { onLaunch: () => voi
       <section className="lsec">
         <h2>Live on Ethereum Sepolia</h2>
         <p className="llead">The full confidential loop is deployed and exercised on-chain — an encrypted mandate is active and real spend requests have executed, escalated and been blocked. No mock data.</p>
-        <div className="tbl"><table>
+        <div className="tbl responsive-record-table contract-record-table"><table>
           <tbody>
-            <tr><td>VeilGuardModule</td><td><a href={scan(ADDR.VeilGuardModule)} target="_blank" rel="noopener" className="mono">{ADDR.VeilGuardModule}</a></td></tr>
-            <tr><td>Safe (v1.4.1, module enabled)</td><td><a href={scan(ADDR.Safe)} target="_blank" rel="noopener" className="mono">{ADDR.Safe}</a></td></tr>
-            <tr><td>cUSDC (ERC-7984 wrapper)</td><td><a href={scan(ADDR.ConfidentialUSDC)} target="_blank" rel="noopener" className="mono">{ADDR.ConfidentialUSDC}</a></td></tr>
-            <tr><td>Nox NoxCompute</td><td><a href={scan(ADDR.NoxCompute)} target="_blank" rel="noopener" className="mono">{short(ADDR.NoxCompute)}</a></td></tr>
+            <tr><td data-label="Contract">VeilGuardModule</td><td data-label="Sepolia address"><a href={scan(ADDR.VeilGuardModule)} target="_blank" rel="noopener" className="mono">{ADDR.VeilGuardModule}</a></td></tr>
+            <tr><td data-label="Contract">Safe (v1.4.1, module enabled)</td><td data-label="Sepolia address"><a href={scan(ADDR.Safe)} target="_blank" rel="noopener" className="mono">{ADDR.Safe}</a></td></tr>
+            <tr><td data-label="Contract">cUSDC (ERC-7984 wrapper)</td><td data-label="Sepolia address"><a href={scan(ADDR.ConfidentialUSDC)} target="_blank" rel="noopener" className="mono">{ADDR.ConfidentialUSDC}</a></td></tr>
+            <tr><td data-label="Contract">Nox NoxCompute</td><td data-label="Sepolia address"><a href={scan(ADDR.NoxCompute)} target="_blank" rel="noopener" className="mono">{short(ADDR.NoxCompute)}</a></td></tr>
           </tbody>
         </table></div>
         <div className="lcta center">

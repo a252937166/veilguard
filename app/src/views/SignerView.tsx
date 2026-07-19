@@ -17,6 +17,7 @@ import {
   type SafeDecisionFlow,
   type SafeDecisionPhase,
 } from '../components/SafeDecisionProgress';
+import { PanelBody } from '../components/workbench';
 import {
   fetchDemoDecisionAttestation,
   isAttestedUserDecision,
@@ -226,28 +227,30 @@ export function SignerView() {
                   ? <span className="pill bad">USER REJECTED · REFUNDED</span>
                   : <RequestPill state={selected.state} />}
               </header>
-              <dl className="data-list">
-                <div><dt>Requested by</dt><dd className="mono">{short(selected.delegate)}</dd></div>
-                <div><dt>Recipient</dt><dd>{selectedIdentity.trusted ? selectedIdentity.vendor : 'Private identity unavailable'} <span className="mono muted">{short(selected.recipient)}</span></dd></div>
-                <div><dt>Amount</dt><dd>{isOwner || isDemoDelegate ? <Decrypt handle={selected.amount} /> : <span className="enc">Authorised roles only</span>}</dd></div>
-                <div><dt>Escrow</dt><dd>{selected.state === 3 ? 'Reserved · awaiting decision' : selected.state === 2 ? 'Released to recipient' : 'Returned to treasury'}</dd></div>
-                {selected.state === 5 && <div><dt>Decision origin</dt><dd>{selectedIsAttestedReject
-                  ? 'User selected Reject · authenticated by the run-bound server receipt'
-                  : selectedAttestation?.origin === 'timeout'
-                    ? 'Decision window timeout · no user Reject'
-                    : 'Cancellation confirmed · no user Reject attestation'}</dd></div>}
-                <div><dt>Policy thresholds</dt><dd><span className="enc">Protected</span></dd></div>
-              </dl>
+              <PanelBody>
+                <dl className="data-list">
+                  <div><dt>Requested by</dt><dd className="mono">{short(selected.delegate)}</dd></div>
+                  <div><dt>Recipient</dt><dd>{selectedIdentity.trusted ? selectedIdentity.vendor : 'Private identity unavailable'} <span className="mono muted">{short(selected.recipient)}</span></dd></div>
+                  <div><dt>Amount</dt><dd>{isOwner || isDemoDelegate ? <Decrypt handle={selected.amount} /> : <span className="enc">Authorised roles only</span>}</dd></div>
+                  <div><dt>Escrow</dt><dd>{selected.state === 3 ? 'Reserved · awaiting decision' : selected.state === 2 ? 'Released to recipient' : 'Returned to treasury'}</dd></div>
+                  {selected.state === 5 && <div><dt>Decision origin</dt><dd>{selectedIsAttestedReject
+                    ? 'User selected Reject · authenticated by the run-bound server receipt'
+                    : selectedAttestation?.origin === 'timeout'
+                      ? 'Decision window timeout · no user Reject'
+                      : 'Cancellation confirmed · no user Reject attestation'}</dd></div>}
+                  <div><dt>Policy thresholds</dt><dd><span className="enc">Protected</span></dd></div>
+                </dl>
 
-              <ol className="signature-timeline" aria-label="Safe signature timeline">
-                <li className={selectedEvidence?.outcomePath === 'approval' || selected.state === 3 || selected.state === 5 ? 'done' : ''}>
-                  <b>{selectedEvidence?.outcomePath === 'approval' || selected.state === 3 || selected.state === 5 ? 'Request escalated' : 'Execution path indexing'}</b>
-                  <span>{new Date(Number(selected.createdAt) * 1000).toLocaleString()}</span>
-                </li>
-                <li className={safeDecisionTx ? 'done' : selected.state === 3 ? 'active' : ''}><b>Owner A signature</b><span>{safeDecisionTx ? 'Present in the confirmed Safe execution' : selected.state === 3 ? 'Awaiting a decision' : 'Not claimed without transaction evidence'}</span></li>
-                <li className={safeDecisionTx ? 'done' : ''}><b>Owner B co-signature</b><span>{safeDecisionTx ? 'Present in the confirmed threshold execution' : selected.state === 3 ? 'Not requested yet' : 'Not claimed without transaction evidence'}</span></li>
-                <li className={safeDecisionTx ? 'done' : selected.state === 3 ? 'active' : ''}><b>Safe transaction</b><span>{safeDecisionTx ? <a href={scanTx(safeDecisionTx)} target="_blank" rel="noopener">{safeAction === 'reject' ? 'View attested user rejection' : safeAction === 'approve' ? 'View approval' : selected.state === 5 ? 'View cancellation' : 'View decision'} ↗</a> : selected.state === 3 ? 'Pending' : 'Event index unavailable'}</span></li>
-              </ol>
+                <ol className="signature-timeline" aria-label="Safe signature timeline">
+                  <li className={selectedEvidence?.outcomePath === 'approval' || selected.state === 3 || selected.state === 5 ? 'done' : ''}>
+                    <b>{selectedEvidence?.outcomePath === 'approval' || selected.state === 3 || selected.state === 5 ? 'Request escalated' : 'Execution path indexing'}</b>
+                    <span>{new Date(Number(selected.createdAt) * 1000).toLocaleString()}</span>
+                  </li>
+                  <li className={safeDecisionTx ? 'done' : selected.state === 3 ? 'active' : ''}><b>Owner A signature</b><span>{safeDecisionTx ? 'Present in the confirmed Safe execution' : selected.state === 3 ? 'Awaiting a decision' : 'Not claimed without transaction evidence'}</span></li>
+                  <li className={safeDecisionTx ? 'done' : ''}><b>Owner B co-signature</b><span>{safeDecisionTx ? 'Present in the confirmed threshold execution' : selected.state === 3 ? 'Not requested yet' : 'Not claimed without transaction evidence'}</span></li>
+                  <li className={safeDecisionTx ? 'done' : selected.state === 3 ? 'active' : ''}><b>Safe transaction</b><span>{safeDecisionTx ? <a href={scanTx(safeDecisionTx)} target="_blank" rel="noopener">{safeAction === 'reject' ? 'View attested user rejection' : safeAction === 'approve' ? 'View approval' : selected.state === 5 ? 'View cancellation' : 'View decision'} ↗</a> : selected.state === 3 ? 'Pending' : 'Event index unavailable'}</span></li>
+                </ol>
+              </PanelBody>
 
               {selected.state === 3 && (
                 <SafeDecisionDock flow={decisionFlow}>

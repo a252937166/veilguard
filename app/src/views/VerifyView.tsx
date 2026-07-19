@@ -429,7 +429,7 @@ export function VerifyView() {
       <section className="verify-infrastructure" aria-labelledby="deployed-infrastructure-title">
         <div className="card verify-contracts">
           <h3 id="deployed-infrastructure-title">Deployed infrastructure <small>Ethereum Sepolia</small></h3>
-          <div className="tbl"><table>
+          <div className="tbl responsive-record-table contract-record-table"><table>
             <tbody>
               <ContractRow label="VeilGuardModule" address={ADDR.VeilGuardModule} />
               <ContractRow label="Safe v1.4.1 · 2-of-2" address={ADDR.Safe} />
@@ -482,8 +482,8 @@ function FlowTimeline({ stages }: { stages: FlowStage[] }) {
 function ContractRow({ label, address }: { label: string; address: `0x${string}` }) {
   return (
     <tr>
-      <td>{label}</td>
-      <td><a href={scan(address)} target="_blank" rel="noopener noreferrer" className="mono alink">{address}</a></td>
+      <td data-label="Contract">{label}</td>
+      <td data-label="Sepolia address"><a href={scan(address)} target="_blank" rel="noopener noreferrer" className="mono alink">{address}</a></td>
     </tr>
   );
 }

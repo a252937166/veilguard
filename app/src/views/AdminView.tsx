@@ -158,7 +158,7 @@ export function AdminView() {
 
         {step === 0 && (
           <div className="wiz-body">
-            <div className="form-grid" style={{ gridTemplateColumns: '2fr 1fr' }}>
+            <div className="form-grid admin-delegate-grid">
               <div>
                 <label>Delegate address</label>
                 <input value={delegate} onChange={(e) => setDelegate(e.target.value)} className="mono" />
