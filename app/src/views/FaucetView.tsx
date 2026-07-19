@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ADDR, erc20Abi, fmt, scan, short, usdc, wrapperAbi } from '../config';
 import { publicClient } from '../nox';
 import { walletWrite } from '../walletTx';
@@ -14,16 +14,31 @@ const ETH_FAUCETS = [
 export function FaucetView() {
   const { account, run, busy, toast, demoRole } = useApp();
   const [balance, setBalance] = useState<bigint>();
+  const [balanceUnavailable, setBalanceUnavailable] = useState(false);
   const [amount, setAmount] = useState('1000');
   const injected = !demoRole;
 
-  const refreshBalance = async () => {
-    if (!account) return;
-    setBalance((await publicClient.readContract({
-      address: ADDR.TestUSDC, abi: erc20Abi, functionName: 'balanceOf', args: [account],
-    })) as bigint);
-  };
-  useEffect(() => { refreshBalance(); }, [account]);
+  const refreshBalance = useCallback(async () => {
+    if (!account) {
+      setBalance(undefined);
+      setBalanceUnavailable(false);
+      return;
+    }
+    try {
+      const nextBalance = (await publicClient.readContract({
+        address: ADDR.TestUSDC, abi: erc20Abi, functionName: 'balanceOf', args: [account],
+      })) as bigint;
+      setBalance(nextBalance);
+      setBalanceUnavailable(false);
+    } catch {
+      // A public RPC outage must not become an unhandled rejection or make a
+      // successful faucet/wrap transaction look failed. Keep the actions
+      // available and give the user an explicit, recoverable read state.
+      setBalance(undefined);
+      setBalanceUnavailable(true);
+    }
+  }, [account]);
+  useEffect(() => { void refreshBalance(); }, [refreshBalance]);
 
   const claim = () =>
     run(`Claim ${amount} TestUSDC`, async () => {
@@ -103,6 +118,12 @@ export function FaucetView() {
         <h2>2 · TestUSDC — claim in one click
           {account && balance !== undefined && <small>your balance: {fmt(balance)} tUSDC</small>}
         </h2>
+        {account && balanceUnavailable && (
+          <div className="inline-alert warning balance-read-alert" role="status">
+            <span>Balance temporarily unavailable. This does not block a new claim.</span>
+            <button className="btn small" type="button" onClick={() => void refreshBalance()}>Retry balance</button>
+          </div>
+        )}
         <div className="row">
           <div className="faucet-amount-field">
             <label htmlFor="faucet-amount">Amount</label>

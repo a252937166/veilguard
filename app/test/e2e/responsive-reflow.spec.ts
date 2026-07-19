@@ -29,6 +29,12 @@ test.describe('narrow task-surface reflow', () => {
         test.skip(testInfo.project.name !== 'mobile-390', 'One narrow-layout contract is enough for both projects.');
         await page.setViewportSize({ width, height: 844 });
         const { unexpectedNetwork } = await installVisualFixture(page, visualCase.surface);
+        const consoleErrors: string[] = [];
+        const pageErrors: string[] = [];
+        page.on('console', (message) => {
+          if (message.type() === 'error') consoleErrors.push(message.text());
+        });
+        page.on('pageerror', (error) => pageErrors.push(error.message));
 
         await page.goto(visualCase.route, { waitUntil: 'domcontentloaded' });
         await dismissTransientGuidance(page);
@@ -64,6 +70,8 @@ test.describe('narrow task-surface reflow', () => {
         expect(audit.documentOverflow).toBeLessThanOrEqual(1);
         expect(audit.offenders).toEqual([]);
         expect(unexpectedNetwork).toEqual([]);
+        expect(consoleErrors).toEqual([]);
+        expect(pageErrors).toEqual([]);
       });
     }
   }
