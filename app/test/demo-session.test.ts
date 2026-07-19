@@ -125,17 +125,17 @@ test('tour pause and return restore the atomic route and role target', () => {
 test('tour step atomically records the selected object with its route and role', () => {
   let state = createDemoSession({ runId: 'atomic-tour', now: 1, route: { page: 'disclosure-builder' } });
   state = reduce(state, {
-    type: 'TOUR_STEP', step: 5, route: { page: 'audit-packets' }, role: 'auditor',
-    selected: { packetId: '8' }, at: 2,
+    type: 'TOUR_STEP', step: 3, route: { page: 'payment-detail', requestId: '8' }, role: 'delegate',
+    selected: { scenarioKey: 'violation', requestId: '8' }, at: 2,
   });
-  expect(state.route).toEqual({ page: 'audit-packets' });
-  expect(state.role).toBe('auditor');
-  expect(state.selected).toEqual({ packetId: '8' });
+  expect(state.route).toEqual({ page: 'payment-detail', requestId: '8' });
+  expect(state.role).toBe('delegate');
+  expect(state.selected).toEqual({ scenarioKey: 'violation', requestId: '8' });
   expect(state.tour).toEqual(expect.objectContaining({
-    step: 5,
+    step: 3,
     paused: false,
-    expectedRoute: { page: 'audit-packets' },
-    expectedRole: 'auditor',
+    expectedRoute: { page: 'payment-detail', requestId: '8' },
+    expectedRole: 'delegate',
   }));
 });
 
@@ -170,10 +170,18 @@ test('session persistence uses the versioned key', () => {
     setItem: (key: string, value: string) => { values.set(key, value); },
     removeItem: (key: string) => { values.delete(key); },
   };
-  const state = createDemoSession({ runId: 'stored', now: 10 });
+  let state = createDemoSession({ runId: 'stored', now: 10 });
+  state = reduce(state, {
+    type: 'TOUR_STEP', step: 3, route: { page: 'payment-detail', requestId: '13' }, role: 'delegate',
+    selected: { scenarioKey: 'violation', requestId: '13' }, at: 11,
+  });
   expect(saveDemoSession(state, storage)).toBe(true);
   expect(values.has(DEMO_SESSION_KEY)).toBe(true);
-  expect(loadDemoSession(storage)?.runId).toBe('stored');
+  expect(loadDemoSession(storage)).toEqual(expect.objectContaining({
+    runId: 'stored',
+    route: { page: 'payment-detail', requestId: '13' },
+    selected: { scenarioKey: 'violation', requestId: '13' },
+  }));
 });
 
 test('legacy mission migration persists one stable run id', () => {

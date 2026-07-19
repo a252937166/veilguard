@@ -32,12 +32,18 @@ describe('Safe decision feedback', () => {
 
   test('keeps both bounded actions inside the shared dock', () => {
     render(
-      <SafeDecisionDock flow={flow({ phase: 'signing', action: 'reject' })}>
+      <SafeDecisionDock
+        flow={flow({ phase: 'signing', action: 'reject' })}
+        guidedActionId="mission-approval"
+        guidedInstruction="Choose Approve or Reject"
+      >
         <button type="button">Reject &amp; return funds</button>
         <button type="button">Approve payment</button>
       </SafeDecisionDock>,
     );
     expect(screen.getByRole('region', { name: /safe decision actions/i })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /approve or return/i })).toHaveAttribute('data-guided-action', 'mission-approval');
+    expect(screen.getByRole('group', { name: /approve or return/i })).toHaveAttribute('data-guided-instruction', 'Choose Approve or Reject');
     expect(screen.getByRole('button', { name: /reject/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /approve/i })).toBeInTheDocument();
   });

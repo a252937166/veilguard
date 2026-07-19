@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
+import { installVisualFixture } from './fixtures/visual-fixture';
 
 test('task routes survive refresh and fit the viewport', async ({ page }) => {
   await page.goto('/#/verify');
@@ -93,6 +94,52 @@ test('guided role transition does not update routed children during render', asy
   await expect(page).toHaveURL(/#\/payments$/);
   await expect(page.getByRole('heading', { name: /payment inbox/i, level: 2 })).toBeVisible();
   expect(renderWarnings).toEqual([]);
+});
+
+test('Launch handoff opens the run-bound Atlas request and points to the exact next action', async ({ page }) => {
+  const mutationRequests: string[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (request.method() !== 'GET' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost') && url.pathname.startsWith('/api/')) {
+      mutationRequests.push(`${request.method()} ${url.pathname}`);
+    }
+  });
+  const { unexpectedNetwork } = await installVisualFixture(page, 'request-detail', { guidedMission: 'violation' });
+
+  await page.goto('/#/payments');
+  const resumeDialog = page.getByRole('dialog', { name: /continue the unfinished launch day shift/i });
+  await expect(resumeDialog).toBeVisible();
+  await resumeDialog.getByRole('button', { name: /close resume dialog/i }).click();
+  await expect(resumeDialog).toBeHidden();
+
+  await expect(page.getByRole('heading', { name: /payment inbox/i, level: 2 })).toBeVisible();
+  await expect(page.locator('.object-row').filter({ hasText: 'ShieldOps' })).toHaveAttribute('aria-pressed', 'true');
+  const drawer = page.getByRole('complementary', { name: /launch day demo mission/i });
+  await expect(drawer).toContainText('Atlas Contractor · inspect the block');
+  await drawer.getByRole('button', { name: /open blocked request #3/i }).click();
+
+  await expect(page).toHaveURL(/#\/payments\/3$/);
+  await expect(page.locator('.request-detail-heading').getByRole('heading', { name: /request #3/i, level: 1 })).toBeVisible();
+  await expect(page.getByText(/600 cUSDC/).first()).toBeVisible();
+  const decrypt = page.getByRole('button', { name: 'Decrypt the private reason' });
+  await expect(decrypt).toBeFocused();
+  await expect(decrypt).toHaveClass(/guided-action-target/);
+  const describedBy = await decrypt.getAttribute('aria-describedby');
+  expect(describedBy).toMatch(/^guided-action-coach-/);
+  const coach = page.locator(`#${describedBy}`);
+  await expect(coach).toBeVisible();
+  await expect(coach).toContainText('Click “Decrypt the private reason”');
+  await expect(drawer).toHaveClass(/is-action-compact/);
+
+  const targetBox = await decrypt.boundingBox();
+  expect(targetBox).not.toBeNull();
+  expect(targetBox!.height).toBeGreaterThanOrEqual(44);
+  // Trial mode performs Playwright's full actionability and hit-target checks
+  // without dispatching the decrypt action itself.
+  await decrypt.click({ trial: true });
+
+  expect(mutationRequests).toEqual([]);
+  expect(unexpectedNetwork).toEqual([]);
 });
 
 test('demo wallet controls remain operable in the compact header', async ({ page }) => {

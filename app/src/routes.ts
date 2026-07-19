@@ -31,6 +31,10 @@ export type RouteObjectSelection = {
   policyId?: string;
   packetId?: string;
   flowId?: string;
+  /** Guided draft invoices share one route, so the selected preset travels
+   * with the atomic tour navigation intent instead of living only in page
+   * component state. */
+  scenarioKey?: 'routine' | 'approval' | 'violation';
 };
 
 export type LegacyTabName =

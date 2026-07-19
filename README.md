@@ -194,6 +194,18 @@ blocked reason or packet result stays visible until the visitor explicitly
 continues. On mobile, action-required missions collapse to a compact rail above
 the Safe decision dock instead of covering Approve or Reject.
 
+Each action-required Launch step also has a run-aware handoff button. It applies
+the required role, route and object selection together, preselects the fixed
+invoice or eligible disclosure scope, and places keyboard focus plus a visible
+coachmark on the one real next control. This handoff is navigation only: it never
+submits a payment, decrypts a value, chooses a Safe decision or invokes a wallet.
+If asynchronous content does not expose the target within 2.5 seconds, the
+drawer reopens with a retryable loading message instead of spinning forever.
+Multi-stage work keeps the coach attached across safe local transitions such as
+Review → Create and Unlock → Review → disposition → next Packet. Consequential
+submit, decrypt and Safe decision controls still require a separate explicit
+click and never fire automatically.
+
 ## Real 2-of-2 demo committee
 
 The guided ShieldOps Approve/Reject buttons select a constrained demo action;

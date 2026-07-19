@@ -14,7 +14,7 @@ import {
   type AdminDisclosureGroupCheckpoint,
   type AdminDisclosureCheckpoint,
 } from '../disclosure-checkpoint';
-import { loadDemoSession } from '../demo-session';
+import { hasCompleteAuditPacketCoverage, loadDemoSession } from '../demo-session';
 import { advanceGuidedMission, completeMission } from '../missions';
 import { publicClient } from '../nox';
 import { formatAppRoute } from '../routes';
@@ -198,6 +198,15 @@ const guidedScope = (session: ReturnType<typeof loadDemoSession>, requests: Spen
 
 const terminal = (entry: ScopeEntry) => !!entry.request && TERMINAL_STATES.has(entry.request.state);
 const guidedSelectable = (entry: ScopeEntry) => terminal(entry) && !entry.identityError && !!entry.scenario;
+const guidedUncoveredSelection = (
+  session: NonNullable<ReturnType<typeof loadDemoSession>>,
+  requests: SpendRequest[],
+) => {
+  const covered = new Set(session.missions.audit.includedRequestIds);
+  return new Set(guidedScope(session, requests)
+    .filter((entry) => !covered.has(entry.id) && guidedSelectable(entry))
+    .map(({ id }) => id));
+};
 
 const packetResultFromCheckpoint = (
   checkpoint: AdminDisclosureCheckpoint,
@@ -256,6 +265,31 @@ export function DisclosureView() {
     };
   }, []);
 
+  useEffect(() => {
+    const prepareGuidedDisclosure = (event: Event) => {
+      const intent = (event as CustomEvent<{ targetId?: string; role?: string; step?: number }>).detail;
+      if (intent?.targetId !== 'mission-disclosure' || intent.role !== 'delegate' || intent.step !== 4) return;
+      const currentSession = loadDemoSession();
+      if (!currentSession?.tour.active || currentSession.tour.step !== 4
+        || hasCompleteAuditPacketCoverage(currentSession) || busy || createLock.current) return;
+
+      // Launch is an explicit preparation command, including when the user is
+      // already on this route. Re-read the durable run instead of relying on a
+      // one-time scope key so a cancelled selection, Review or Result surface
+      // always returns to the safe preselected Select step. This prepares the
+      // irreversible operation but never submits it for the user.
+      setSession(currentSession);
+      setSelected(guidedUncoveredSelection(currentSession, requests));
+      setAdminCheckpoint(null);
+      setResult(null);
+      setError('');
+      setStep('select');
+    };
+
+    window.addEventListener('vg-guided-prepare', prepareGuidedDisclosure);
+    return () => window.removeEventListener('vg-guided-prepare', prepareGuidedDisclosure);
+  }, [busy, requests]);
+
   const scope = useMemo<ScopeEntry[]>(() => {
     if (mode === 'guided-facilitated') return guidedScope(session, requests);
     if (mode === 'admin-wallet') {
@@ -278,10 +312,7 @@ export function DisclosureView() {
     initializedScope.current = scopeKey;
     setError('');
     if (mode === 'guided-facilitated') {
-      const covered = new Set(session?.missions.audit.includedRequestIds ?? []);
-      setSelected(new Set(scope
-        .filter((entry) => !covered.has(entry.id) && guidedSelectable(entry))
-        .map(({ id }) => id)));
+      setSelected(session ? guidedUncoveredSelection(session, requests) : new Set());
       setAdminCheckpoint(null);
     } else if (mode === 'admin-wallet' && account) {
       const checkpoint = loadAdminDisclosureCheckpoint(adminRunKey, account);
@@ -698,7 +729,9 @@ export function DisclosureView() {
   const openAudit = () => {
     const first = session?.missions.audit.packetIds[0] ?? result?.packets[0]?.packetId;
     if (mode === 'guided-facilitated') {
-      const route = { page: 'audit-packets' } as const;
+      const route = first
+        ? { page: 'audit-detail', packetId: String(first) } as const
+        : { page: 'audit-packets' } as const;
       // Commit the tour step, target role, route and selected packet together
       // before changing the shell role/hash. The drawer never observes the
       // transient Delegate-on-Audit mismatch that previously paused the run.
@@ -800,7 +833,15 @@ export function DisclosureView() {
               <span className="muted">{selectedIds.length} selected{mode === 'guided-facilitated' ? ` · ${coveredCount}/3 already covered` : ' · maximum 8'}</span>
               {mode === 'guided-facilitated' && guidedCoverageComplete
                 ? <button type="button" className="btn primary" onClick={openAudit}>Continue as Auditor</button>
-                : <button type="button" className="btn primary" disabled={!selectionValid} onClick={reviewSelection}>Review selected scope</button>}
+                : <button
+                    type="button"
+                    className="btn primary"
+                    data-guided-action="mission-disclosure"
+                    data-guided-instruction="Click “Review selected scope”"
+                    data-guided-follow="true"
+                    disabled={!selectionValid}
+                    onClick={reviewSelection}
+                  >Review selected scope</button>}
             </div>
           </section>
         )}
@@ -836,7 +877,16 @@ export function DisclosureView() {
             )}
             <div className="sticky-actions">
               <button type="button" className="btn ghost" disabled={busy} onClick={() => setStep('select')}>Back to selection</button>
-              <button type="button" className="btn primary" disabled={busy || !selectionValid} onClick={create}>{busy ? <><span className="spin" /> Creating or resuming packets…</> : mode === 'guided-facilitated' ? 'Request facilitated packet creation' : 'Create packets with Admin wallet'}</button>
+              <button
+                type="button"
+                className="btn primary"
+                data-guided-action="mission-disclosure"
+                data-guided-instruction={mode === 'guided-facilitated'
+                  ? 'Click “Request facilitated packet creation”'
+                  : 'Click “Create packets with Admin wallet”'}
+                disabled={busy || !selectionValid}
+                onClick={create}
+              >{busy ? <><span className="spin" /> Creating or resuming packets…</> : mode === 'guided-facilitated' ? 'Request facilitated packet creation' : 'Create packets with Admin wallet'}</button>
             </div>
           </section>
         )}

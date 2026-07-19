@@ -80,7 +80,10 @@ function ActivePaymentOperationDock({
   );
 }
 
-export function DelegateView({ detailRequestId }: { detailRequestId?: string } = {}) {
+export function DelegateView({
+  detailRequestId,
+  guidedScenarioKey,
+}: { detailRequestId?: string; guidedScenarioKey?: DemoScenarioKey } = {}) {
   const {
     account, mandates, requests, run, busy, refresh, toast, goTab, startDemo,
     requestDemoRestart, demoRole, lastUpdated, loadError,
@@ -114,6 +117,33 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
   const [decisionFlow, setDecisionFlow] = useState<SafeDecisionFlow | null>(null);
   const [recoveringDecisionId, setRecoveringDecisionId] = useState<string | null>(null);
   const decisionLock = useRef(false);
+
+  useEffect(() => {
+    if (guidedScenarioKey) setSelectedScenario(guidedScenarioKey);
+  }, [guidedScenarioKey]);
+
+  useEffect(() => {
+    const prepareGuidedInvoice = (event: Event) => {
+      const intent = (event as CustomEvent<{
+        targetId?: string;
+        role?: string;
+        step?: number;
+        selected?: { scenarioKey?: DemoScenarioKey };
+      }>).detail;
+      const scenarioKey = intent?.selected?.scenarioKey;
+      if (!scenarioKey || intent.role !== 'delegate'
+        || intent.targetId !== `mission-${scenarioKey}`) return;
+      const scenarioIndex = DEMO_SCENARIOS.findIndex((scenario) => scenario.key === scenarioKey);
+      if (scenarioIndex < 0 || intent.step !== scenarioIndex + 1) return;
+      const currentSession = loadDemoSession();
+      if (!currentSession?.tour.active || currentSession.tour.step !== intent.step) return;
+      // Every Launch press is a fresh preparation command. Do not rely on a
+      // primitive prop changing after the user manually browsed another row.
+      setSelectedScenario(scenarioKey);
+    };
+    window.addEventListener('vg-guided-prepare', prepareGuidedInvoice);
+    return () => window.removeEventListener('vg-guided-prepare', prepareGuidedInvoice);
+  }, []);
 
   const [flow, setFlowState] = useState<PaymentFlow | null>(null);
   const setFlow = (phase: PaymentPhase, label: string, expect?: number, tx?: `0x${string}`) =>
@@ -1009,6 +1039,7 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
         decisionFlow={decisionFlow}
         decisionError={decisionError}
         canDemoDecide={canDemoDecide}
+        guidedActionId={detailStory ? `mission-${detailStory.key}` : undefined}
         auditPacketIds={detailAuditPacketIds}
         onBack={() => navigate(formatAppRoute({ page: 'payment-inbox' }).slice(1))}
         onRefresh={async () => {
@@ -1085,7 +1116,13 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
 
   const advanceActiveTour = (step: number, route: { page: 'payment-inbox' } | { page: 'disclosure-builder' }) => {
     if (!sessionSnapshot?.tour.active) return;
-    advanceGuidedMission({ step, route, role: 'delegate' });
+    const scenarioKey = step === 1 ? 'routine' : step === 2 ? 'approval' : step === 3 ? 'violation' : undefined;
+    advanceGuidedMission({
+      step,
+      route,
+      role: 'delegate',
+      selected: scenarioKey ? { scenarioKey } : {},
+    });
   };
 
   const openDisclosureBuilder = () => {
@@ -1167,7 +1204,10 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
             {escalated && (() => {
               const demoReq = demoRole === 'delegate' && latestStory?.key === 'approval';
               return (
-                <div className="committee-decision" data-tour="committee-decision">
+                <div
+                  className="committee-decision"
+                  data-tour="committee-decision"
+                >
                   <div className="decision-copy">
                     <div className="cl-row done"><span className="cl-dot">✓</span><span>Funds reserved in confidential escrow</span></div>
                     <div className="cl-row active"><span className="cl-dot">2</span>
@@ -1181,7 +1221,11 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
                     </p>
                   </div>
                   {demoReq ? (
-                    <SafeDecisionDock flow={decisionFlow}>
+                    <SafeDecisionDock
+                      flow={decisionFlow}
+                      guidedActionId="mission-approval"
+                      guidedInstruction="Choose “Approve payment” or “Reject & return funds”"
+                    >
                       <button className="btn danger" disabled={!!decisionBusy} aria-busy={decisionBusy === 'reject'} onClick={() => void decideEscalation(latest, 'reject')}>
                         {decisionBusy === 'reject' ? <><span className="spin" /> Returning funds…</> : 'Reject & return funds'}
                       </button>
@@ -1217,7 +1261,13 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
             {!escalated && (
               <div className="r-cta">
                 {latest.state === 4 && !(reasonRequestId === String(latest.id) && reasonVal)
-                  ? <button className="btn primary" disabled={reasonBusy} onClick={() => void decryptReason(latest)}>{reasonBusy ? <><span className="spin" /> Decrypting…</> : '🔓 Decrypt the private reason'}</button>
+                  ? <button
+                      className="btn primary"
+                      data-guided-action="mission-violation"
+                      data-guided-instruction="Click “Decrypt the private reason”"
+                      disabled={reasonBusy}
+                      onClick={() => void decryptReason(latest)}
+                    >{reasonBusy ? <><span className="spin" /> Decrypting…</> : '🔓 Decrypt the private reason'}</button>
                   : <button className="btn primary" disabled={!!busy} onClick={primaryNext().act}>{primaryNext().label}</button>}
                 <details className="more-menu">
                   <summary>More actions ▾</summary>
@@ -1311,6 +1361,8 @@ export function DelegateView({ detailRequestId }: { detailRequestId?: string } =
               ) : (
                 <button
                   className={`btn ${selectedInvoiceAction.kind === 'open' ? 'ghost' : 'primary'} ${flow && activeOperationKey === selectedStory.key ? 'is-busy' : ''}`}
+                  data-guided-action={`mission-${selectedStory.key}`}
+                  data-guided-instruction={`Click “${selectedInvoiceAction.label}”`}
                   disabled={selectedActionIsRecovering || (selectedActionIsSubmission
                     && (!!busy || submissionLock.current || !!flow
                       || (!!blockingRequest && selectedStory.key !== 'violation')))}
