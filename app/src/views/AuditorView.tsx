@@ -598,7 +598,7 @@ export function AuditorView() {
                       <p className="muted">Disposition is stored locally for this auditor and packet; public states and transactions remain chain-derived.</p>
                     </div>
                   </div>
-                  <div className="tbl">
+                  <div className="tbl responsive-record-table audit-request-table">
                     <table>
                       <thead>
                         <tr><th>Request</th><th>Public outcome</th><th>Disclosed values</th><th>Transactions</th><th>Review disposition</th></tr>
@@ -608,24 +608,24 @@ export function AuditorView() {
                           const disposition = reviews[String(requestId)];
                           return (
                             <tr key={String(requestId)}>
-                              <td>
+                              <td data-label="Request">
                                 <b className="mono">#{String(requestId)}</b>
                                 <span className="audit-recipient">{request ? short(request.recipient) : 'Syncing public request…'}</span>
                               </td>
-                              <td>{request ? <RequestPill state={request.state} /> : <span className="pill dim">SYNCING</span>}</td>
-                              <td>
+                              <td data-label="Public outcome">{request ? <RequestPill state={request.state} /> : <span className="pill dim">SYNCING</span>}</td>
+                              <td data-label="Disclosed values">
                                 <div className="audit-disclosed-values">
                                   <span>Amount {displaySnapshot(packet.snapshotHandles[3 + index * 2])}</span>
                                   <span>Reason {displaySnapshot(packet.snapshotHandles[4 + index * 2], 'reason')}</span>
                                 </div>
                               </td>
-                              <td>
+                              <td data-label="Transactions">
                                 <div className="audit-tx-links">
                                   <TxLink hash={tx?.request} label="Request" />
                                   <TxLink hash={tx?.approval ?? tx?.cancellation ?? tx?.finalize} label={tx?.approval || tx?.cancellation ? 'Safe decision' : 'Finalize'} />
                                 </div>
                               </td>
-                              <td>
+                              <td data-label="Review disposition">
                                 <div
                                   className="audit-review-actions"
                                   role="group"
@@ -653,7 +653,7 @@ export function AuditorView() {
                             </tr>
                           );
                         })}
-                        {!requestRows.length && <tr><td colSpan={5} className="muted">This policy-only packet cannot complete the review mission.</td></tr>}
+                        {!requestRows.length && <tr><td colSpan={5} className="muted audit-empty-cell">This policy-only packet cannot complete the review mission.</td></tr>}
                       </tbody>
                     </table>
                   </div>

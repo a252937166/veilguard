@@ -31,6 +31,8 @@
   --control-radius: 7px;
   --row-radius: 8px;
   --panel-radius: 12px;
+  --panel-gutter: 20px;
+  --panel-gutter-mobile: 16px;
   --ease-out: cubic-bezier(.22, 1, .36, 1);
   --z-sticky: 20;
   --z-popover: 40;

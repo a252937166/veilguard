@@ -28,6 +28,10 @@ export function WorkbenchDetail({ children, labelledBy }: { children: ReactNode;
   return <section className="workbench-detail" aria-labelledby={labelledBy}>{children}</section>;
 }
 
+export function PanelBody({ children, className = '' }: { children: ReactNode; className?: string }) {
+  return <div className={`panel-body ${className}`.trim()}>{children}</div>;
+}
+
 export type WorkbenchTab<T extends string> = { id: T; label: string; count?: number };
 
 export function WorkbenchTabs<T extends string>({

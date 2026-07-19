@@ -84,15 +84,15 @@ export function FaucetView() {
 
       <div className="card">
         <h2>1 · Sepolia ETH — official faucets <small>login/captcha-gated by design — no site can claim for you</small></h2>
-        <div className="tbl"><table>
+        <div className="tbl responsive-record-table"><table>
           <caption className="sr-only">Official Sepolia ETH faucets</caption>
           <thead><tr><th scope="col">Faucet</th><th scope="col">How it works</th><th scope="col">Action</th></tr></thead>
           <tbody>
             {ETH_FAUCETS.map((f) => (
               <tr key={f.url}>
-                <td>{f.name} {f.tag && <span className="pill ok">{f.tag}</span>}</td>
-                <td className="muted">{f.note}</td>
-                <td><a href={f.url} target="_blank" rel="noopener">Open ↗</a></td>
+                <td data-label="Faucet">{f.name} {f.tag && <span className="pill ok">{f.tag}</span>}</td>
+                <td data-label="How it works" className="muted">{f.note}</td>
+                <td data-label="Action"><a className="table-action-link" href={f.url} target="_blank" rel="noopener">Open faucet ↗</a></td>
               </tr>
             ))}
           </tbody>
