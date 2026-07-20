@@ -99,6 +99,12 @@ to the initiating CTA and includes elapsed time, an expected range, a transactio
 link when known, and a recovery explanation. Reduced-motion mode keeps the stage
 state but removes the moving shimmer.
 
+Guided payment readiness is a non-mutating preflight. Its active operation dock
+remains visible while the server checks mandate, cooldown, recent in-flight
+Requests, gas and budget. Recent Requests are read in one bounded Multicall; a
+lost response receives one labelled retry before the UI reports that no
+transaction was sent. Neither attempt encrypts, signs or broadcasts.
+
 An active payment remains visible in an operation dock even while another invoice
 is inspected. A terminal Receipt replaces progress and remains selected until the
 user chooses the next invoice. Safe Approve and Reject use the same contract:
@@ -256,6 +262,8 @@ document scroll width.
   browser responses in visible on-chain recovery, and extended Release Gate
   checkpoints to continue an exact bound/user-attested Reject without
   duplicating the invoice or mislabelling watchdog cancellation.
+- Replaced the sequential Demo readiness history scan with one bounded
+  Multicall and added a visible, fail-closed retry before any payment write.
 
 ### 2026-07-19
 

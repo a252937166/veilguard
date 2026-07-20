@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildDemoMemoHash, createSerialExecutor, sameAddressList } from '../lib/demo-security.mjs';
+import { buildDemoMemoHash, createSerialExecutor, recentRequestIds, sameAddressList } from '../lib/demo-security.mjs';
 
 test('demo memo commitment matches the browser wire vector', () => {
   const hash = buildDemoMemoHash({
@@ -50,4 +50,10 @@ test('recipient schema comparison is ordered and case-insensitive', () => {
   assert.equal(sameAddressList(['0xAa', '0xBb'], ['0xaa', '0xbb']), true);
   assert.equal(sameAddressList(['0xBb', '0xAa'], ['0xaa', '0xbb']), false);
   assert.equal(sameAddressList(['0xAa'], ['0xaa', '0xbb']), false);
+});
+
+test('readiness scans a bounded newest-first request window', () => {
+  assert.deepEqual(recentRequestIds(47n), Array.from({ length: 29 }, (_, index) => 46n - BigInt(index)));
+  assert.deepEqual(recentRequestIds(4n), [3n, 2n, 1n]);
+  assert.deepEqual(recentRequestIds(1n), []);
 });
