@@ -179,11 +179,22 @@ production decision API and retains versioned evidence JSON, Etherscan links,
 traces and a manifest for 90 days.
 
 A partial Gate has one narrow recovery path: `resume_run_id` may reuse a prior
-Approve and execute only the missing Reject. The validator accepts it only when
-the prior manifest has one valid Approve while the Reject recovery pointer is
-exactly `run-started` and contains no request, broadcast, attestation or decision
-hash. The recovered evidence is re-uploaded under the new Gate run before the
-combined manifest is built; any ambiguous pointer blocks the resume.
+Approve and execute only the missing Reject. A clean `run-started` checkpoint may
+begin a new Reject run. Once a ShieldOps request is bound, recovery is object
+preserving: the validator exports its exact run, Request ID and request
+transaction to the single Reject job, which only polls or calls the idempotent
+decision API for that object. A post-decision checkpoint additionally requires a
+matching `origin:user`, action, state and transaction attestation. Watchdog
+`origin:timeout`, unknown terminal state, mismatched request evidence and every
+ambiguous pointer are refused. The recovered Approve is re-uploaded under the new
+Gate run before the combined manifest is built.
+
+Proof publication uses the same recovery rule. `/api/finalize` acquires the
+Request lock before its first RPC/Gateway await and immediately returns `202`;
+the proof and receipt continue in the server-owned background job. The browser
+keeps a visible stage/elapsed-time surface and follows that exact Request on
+Sepolia for a bounded interval. A timeout or lost response is not rendered as
+failure and cannot clear the binding or create a second payment.
 
 The sharing identity is `VeilGuard — Confidential Operations Desk for Safe`.
 The versioned 1200×630 PNG depicts only the real Confidential payment → Safe
@@ -241,6 +252,10 @@ document scroll width.
   client cache recovery.
 - Corrected Overview to describe one confidential treasury workflow rather than
   claiming that the isolated Atlas scenario shares one mandate.
+- Made proof-courier publication asynchronous and request-locked, kept delayed
+  browser responses in visible on-chain recovery, and extended Release Gate
+  checkpoints to continue an exact bound/user-attested Reject without
+  duplicating the invoice or mislabelling watchdog cancellation.
 
 ### 2026-07-19
 

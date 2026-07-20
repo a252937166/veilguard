@@ -58,12 +58,13 @@ const approveEvidence = {
   },
 };
 
-test('resume accepts prior Approve only when Reject never bound or broadcast', async () => {
+test('resume accepts prior Approve and classifies a safe fresh or exact bound Reject recovery', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'veilguard-release-resume-'));
   const manifestPath = join(directory, 'manifest.json');
   const recoveryPath = join(directory, 'recovery.json');
   const outputPath = join(directory, 'approve.json');
   const summaryPath = join(directory, 'resume.json');
+  const githubOutputPath = join(directory, 'github-output.txt');
   const manifest = {
     schema: 'veilguard.production-release-manifest',
     version: 1,
@@ -93,23 +94,68 @@ test('resume accepts prior Approve only when Reject never bound or broadcast', a
     '--source-run', '29724917533',
     '--output', outputPath,
     '--summary', summaryPath,
+    '--github-output', githubOutputPath,
   ];
   const accepted = spawnSync(process.execPath, args, { encoding: 'utf8' });
   assert.equal(accepted.status, 0, accepted.stderr);
   assert.equal(JSON.parse(await readFile(outputPath, 'utf8')).decision.transactionHash, tx('a'));
-  assert.equal(JSON.parse(await readFile(summaryPath, 'utf8')).rejectedAttempt.broadcastObserved, false);
+  assert.deepEqual(JSON.parse(await readFile(summaryPath, 'utf8')).rejectedAttempt, {
+    runId: 'launch-reject-1234',
+    phase: 'run-started',
+    mode: 'fresh',
+    decisionBroadcastObserved: false,
+  });
+  assert.match(await readFile(githubOutputPath, 'utf8'), /reject_mode=fresh/);
 
   recovery.activeBroadcast = { transactionHash: tx('d') };
   await writeFile(recoveryPath, JSON.stringify(recovery));
   const refusedBroadcast = spawnSync(process.execPath, args, { encoding: 'utf8' });
   assert.notEqual(refusedBroadcast.status, 0);
-  assert.match(refusedBroadcast.stderr, /request, broadcast or decision pointer/);
+  assert.match(refusedBroadcast.stderr, /fresh recovery contains a request, broadcast or decision pointer/);
 
-  delete recovery.activeBroadcast;
+  recovery.activeBroadcast = {
+    mission: 'approval',
+    requestId: '45',
+    transactionHash: tx('d'),
+  };
   recovery.phase = 'request-bound';
   recovery.scenario.requestId = '45';
   await writeFile(recoveryPath, JSON.stringify(recovery));
-  const refusedRequest = spawnSync(process.execPath, args, { encoding: 'utf8' });
-  assert.notEqual(refusedRequest.status, 0);
-  assert.match(refusedRequest.stderr, /never bound a request/);
+  const acceptedBound = spawnSync(process.execPath, args, { encoding: 'utf8' });
+  assert.equal(acceptedBound.status, 0, acceptedBound.stderr);
+  assert.deepEqual(JSON.parse(await readFile(summaryPath, 'utf8')).rejectedAttempt, {
+    runId: 'launch-reject-1234',
+    phase: 'request-bound',
+    mode: 'bound',
+    requestId: '45',
+    requestTransactionHash: tx('d'),
+    decisionBroadcastObserved: false,
+  });
+  assert.match(await readFile(githubOutputPath, 'utf8'), /reject_mode=bound[\s\S]*reject_request_id=45[\s\S]*reject_request_tx=0xdddd/);
+
+  recovery.activeBroadcast.requestId = '46';
+  await writeFile(recoveryPath, JSON.stringify(recovery));
+  const refusedMismatchedRequest = spawnSync(process.execPath, args, { encoding: 'utf8' });
+  assert.notEqual(refusedMismatchedRequest.status, 0);
+  assert.match(refusedMismatchedRequest.stderr, /bound recovery request broadcast/);
+
+  recovery.activeBroadcast.requestId = '45';
+  recovery.phase = 'decision-observed';
+  recovery.decision.transactionHash = tx('e');
+  recovery.attestation = {
+    requestId: 45,
+    chainState: 5,
+    origin: 'timeout',
+    action: 'reject',
+    hash: tx('e'),
+  };
+  await writeFile(recoveryPath, JSON.stringify(recovery));
+  const refusedTimeout = spawnSync(process.execPath, args, { encoding: 'utf8' });
+  assert.notEqual(refusedTimeout.status, 0);
+  assert.match(refusedTimeout.stderr, /observed decision attestation/);
+
+  recovery.attestation.origin = 'user';
+  await writeFile(recoveryPath, JSON.stringify(recovery));
+  const acceptedObservedDecision = spawnSync(process.execPath, args, { encoding: 'utf8' });
+  assert.equal(acceptedObservedDecision.status, 0, acceptedObservedDecision.stderr);
 });

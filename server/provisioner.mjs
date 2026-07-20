@@ -282,12 +282,15 @@ async function finalizeRequest(id) {
   id = BigInt(id);
   const key = String(id);
   if (finalizingIds.has(key)) return { skipped: 'in-flight' };
-  const r = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getRequest', args: [id] });
-  if (Number(r[5]) !== 1) return { skipped: 'not-pending', state: Number(r[5]) };
-  const decisionHandle = r[7];
-  if (!(await decisionResolved(decisionHandle))) return { skipped: 'tee-not-ready' };
+  // Own the request before the first RPC/Gateway await. The HTTP courier and
+  // background sweep can discover the same ready handle in the same frame;
+  // locking later would allow both to decrypt and compete for the admin nonce.
   finalizingIds.add(key);
   try {
+    const r = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getRequest', args: [id] });
+    if (Number(r[5]) !== 1) return { skipped: 'not-pending', state: Number(r[5]) };
+    const decisionHandle = r[7];
+    if (!(await decisionResolved(decisionHandle))) return { skipped: 'tee-not-ready' };
     const hc = await getHandleClient();
     const { decryptionProof } = await hc.publicDecrypt(decisionHandle);
     const hash = await adminWrite({
@@ -834,8 +837,18 @@ http.createServer((req, res) => {
         const { requestId } = JSON.parse(body || '{}');
         const idStr = String(requestId);
         if (!/^\d{1,9}$/.test(idStr) || Number(idStr) < 1) return json(res, 400, { error: 'bad requestId' });
-        const result = await finalizeRequest(BigInt(idStr));
-        json(res, 200, { ok: true, ...result });
+        const parsedRequestId = BigInt(idStr);
+        if (!finalizingIds.has(idStr)) {
+          // Proof generation plus a Sepolia receipt can outlive a browser or
+          // reverse-proxy request timeout. Accept the idempotent courier job
+          // immediately and let the client follow the exact request on-chain.
+          void finalizeRequest(parsedRequestId).then((result) => {
+            if (result?.hash) console.log(`[finalize] request #${idStr} published ${result.hash}`);
+          }).catch((error) => {
+            console.log(`[finalize] request #${idStr} failed: ${error?.shortMessage ?? error?.message ?? error}`);
+          });
+        }
+        json(res, 202, { ok: true, processing: true, requestId: Number(parsedRequestId) });
       } catch (e) {
         json(res, 500, { error: e?.shortMessage ?? e?.message ?? 'finalize failed' });
       }

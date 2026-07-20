@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { validateReleaseEvidence } from './release-evidence-validation.mjs';
 
@@ -14,6 +14,9 @@ const manifestPath = resolve(requiredArg('--manifest'));
 const recoveryPath = resolve(requiredArg('--recovery'));
 const outputPath = resolve(requiredArg('--output'));
 const summaryPath = resolve(requiredArg('--summary'));
+const githubOutputPath = args.includes('--github-output')
+  ? resolve(requiredArg('--github-output'))
+  : undefined;
 const sourceRunId = requiredArg('--source-run');
 if (!/^\d{6,20}$/.test(sourceRunId)) throw new Error('source run id must be numeric');
 
@@ -43,10 +46,40 @@ if (recovery?.schema !== 'veilguard.live-release-recovery' || recovery?.version 
 if (String(recovery?.workflow?.runId) !== sourceRunId) errors.push('recovery run id');
 if (recovery?.workflow?.sourceCommit !== manifest?.sourceCommit) errors.push('recovery source commit');
 if (recovery?.scenario?.name !== 'ShieldOps' || !recovery?.scenario?.runId) errors.push('recovery scenario');
-if (recovery?.phase !== 'run-started') errors.push('recovery must prove the Reject path never bound a request');
 if (recovery?.decision?.action !== 'reject') errors.push('recovery action');
-if (recovery?.scenario?.requestId || recovery?.activeBroadcast || recovery?.decision?.transactionHash || recovery?.attestation) {
-  errors.push('recovery contains a request, broadcast or decision pointer');
+const requestId = String(recovery?.scenario?.requestId ?? '');
+const requestBroadcast = recovery?.activeBroadcast;
+const decisionHash = recovery?.decision?.transactionHash;
+const attestation = recovery?.attestation;
+let rejectMode;
+if (recovery?.phase === 'run-started') {
+  rejectMode = 'fresh';
+  if (requestId || requestBroadcast || decisionHash || attestation) {
+    errors.push('fresh recovery contains a request, broadcast or decision pointer');
+  }
+} else if (recovery?.phase === 'request-bound' || recovery?.phase === 'decision-observed') {
+  rejectMode = 'bound';
+  if (!/^\d{1,9}$/.test(requestId)) errors.push('bound recovery request id');
+  if (requestBroadcast?.mission !== 'approval'
+    || String(requestBroadcast?.requestId) !== requestId
+    || !/^0x[0-9a-f]{64}$/i.test(requestBroadcast?.transactionHash ?? '')) {
+    errors.push('bound recovery request broadcast');
+  }
+  if (recovery.phase === 'request-bound' && (decisionHash || attestation)) {
+    errors.push('request-bound recovery contains a decision pointer');
+  }
+  if (recovery.phase === 'decision-observed') {
+    if (!/^0x[0-9a-f]{64}$/i.test(decisionHash ?? '')) errors.push('observed decision transaction hash');
+    if (attestation?.origin !== 'user'
+      || attestation?.action !== 'reject'
+      || attestation?.chainState !== 5
+      || String(attestation?.requestId) !== requestId
+      || attestation?.hash?.toLowerCase() !== decisionHash?.toLowerCase()) {
+      errors.push('observed decision attestation');
+    }
+  }
+} else {
+  errors.push('recovery phase must be run-started, request-bound or decision-observed');
 }
 if (errors.length) throw new Error(`release resume refused: ${errors.join(', ')}`);
 
@@ -69,7 +102,19 @@ await Promise.all([
     rejectedAttempt: {
       runId: recovery.scenario.runId,
       phase: recovery.phase,
-      broadcastObserved: false,
+      mode: rejectMode,
+      requestId: requestId || undefined,
+      requestTransactionHash: requestBroadcast?.transactionHash,
+      decisionBroadcastObserved: !!decisionHash,
     },
   }, null, 2)}\n`, 'utf8'),
 ]);
+if (githubOutputPath) {
+  await appendFile(githubOutputPath, [
+    `reject_mode=${rejectMode}`,
+    `reject_run_id=${recovery.scenario.runId}`,
+    `reject_request_id=${requestId}`,
+    `reject_request_tx=${requestBroadcast?.transactionHash ?? ''}`,
+    '',
+  ].join('\n'), 'utf8');
+}
