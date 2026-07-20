@@ -217,8 +217,13 @@ timer-based auto-approval: after the disclosed three-minute decision window the
 only automatic action is `cancelEscalated`, which returns escrow and restores the
 request budget.
 
-The provisioner enforces three narrow server interfaces:
+The provisioner enforces narrowly scoped server interfaces:
 
+- `POST /api/finalize` accepts one exact Request ID and returns `202` as soon as
+  the idempotent proof-courier job owns it. Proof generation and the Sepolia
+  receipt continue in the background; the browser keeps the Request bound,
+  shows the real stage/elapsed time and reads its terminal chain state. A lost
+  HTTP response is recovery, not failure, and never submits another payment.
 - `POST /api/demo-decision` accepts only the current run's pending ShieldOps
   request, exact recipient and decrypted 60 cUSDC amount. Same-action retries are
   idempotent; `202` returns the current validation/signing/broadcast/confirmation
@@ -309,12 +314,16 @@ final manifest is retained for 90 days. If an assertion fails after broadcast,
 inspect the recovery artifact before any manual rerun instead of blindly creating
 another request.
 
-If Approve succeeds but the independent Reject Job fails before binding any
-request, dispatching the Gate with `resume_run_id` reuses the prior validated
-Approve evidence and runs Reject only. That path is refused unless the prior
-manifest contains exactly one valid Approve and the uploaded Reject recovery
-pointer is still `run-started` with no request, broadcast, attestation or
-transaction hash. This prevents a recovery run from duplicating a Safe action.
+If Approve succeeds but the independent Reject Job fails, dispatching the Gate
+with `resume_run_id` reuses the prior validated Approve evidence and runs Reject
+only. A `run-started` pointer may start a fresh Reject run only when it contains
+no request or transaction pointer. A `request-bound` pointer must instead resume
+that exact run, Request ID and request transaction; it may never submit another
+invoice. A `decision-observed` pointer is accepted only with a matching
+`origin:user` Reject attestation. The live recovery rechecks current chain state
+and refuses watchdog `origin:timeout`, unknown terminal state, mismatched request
+evidence or conflicting action. This prevents both duplicate Safe actions and a
+timeout cancellation being presented as a user's choice.
 
 ```bash
 gh workflow run production-release-gate.yml --ref main \

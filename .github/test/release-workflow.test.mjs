@@ -34,6 +34,8 @@ test('manual release workflow is explicit, serialized, bounded, recoverable, and
   assert.equal((workflow.match(/retention-days: 90/g) ?? []).length, 4);
   assert.match(workflow, /actions\/download-artifact@v5/);
   assert.match(workflow, /recover_approve:[\s\S]*?validate-release-resume\.mjs/);
+  assert.match(workflow, /VEILGUARD_RECOVERY_MODE: \$\{\{ needs\.recover_approve\.outputs\.reject_mode \}\}/);
+  assert.match(workflow, /VEILGUARD_RECOVERY_REQUEST_ID: \$\{\{ needs\.recover_approve\.outputs\.reject_request_id \}\}/);
   assert.match(workflow, /live_reject:[\s\S]*?needs: \[live_approve, recover_approve\]/);
   assert.match(workflow, /Run all 17 Nox contract tests/);
   assert.match(workflow, /Validate and summarize both V1 evidence files/);
@@ -46,6 +48,8 @@ test('manual release workflow is explicit, serialized, bounded, recoverable, and
   assert.match(liveE2e, /phase: 'decision-observed'/);
   assert.match(liveE2e, /finally\s*\{/);
   assert.match(liveE2e, /toast\.err\[role="alert"\]/);
+  assert.match(liveE2e, /recoverBoundReject/);
+  assert.match(liveE2e, /origin === 'timeout'/);
 });
 
 test('ordinary CI never opts into the production action path', async () => {

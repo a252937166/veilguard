@@ -9,7 +9,7 @@ on:
         type: boolean
         default: false
       resume_run_id:
-        description: Optional failed Gate run ID; reuse its verified Approve only when Reject never broadcast
+        description: Optional failed Gate run ID; reuse its verified Approve and safely resume its exact Reject attempt
         required: false
         type: string
         default: ''
@@ -115,6 +115,11 @@ jobs:
     if: ${{ inputs.resume_run_id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      reject_mode: ${{ steps.resume.outputs.reject_mode }}
+      reject_run_id: ${{ steps.resume.outputs.reject_run_id }}
+      reject_request_id: ${{ steps.resume.outputs.reject_request_id }}
+      reject_request_tx: ${{ steps.resume.outputs.reject_request_tx }}
     steps:
       - uses: actions/checkout@v6
       - name: Download prior Gate manifest
@@ -135,14 +140,16 @@ jobs:
           pattern: release-gate-reject-${{ inputs.resume_run_id }}-${{ inputs.resume_run_attempt }}
           path: .prior-reject
           merge-multiple: true
-      - name: Prove Reject never broadcast and recover the verified Approve
+      - name: Validate the exact Reject checkpoint and recover the verified Approve
+        id: resume
         run: |
           node .github/scripts/validate-release-resume.mjs \
             --manifest .prior-manifest/release-manifest.json \
             --recovery .prior-reject/release-evidence/reject.recovery.json \
             --source-run '${{ inputs.resume_run_id }}' \
             --output recovered-evidence/approve.json \
-            --summary recovered-evidence/resume.json
+            --summary recovered-evidence/resume.json \
+            --github-output "$GITHUB_OUTPUT"
       - name: Upload recovered Approve evidence
         uses: actions/upload-artifact@v4
         with:
@@ -180,6 +187,10 @@ jobs:
           VEILGUARD_EXPECTED_UI_SHA: ${{ steps.ui.outputs.sha }}
           VEILGUARD_SOURCE_COMMIT: ${{ github.sha }}
           VEILGUARD_LIVE_EVIDENCE_PATH: release-evidence/reject.json
+          VEILGUARD_RECOVERY_MODE: ${{ needs.recover_approve.outputs.reject_mode }}
+          VEILGUARD_RECOVERY_RUN_ID: ${{ needs.recover_approve.outputs.reject_run_id }}
+          VEILGUARD_RECOVERY_REQUEST_ID: ${{ needs.recover_approve.outputs.reject_request_id }}
+          VEILGUARD_RECOVERY_REQUEST_TX: ${{ needs.recover_approve.outputs.reject_request_tx }}
         run: npx playwright test --project=live-sepolia
       - name: Upload Reject evidence and trace
         if: always()
