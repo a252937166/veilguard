@@ -3,7 +3,7 @@
 export function Logo({ wordmark = true, className = '' }: { wordmark?: boolean; className?: string }) {
   return (
     <span className={`brand ${className}`}>
-      <img src="/shield.png" alt="VeilGuard" className="brand-shield" />
+      <img src="/shield.png" alt="" aria-hidden="true" className="brand-shield" />
       {wordmark && (
         <span className="brand-word">Veil<span className="brand-guard">Guard</span></span>
       )}

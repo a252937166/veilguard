@@ -2,39 +2,33 @@ import {
   createPublicClient,
   createWalletClient,
   custom,
-  fallback,
-  http,
   type PublicClient,
   type WalletClient,
 } from 'viem';
 import { sepolia } from 'viem/chains';
 import { createViemHandleClient, type HandleClient } from '@iexec-nox/handle';
-import { GATEWAY, RPC_URL } from './config';
+import { GATEWAY } from './config';
 import { demoWalletByAddress } from './demo';
+import { sepoliaReadTransport } from './rpc';
 import type { Eip1193Provider } from './wallet';
 
 /** The injected provider chosen at connect time (EIP-6963), or the legacy default. */
 let activeProvider: Eip1193Provider | undefined;
-export function setActiveProvider(p: Eip1193Provider | undefined) { activeProvider = p; }
+const clientCache = new Map<string, Promise<HandleClient>>();
+export function setActiveProvider(p: Eip1193Provider | undefined) {
+  if (activeProvider !== p) clientCache.clear();
+  activeProvider = p;
+}
 export function getActiveProvider(): Eip1193Provider | undefined {
   return activeProvider ?? (window as any).ethereum;
 }
-
-const RPCS = [
-  RPC_URL, // publicnode
-  'https://sepolia.drpc.org',
-  'https://ethereum-sepolia.blockpi.network/v1/rpc/public',
-  'https://endpoints.omniatech.io/v1/eth/sepolia/public',
-  'https://gateway.tenderly.co/public/sepolia',
-  'https://rpc.sepolia.org',
-];
 
 export const publicClient: PublicClient = createPublicClient({
   chain: sepolia,
   // JSON-RPC request batching per endpoint + Multicall3 aggregation: the dashboard's
   // ~20 getMandate/getRequest reads collapse into a single aggregate eth_call, so a
   // 10s poll no longer blows through free-tier rate limits.
-  transport: fallback(RPCS.map((u) => http(u, { batch: true })), { rank: true, retryCount: 2 }),
+  transport: sepoliaReadTransport,
   batch: { multicall: { wait: 24 } },
   // receipt waits poll at this cadence — the default 4s adds needless perceived
   // latency on a 12s-block testnet
@@ -53,21 +47,25 @@ export function makeWalletClient(account: `0x${string}`): WalletClient {
   });
 }
 
-const clientCache = new Map<string, Promise<HandleClient>>();
-
 /**
  * Handle client bound to the connected account. Pins `getAddresses` to that
  * account so encrypt-proof identity and decrypt signatures always agree
  * (workaround for the SDK deriving identity from `getAddresses()[0]`).
  */
 export function handleClientFor(account: `0x${string}`): Promise<HandleClient> {
-  let cached = clientCache.get(account);
+  const key = account.toLowerCase();
+  let cached = clientCache.get(key);
   if (!cached) {
     const wallet = makeWalletClient(account);
     cached = createViemHandleClient(
       { ...wallet, getAddresses: async () => [account] } as any,
     );
-    clientCache.set(account, cached);
+    clientCache.set(key, cached);
+    cached.catch(() => {
+      // Provider denial, a transient RPC fault or SDK bootstrap failure must
+      // remain retryable. Never pin a rejected Promise for the whole session.
+      if (clientCache.get(key) === cached) clientCache.delete(key);
+    });
   }
   return cached;
 }
@@ -78,6 +76,7 @@ export async function handlesResolved(handles: string[]): Promise<boolean> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ handles }),
+      signal: AbortSignal.timeout(6_000),
     });
     if (!res.ok) return false;
     const data = await res.json();

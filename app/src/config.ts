@@ -32,6 +32,8 @@ export const wrapperAbi = [
 
 export const safeAbi = [
   { type: 'function', name: 'getOwners', stateMutability: 'view', inputs: [], outputs: [{ type: 'address[]' }] },
+  { type: 'function', name: 'getThreshold', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'isModuleEnabled', stateMutability: 'view', inputs: [{ name: 'module', type: 'address' }], outputs: [{ type: 'bool' }] },
   { type: 'function', name: 'execTransaction', stateMutability: 'payable', inputs: [
     { name: 'to', type: 'address' }, { name: 'value', type: 'uint256' }, { name: 'data', type: 'bytes' },
     { name: 'operation', type: 'uint8' }, { name: 'safeTxGas', type: 'uint256' }, { name: 'baseGas', type: 'uint256' },
@@ -45,6 +47,9 @@ export const DECISION_LABEL: Record<number, string> = { 1: 'WITHIN MANDATE', 2: 
 /** Friendly names for known payout addresses — raw hex is not a product UI. */
 export const VENDOR_NAMES: Record<string, string> = {
   '0xc4ba09787f46441a517467fc12af459d8268c60f': 'Demo Vendor',
+  '0x04ebe79419f42f12748aba1502331e336219b1f7': 'CloudNode',
+  '0xe32148e45c3b1f8a692bec3baa0079ad103a4c6b': 'ShieldOps',
+  '0x6152f8ebe4e9b35c5042e095fc0e4af98c6a347d': 'Atlas Contractor',
 };
 export const vendorName = (a?: string) => (a ? VENDOR_NAMES[a.toLowerCase()] : undefined);
 

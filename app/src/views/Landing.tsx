@@ -51,7 +51,7 @@ export function Landing({ onLaunch, onVerify, onConnect }: { onLaunch: () => voi
           <div className="lbadge"><span className="dot" /> Live on Ethereum Sepolia · powered by iExec Nox</div>
           <h1 className="lhero-title">
             Confidential Payments.<br />
-            <span className="grad">Transparent Governance.</span>
+            <span>Transparent Governance.</span>
           </h1>
           <p className="lhero-sub">
             A Safe Module that enforces <b>encrypted</b> spending policies — per-payment auto-limits,
@@ -59,25 +59,25 @@ export function Landing({ onLaunch, onVerify, onConnect }: { onLaunch: () => voi
             ever learns <b>execute&nbsp;/&nbsp;escalate&nbsp;/&nbsp;blocked</b>, never the numbers.
           </p>
           <div className="lcta">
-            <button className="btn primary big" onClick={onLaunch}>▶ Start interactive demo</button>
-            <button className="btn big ghost" onClick={onVerify}>🧾 Verify on-chain</button>
+            <button className="btn primary big" onClick={onLaunch}>Start interactive demo</button>
+            <button className="btn big ghost" onClick={onVerify}>Verify on-chain</button>
           </div>
           <button className="lconnect" onClick={onConnect}>or connect my own wallet →</button>
-          <div className="lstats">
-            <div><span className="lstat-num">4</span><span className="lstat-lbl">Governed roles</span></div>
-            <div><span className="lstat-num">100%</span><span className="lstat-lbl">On-chain proofs</span></div>
-            <div><span className="lstat-num">3</span><span className="lstat-lbl">Public outcomes</span></div>
-            <div><span className="lstat-num grad-num">0</span><span className="lstat-lbl">Numbers leaked</span></div>
+          <div className="landing-proof-strip" aria-label="Live deployment proof">
+            <span><b>Ethereum Sepolia</b><small>Live deployment</small></span>
+            <span><b>Safe 2-of-2</b><small>Real governance</small></span>
+            <span><b>iExec Nox</b><small>TEE evaluation</small></span>
+            <span><b>ERC-7984</b><small>Confidential execution</small></span>
           </div>
         </div>
       </section>
 
-      <section className="lfeatures">
+      <section className="capability-rail" aria-label="Confidential system capabilities">
+        <h2 className="sr-only">Confidential system capabilities</h2>
         {FEATURES.map((f) => (
-          <div className="feat" key={f.title}>
+          <div className="capability-item" key={f.title}>
             <span className="feat-ico">{f.icon}</span>
-            <h3>{f.title}</h3>
-            <p>{f.body}</p>
+            <div><h3>{f.title}</h3><p>{f.body}</p></div>
           </div>
         ))}
       </section>
@@ -127,16 +127,16 @@ export function Landing({ onLaunch, onVerify, onConnect }: { onLaunch: () => voi
       <section className="lsec">
         <h2>Live on Ethereum Sepolia</h2>
         <p className="llead">The full confidential loop is deployed and exercised on-chain — an encrypted mandate is active and real spend requests have executed, escalated and been blocked. No mock data.</p>
-        <div className="tbl"><table>
+        <div className="tbl responsive-record-table contract-record-table"><table>
           <tbody>
-            <tr><td>VeilGuardModule</td><td><a href={scan(ADDR.VeilGuardModule)} target="_blank" rel="noopener" className="mono">{ADDR.VeilGuardModule}</a></td></tr>
-            <tr><td>Safe (v1.4.1, module enabled)</td><td><a href={scan(ADDR.Safe)} target="_blank" rel="noopener" className="mono">{ADDR.Safe}</a></td></tr>
-            <tr><td>cUSDC (ERC-7984 wrapper)</td><td><a href={scan(ADDR.ConfidentialUSDC)} target="_blank" rel="noopener" className="mono">{ADDR.ConfidentialUSDC}</a></td></tr>
-            <tr><td>Nox NoxCompute</td><td><a href={scan(ADDR.NoxCompute)} target="_blank" rel="noopener" className="mono">{short(ADDR.NoxCompute)}</a></td></tr>
+            <tr><td data-label="Contract">VeilGuardModule</td><td data-label="Sepolia address"><a href={scan(ADDR.VeilGuardModule)} target="_blank" rel="noopener" className="mono">{ADDR.VeilGuardModule}</a></td></tr>
+            <tr><td data-label="Contract">Safe (v1.4.1, module enabled)</td><td data-label="Sepolia address"><a href={scan(ADDR.Safe)} target="_blank" rel="noopener" className="mono">{ADDR.Safe}</a></td></tr>
+            <tr><td data-label="Contract">cUSDC (ERC-7984 wrapper)</td><td data-label="Sepolia address"><a href={scan(ADDR.ConfidentialUSDC)} target="_blank" rel="noopener" className="mono">{ADDR.ConfidentialUSDC}</a></td></tr>
+            <tr><td data-label="Contract">Nox NoxCompute</td><td data-label="Sepolia address"><a href={scan(ADDR.NoxCompute)} target="_blank" rel="noopener" className="mono">{short(ADDR.NoxCompute)}</a></td></tr>
           </tbody>
         </table></div>
         <div className="lcta center">
-          <button className="btn primary big" onClick={onLaunch}>▶ Start interactive demo</button>
+          <button className="btn primary big" onClick={onLaunch}>Start interactive demo</button>
         </div>
       </section>
     </div>

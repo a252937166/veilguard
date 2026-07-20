@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1200, initial-scale=1">
+  <title>VeilGuard operations desk share card</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --canvas: #090c12;
+      --surface-1: #111722;
+      --surface-2: #161e2b;
+      --border: #273143;
+      --text: #f4f6fb;
+      --muted: #b8c1d1;
+      --tertiary: #929db1;
+      --brand: #7657ff;
+      --link: #70dfcf;
+      --verified: #49d49a;
+    }
+
+    * { box-sizing: border-box; }
+
+    html,
+    body {
+      width: 1200px;
+      height: 630px;
+      margin: 0;
+      overflow: hidden;
+      background: var(--canvas);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .card {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      padding: 58px 72px 54px;
+      isolation: isolate;
+      background:
+        radial-gradient(circle at 84% 5%, rgba(118, 87, 255, .13), transparent 31%),
+        linear-gradient(180deg, #0b0f17 0%, var(--canvas) 62%);
+    }
+
+    .wavefield {
+      position: absolute;
+      z-index: -1;
+      inset: auto -44px -52px;
+      width: 1290px;
+      height: 310px;
+      opacity: .7;
+      pointer-events: none;
+    }
+
+    .wavefield path {
+      fill: none;
+      stroke-width: 1.2;
+      vector-effect: non-scaling-stroke;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      min-width: 0;
+    }
+
+    .brand img {
+      width: 46px;
+      height: 52px;
+      object-fit: contain;
+      filter: drop-shadow(0 0 11px rgba(118, 87, 255, .32));
+    }
+
+    .wordmark {
+      font-size: 31px;
+      font-weight: 740;
+      letter-spacing: -.028em;
+      white-space: nowrap;
+    }
+
+    .wordmark strong { color: #967fff; }
+
+    .network {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      height: 36px;
+      padding: 0 15px;
+      border: 1px solid rgba(73, 212, 154, .42);
+      border-radius: 999px;
+      color: #bff5de;
+      background: rgba(16, 45, 37, .76);
+      font-size: 14px;
+      font-weight: 670;
+    }
+
+    .network::before {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--verified);
+      content: "";
+    }
+
+    main { margin-top: 35px; }
+
+    h1 {
+      max-width: 870px;
+      margin: 0;
+      font-size: 62px;
+      line-height: 1.02;
+      letter-spacing: -.038em;
+      text-wrap: balance;
+    }
+
+    .lede {
+      max-width: 830px;
+      margin: 20px 0 0;
+      color: var(--muted);
+      font-size: 21px;
+      line-height: 1.42;
+      text-wrap: pretty;
+    }
+
+    .flow {
+      position: absolute;
+      right: 72px;
+      bottom: 54px;
+      left: 72px;
+      display: grid;
+      grid-template-columns: 1fr 38px 1fr 38px 1fr;
+      align-items: stretch;
+    }
+
+    .stage {
+      min-height: 112px;
+      padding: 20px 20px 18px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(17, 23, 34, .91);
+    }
+
+    .stage-head {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      margin-bottom: 11px;
+      font-size: 17px;
+      font-weight: 710;
+      letter-spacing: -.012em;
+    }
+
+    .stage-icon {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      flex: 0 0 auto;
+      border-radius: 8px;
+      color: #d9d1ff;
+      background: rgba(118, 87, 255, .19);
+    }
+
+    .stage-icon svg {
+      width: 16px;
+      height: 16px;
+      stroke: currentColor;
+      stroke-width: 1.7;
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .stage p {
+      margin: 0;
+      color: var(--tertiary);
+      font-size: 14px;
+      line-height: 1.42;
+    }
+
+    .arrow {
+      position: relative;
+      display: grid;
+      place-items: center;
+      color: var(--link);
+      font-size: 23px;
+    }
+
+    .arrow::before {
+      position: absolute;
+      right: 0;
+      left: 0;
+      height: 1px;
+      background: rgba(112, 223, 207, .28);
+      content: "";
+    }
+
+    .arrow span {
+      position: relative;
+      padding-left: 5px;
+      background: var(--canvas);
+    }
+  </style>
+</head>
+<body>
+  <article class="card" aria-label="VeilGuard confidential operations flow">
+    <svg class="wavefield" viewBox="0 0 1290 310" aria-hidden="true">
+      <defs>
+        <linearGradient id="wave-a" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stop-color="#7657ff" stop-opacity="0"/>
+          <stop offset=".18" stop-color="#9f77ff" stop-opacity=".48"/>
+          <stop offset=".55" stop-color="#7657ff" stop-opacity=".28"/>
+          <stop offset=".86" stop-color="#4f91ff" stop-opacity=".45"/>
+          <stop offset="1" stop-color="#4f91ff" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <g stroke="url(#wave-a)">
+        <path d="M0 191 C160 54 287 268 461 139 S783 34 923 159 S1125 287 1290 102"/>
+        <path d="M0 203 C151 77 296 287 474 151 S771 50 921 175 S1117 300 1290 120" opacity=".78"/>
+        <path d="M0 216 C158 91 307 304 482 166 S785 65 937 188 S1130 303 1290 140" opacity=".6"/>
+        <path d="M0 177 C160 38 274 247 449 126 S774 18 916 145 S1128 266 1290 86" opacity=".58"/>
+        <path d="M0 230 C162 112 320 314 497 183 S798 79 951 202 S1137 306 1290 159" opacity=".4"/>
+        <path d="M0 164 C165 24 266 232 436 113 S764 4 906 130 S1122 252 1290 70" opacity=".38"/>
+      </g>
+    </svg>
+
+    <header>
+      <div class="brand">
+        <img src="../public/shield.png" alt="">
+        <div class="wordmark">Veil<strong>Guard</strong></div>
+      </div>
+      <div class="network">LIVE · Ethereum Sepolia</div>
+    </header>
+
+    <main>
+      <h1>Confidential Operations Desk for Safe</h1>
+      <p class="lede">Private policy checks, real 2-of-2 treasury decisions, and selective disclosure — connected in one verifiable workflow.</p>
+    </main>
+
+    <section class="flow" aria-label="Confidential payment flow">
+      <div class="stage">
+        <div class="stage-head">
+          <span class="stage-icon">
+            <svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 8h8M8 12h5M8 16h3"/></svg>
+          </span>
+          Confidential payment
+        </div>
+        <p>Policy checked inside iExec Nox</p>
+      </div>
+      <div class="arrow" aria-hidden="true"><span>›</span></div>
+      <div class="stage">
+        <div class="stage-head">
+          <span class="stage-icon">
+            <svg viewBox="0 0 24 24"><path d="M12 3 4.5 6.5v5.3c0 4.5 3 7.7 7.5 9.2 4.5-1.5 7.5-4.7 7.5-9.2V6.5L12 3Z"/><path d="m8.7 12 2.1 2.1 4.6-4.7"/></svg>
+          </span>
+          Safe 2-of-2 decision
+        </div>
+        <p>Approve or return reserved escrow</p>
+      </div>
+      <div class="arrow" aria-hidden="true"><span>›</span></div>
+      <div class="stage">
+        <div class="stage-head">
+          <span class="stage-icon">
+            <svg viewBox="0 0 24 24"><path d="M4 5.5h16v13H4zM8 9h8M8 13h5"/><path d="m16.5 16 1.4 1.4 2.6-3"/></svg>
+          </span>
+          Selective disclosure
+        </div>
+        <p>Immutable audit packet snapshots</p>
+      </div>
+    </section>
+  </article>
+</body>
+</html>

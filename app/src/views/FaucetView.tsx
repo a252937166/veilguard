@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ADDR, erc20Abi, fmt, scan, short, usdc, wrapperAbi } from '../config';
 import { publicClient } from '../nox';
 import { walletWrite } from '../walletTx';
 import { useApp } from '../App';
+import { Icon } from '../icons';
 
 const ETH_FAUCETS = [
   { name: 'Google Cloud Faucet', note: 'Sign in with any Google account — 0.05 Sepolia ETH daily, no mainnet balance required.', url: 'https://cloud.google.com/application/web3/faucet/ethereum/sepolia', tag: 'EASIEST' },
@@ -13,16 +14,36 @@ const ETH_FAUCETS = [
 export function FaucetView() {
   const { account, run, busy, toast, demoRole } = useApp();
   const [balance, setBalance] = useState<bigint>();
+  const [balanceChecking, setBalanceChecking] = useState(false);
+  const [balanceUnavailable, setBalanceUnavailable] = useState(false);
   const [amount, setAmount] = useState('1000');
   const injected = !demoRole;
 
-  const refreshBalance = async () => {
-    if (!account) return;
-    setBalance((await publicClient.readContract({
-      address: ADDR.TestUSDC, abi: erc20Abi, functionName: 'balanceOf', args: [account],
-    })) as bigint);
-  };
-  useEffect(() => { refreshBalance(); }, [account]);
+  const refreshBalance = useCallback(async () => {
+    if (!account) {
+      setBalance(undefined);
+      setBalanceChecking(false);
+      setBalanceUnavailable(false);
+      return;
+    }
+    setBalanceChecking(true);
+    try {
+      const nextBalance = (await publicClient.readContract({
+        address: ADDR.TestUSDC, abi: erc20Abi, functionName: 'balanceOf', args: [account],
+      })) as bigint;
+      setBalance(nextBalance);
+      setBalanceUnavailable(false);
+    } catch {
+      // A public RPC outage must not become an unhandled rejection or make a
+      // successful faucet/wrap transaction look failed. Keep the actions
+      // available and give the user an explicit, recoverable read state.
+      setBalance(undefined);
+      setBalanceUnavailable(true);
+    } finally {
+      setBalanceChecking(false);
+    }
+  }, [account]);
+  useEffect(() => { void refreshBalance(); }, [refreshBalance]);
 
   const claim = () =>
     run(`Claim ${amount} TestUSDC`, async () => {
@@ -66,23 +87,32 @@ export function FaucetView() {
 
   return (
     <>
+      <header className="workspace-heading">
+        <div>
+          <span className="detail-kicker">Sepolia utilities</span>
+          <h1>Test funds</h1>
+          <p>Get gas for your wallet, claim the public test asset, or optionally fund the confidential Safe treasury.</p>
+        </div>
+      </header>
+
       <div className="notice">
         Grab <b>Sepolia ETH for gas</b> (official faucets, one is enough) and, if you like, claim demo
         <b> TestUSDC</b>. Note: claiming TestUSDC does <b>not</b> make your wallet a delegate — the module
-        only accepts the delegate address fixed in a mandate. To act as a delegate, use <b>⚡ Try a role</b>
+        only accepts the delegate address fixed in a mandate. To act as a delegate, use <b>Try a role</b>
         in the top bar (a shared demo account that holds the delegate permission).
       </div>
 
       <div className="card">
-        <h3>1 · Sepolia ETH — official faucets <small>login/captcha-gated by design — no site can claim for you</small></h3>
-        <div className="tbl"><table>
-          <thead><tr><th>Faucet</th><th>How it works</th><th></th></tr></thead>
+        <h2>1 · Sepolia ETH — official faucets <small>login/captcha-gated by design — no site can claim for you</small></h2>
+        <div className="tbl responsive-record-table"><table>
+          <caption className="sr-only">Official Sepolia ETH faucets</caption>
+          <thead><tr><th scope="col">Faucet</th><th scope="col">How it works</th><th scope="col">Action</th></tr></thead>
           <tbody>
             {ETH_FAUCETS.map((f) => (
               <tr key={f.url}>
-                <td>{f.name} {f.tag && <span className="pill ok">{f.tag}</span>}</td>
-                <td className="muted">{f.note}</td>
-                <td><a href={f.url} target="_blank" rel="noopener">Open ↗</a></td>
+                <td data-label="Faucet">{f.name} {f.tag && <span className="pill ok">{f.tag}</span>}</td>
+                <td data-label="How it works" className="muted">{f.note}</td>
+                <td data-label="Action"><a className="table-action-link" href={f.url} target="_blank" rel="noopener">Open faucet ↗</a></td>
               </tr>
             ))}
           </tbody>
@@ -90,14 +120,30 @@ export function FaucetView() {
       </div>
 
       <div className="card">
-        <h3>2 · TestUSDC — claim in one click
+        <h2>2 · TestUSDC — claim in one click
           {account && balance !== undefined && <small>your balance: {fmt(balance)} tUSDC</small>}
-        </h3>
-        <div className="row">
-          <div style={{ width: 150 }}>
-            <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} min="1" max="10000" />
+          {account && balance === undefined && balanceChecking && <small role="status">checking balance…</small>}
+        </h2>
+        {account && balanceUnavailable && (
+          <div className="inline-alert warning balance-read-alert" role="status">
+            <span>Balance temporarily unavailable. This does not block a new claim.</span>
+            <button
+              className="btn small"
+              type="button"
+              aria-busy={balanceChecking}
+              disabled={balanceChecking}
+              onClick={() => void refreshBalance()}
+            >
+              {balanceChecking ? <><span className="spin" /> Checking…</> : 'Retry balance'}
+            </button>
           </div>
-          <button className="btn primary" disabled={!account || !!busy} onClick={claim}>💧 Claim TestUSDC</button>
+        )}
+        <div className="row">
+          <div className="faucet-amount-field">
+            <label htmlFor="faucet-amount">Amount</label>
+            <input id="faucet-amount" type="number" value={amount} onChange={(e) => setAmount(e.target.value)} min="1" max="10000" />
+          </div>
+          <button className="btn primary" disabled={!account || !!busy} onClick={claim}><Icon name="funds" /> Claim TestUSDC</button>
         </div>
         <p className="muted" style={{ marginTop: 10, fontSize: 12.5 }}>
           Cap 10,000 per claim · token <a href={scan(ADDR.TestUSDC)} target="_blank" rel="noopener" className="mono">{short(ADDR.TestUSDC)}</a>.
@@ -106,9 +152,9 @@ export function FaucetView() {
       </div>
 
       <div className="card">
-        <h3>3 · Optional — fund the treasury <small>wrap TestUSDC 1:1 into confidential cUSDC held by the Safe</small></h3>
+        <h2>3 · Optional — fund the treasury <small>wrap TestUSDC 1:1 into confidential cUSDC held by the Safe</small></h2>
         <div className="row">
-          <button className="btn" disabled={!account || !!busy} onClick={wrapToTreasury}>🔒 Wrap {amount} → Safe treasury</button>
+          <button className="btn" disabled={!account || !!busy} onClick={wrapToTreasury}><Icon name="payments" /> Wrap {amount} → Safe treasury</button>
           <span className="muted" style={{ fontSize: 12.5 }}>needs TestUSDC balance ≥ amount; the treasury is already funded for the demo</span>
         </div>
         <p className="muted" style={{ marginTop: 10, fontSize: 12.5 }}>

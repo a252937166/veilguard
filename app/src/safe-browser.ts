@@ -6,11 +6,6 @@ const ZERO = '0x0000000000000000000000000000000000000000' as const;
 
 const safeAbi = [
   { type: 'function', name: 'nonce', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
-  { type: 'function', name: 'execTransaction', stateMutability: 'payable', inputs: [
-    { name: 'to', type: 'address' }, { name: 'value', type: 'uint256' }, { name: 'data', type: 'bytes' },
-    { name: 'operation', type: 'uint8' }, { name: 'safeTxGas', type: 'uint256' }, { name: 'baseGas', type: 'uint256' },
-    { name: 'gasPrice', type: 'uint256' }, { name: 'gasToken', type: 'address' }, { name: 'refundReceiver', type: 'address' },
-    { name: 'signatures', type: 'bytes' }], outputs: [{ type: 'bool' }] },
 ] as const;
 
 const SAFE_TX_TYPES = {
@@ -26,10 +21,9 @@ const SAFE_TX_TYPES = {
 export type GovFn = 'activateMandate' | 'executeEscalated' | 'cancelEscalated' | 'retireMandate' | 'unpauseAll';
 
 /**
- * Real in-browser 2-of-2: owner A (the given wallet) signs the SafeTx locally;
- * owner B is co-signed server-side but ONLY for governance calls (the server
- * refuses anything else, so owner A alone can never reach threshold). Both real
- * EIP-712 signatures are combined and execTransaction runs on-chain.
+ * Real 2-of-2: owner A signs the exact SafeTx locally. The server verifies that
+ * signature, the current owner set, latest nonce and canonical governance
+ * calldata, then adds owner B and broadcasts while holding the shared Safe lock.
  */
 export async function governance2of2(
   ownerA: WalletClient,
@@ -48,29 +42,14 @@ export async function governance2of2(
   const sigA = await ownerA.signTypedData({ account: ownerA.account!, domain, types: SAFE_TX_TYPES, primaryType: 'SafeTx', message });
   const ownerAAddr = ownerA.account!.address;
 
-  onStep?.('Owner B: co-signing (governance-only, server-side)…');
-  const res = await fetch('/api/cosign', {
+  onStep?.('Owner B: validating and co-signing the bounded governance action…');
+  const res = await fetch('/api/governance-execute', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ to, data, nonce: Number(nonce) }),
+    body: JSON.stringify({ to, data, nonce: nonce.toString(), signer: ownerAAddr, signature: sigA }),
+    signal: AbortSignal.timeout(45_000),
   });
-  const cos = await res.json();
-  if (!res.ok) throw new Error(cos.error ?? 'owner B co-sign refused');
-  const sigB: `0x${string}` = cos.signature;
-  const ownerBAddr: string = cos.signer;
-
-  // Safe requires signatures concatenated, sorted by signer address ascending.
-  const parts = [
-    { addr: ownerAAddr.toLowerCase(), sig: sigA },
-    { addr: ownerBAddr.toLowerCase(), sig: sigB },
-  ].sort((a, b) => (a.addr < b.addr ? -1 : 1));
-  const signatures = ('0x' + parts.map((p) => p.sig.slice(2)).join('')) as `0x${string}`;
-
-  onStep?.('Executing the 2-of-2 on-chain…');
-  const hash = await ownerA.writeContract({
-    address: ADDR.Safe, abi: safeAbi, functionName: 'execTransaction',
-    args: [to, 0n, data, 0, 0n, 0n, 0n, ZERO, ZERO, signatures],
-    chain: ownerA.chain, account: ownerA.account!,
-  });
-  await publicClient.waitForTransactionReceipt({ hash });
-  return hash;
+  const executed = await res.json();
+  if (!res.ok) throw new Error(executed.error ?? 'governance execution refused');
+  onStep?.('2-of-2 executed on-chain.');
+  return executed.hash as `0x${string}`;
 }
