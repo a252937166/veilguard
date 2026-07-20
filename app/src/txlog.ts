@@ -6,10 +6,11 @@ import { publicClient } from './nox';
 /** Module deploy block (2026-07-17) — logs are fetched from here in ≤9.5k-block
  *  chunks because public Sepolia RPCs cap eth_getLogs ranges. publicnode rejects
  *  ranged getLogs outright (deterministic error, so the fallback transport won't
- *  rotate), so log queries use dedicated log-friendly endpoints. */
+ *  rotate), so log queries use dedicated log-friendly endpoints. Tenderly
+ *  leads because dRPC's free pool rate-limits bursty explorer reads. */
 const DEPLOY_BLOCK = 11_295_790n;
 const CHUNK = 9_500n;
-const LOG_RPCS = ['https://sepolia.drpc.org', 'https://gateway.tenderly.co/public/sepolia'];
+const LOG_RPCS = ['https://gateway.tenderly.co/public/sepolia', 'https://sepolia.drpc.org'];
 const logClients = LOG_RPCS.map((u) => createPublicClient({ chain: sepolia, transport: http(u) }));
 
 async function getLogsRobust(params: any): Promise<any[]> {
