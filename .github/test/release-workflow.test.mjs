@@ -22,15 +22,19 @@ test('manual release workflow is explicit, serialized, bounded, recoverable, and
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /confirm_production:[\s\S]*?required: true[\s\S]*?type: boolean/);
   assert.match(workflow, /permissions:\s*\n\s+contents: read/);
+  assert.match(workflow, /actions: read/);
+  assert.match(workflow, /resume_run_id:[\s\S]*?type: string/);
+  assert.match(workflow, /resume_run_attempt:[\s\S]*?default: '1'/);
   assert.match(workflow, /concurrency:[\s\S]*?group: veilguard-production-release-gate[\s\S]*?cancel-in-progress: false/);
   assert.equal((workflow.match(/VEILGUARD_LIVE_ACTION:/g) ?? []).length, 2);
   assert.equal((workflow.match(/VEILGUARD_LIVE_ACTION: approve/g) ?? []).length, 1);
   assert.equal((workflow.match(/VEILGUARD_LIVE_ACTION: reject/g) ?? []).length, 1);
   assert.equal((workflow.match(/run: npx playwright test --project=live-sepolia/g) ?? []).length, 2);
   assert.equal((workflow.match(/timeout-minutes: 15/g) ?? []).length, 2);
-  assert.equal((workflow.match(/retention-days: 90/g) ?? []).length, 3);
+  assert.equal((workflow.match(/retention-days: 90/g) ?? []).length, 4);
   assert.match(workflow, /actions\/download-artifact@v5/);
-  assert.match(workflow, /live_reject:[\s\S]*?needs: live_approve/);
+  assert.match(workflow, /recover_approve:[\s\S]*?validate-release-resume\.mjs/);
+  assert.match(workflow, /live_reject:[\s\S]*?needs: \[live_approve, recover_approve\]/);
   assert.match(workflow, /Run all 17 Nox contract tests/);
   assert.match(workflow, /Validate and summarize both V1 evidence files/);
   assert.match(workflow, /app\/release-evidence\/approve\*\.json/);
@@ -41,6 +45,7 @@ test('manual release workflow is explicit, serialized, bounded, recoverable, and
   assert.match(liveE2e, /phase: 'request-bound'/);
   assert.match(liveE2e, /phase: 'decision-observed'/);
   assert.match(liveE2e, /finally\s*\{/);
+  assert.match(liveE2e, /toast\.err\[role="alert"\]/);
 });
 
 test('ordinary CI never opts into the production action path', async () => {
