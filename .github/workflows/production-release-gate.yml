@@ -4,13 +4,24 @@ on:
   workflow_dispatch:
     inputs:
       confirm_production:
-        description: I confirm this run will execute one real Approve and one real Reject on Ethereum Sepolia
+        description: I confirm this gate, or its verified resume, may execute the remaining real Safe action(s) on Sepolia
         required: true
         type: boolean
         default: false
+      resume_run_id:
+        description: Optional failed Gate run ID; reuse its verified Approve only when Reject never broadcast
+        required: false
+        type: string
+        default: ''
+      resume_run_attempt:
+        description: Artifact attempt number for resume_run_id
+        required: false
+        type: string
+        default: '1'
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: veilguard-production-release-gate
@@ -29,7 +40,12 @@ jobs:
       - name: Require explicit confirmation
         env:
           CONFIRMED: ${{ inputs.confirm_production }}
-        run: node -e "if (process.env.CONFIRMED !== 'true') { console.error('Explicit production confirmation is required.'); process.exit(1); }"
+          RESUME_RUN_ID: ${{ inputs.resume_run_id }}
+          RESUME_RUN_ATTEMPT: ${{ inputs.resume_run_attempt }}
+        run: |
+          node -e "if (process.env.CONFIRMED !== 'true') { console.error('Explicit production confirmation is required.'); process.exit(1); }"
+          node -e "if (process.env.RESUME_RUN_ID && !/^\d{6,20}$/.test(process.env.RESUME_RUN_ID)) { console.error('Resume run ID must be numeric.'); process.exit(1); }"
+          node -e "if (process.env.RESUME_RUN_ID && !/^\d{1,4}$/.test(process.env.RESUME_RUN_ATTEMPT)) { console.error('Resume run attempt must be numeric.'); process.exit(1); }"
 
   contract_tests:
     name: Nox contract-tests (release blocking)
@@ -54,6 +70,7 @@ jobs:
   live_approve:
     name: Live Sepolia · Approve
     needs: contract_tests
+    if: ${{ inputs.resume_run_id == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -92,9 +109,52 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
+  recover_approve:
+    name: Recover verified prior Approve
+    needs: contract_tests
+    if: ${{ inputs.resume_run_id != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download prior Gate manifest
+        uses: actions/download-artifact@v5
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.resume_run_id }}
+          pattern: release-gate-manifest-${{ inputs.resume_run_id }}-${{ inputs.resume_run_attempt }}
+          path: .prior-manifest
+          merge-multiple: true
+      - name: Download prior Reject recovery pointer
+        uses: actions/download-artifact@v5
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.resume_run_id }}
+          pattern: release-gate-reject-${{ inputs.resume_run_id }}-${{ inputs.resume_run_attempt }}
+          path: .prior-reject
+          merge-multiple: true
+      - name: Prove Reject never broadcast and recover the verified Approve
+        run: |
+          node .github/scripts/validate-release-resume.mjs \
+            --manifest .prior-manifest/release-manifest.json \
+            --recovery .prior-reject/release-evidence/reject.recovery.json \
+            --source-run '${{ inputs.resume_run_id }}' \
+            --output recovered-evidence/approve.json \
+            --summary recovered-evidence/resume.json
+      - name: Upload recovered Approve evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-approve-${{ github.run_id }}-${{ github.run_attempt }}
+          path: recovered-evidence
+          if-no-files-found: error
+          retention-days: 90
+
   live_reject:
     name: Live Sepolia · Reject
-    needs: live_approve
+    needs: [live_approve, recover_approve]
+    if: ${{ always() && (needs.live_approve.result == 'success' || needs.recover_approve.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -136,7 +196,7 @@ jobs:
   manifest:
     name: Release evidence manifest
     if: always()
-    needs: [confirmation, contract_tests, live_approve, live_reject]
+    needs: [confirmation, contract_tests, live_approve, recover_approve, live_reject]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -151,8 +211,9 @@ jobs:
         env:
           RELEASE_CONFIRMATION_RESULT: ${{ needs.confirmation.result }}
           RELEASE_NOX_RESULT: ${{ needs.contract_tests.result }}
-          RELEASE_APPROVE_RESULT: ${{ needs.live_approve.result }}
+          RELEASE_APPROVE_RESULT: ${{ needs.live_approve.result == 'success' && 'success' || needs.recover_approve.result }}
           RELEASE_REJECT_RESULT: ${{ needs.live_reject.result }}
+          RELEASE_RESUMED_FROM_RUN_ID: ${{ inputs.resume_run_id }}
         run: node .github/scripts/build-release-manifest.mjs --input .release-artifacts --output release-manifest.json
       - name: Upload release manifest
         if: always()
