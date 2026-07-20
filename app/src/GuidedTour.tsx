@@ -470,7 +470,7 @@ export function MissionDrawer({
   const step = Math.min(Math.max(session.tour.step, 0), MISSION_STEPS.length - 1);
   const s = MISSION_STEPS[step];
   const arrived = useRef(false);
-  const transitFromStep = useRef(step);
+  const arrivedStep = useRef(step);
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<ChainRefreshResult | null>(null);
   const preparation = deriveGuidedStepPreparation(session, requests, step);
@@ -498,13 +498,17 @@ export function MissionDrawer({
   }, [dispatch, onGuide, onNavigate, requests, session]);
 
   useEffect(() => {
-    // A step change from ANY source — this drawer or a page-level mission CTA
-    // committing advanceGuidedMission — means the run is in transit to the new
-    // step's surface. Router navigations commit inside a startTransition after
-    // the session update, so this render can still show the previous route and
-    // role; that frame is travel, not the user leaving the tour.
-    if (transitFromStep.current !== step) {
-      transitFromStep.current = step;
+    // A page-level CTA advances the run by committing the next step and then
+    // navigating. Those two updates (session step + router route + shell role)
+    // can land on different frames, so the drawer briefly sees a mixed state
+    // that belongs to no single step. Two guards keep that travel from reading
+    // as the user abandoning the tour:
+    //  1. when the step pointer itself moves, the previous step's "arrived"
+    //     latch is stale — reset it so a not-yet-landed route/role can't pause;
+    //  2. while the current route is still a valid target for ANY mission step,
+    //     the run is in transit between steps, not leaving the guided flow.
+    if (arrivedStep.current !== step) {
+      arrivedStep.current = step;
       arrived.current = false;
     }
     if (session.tour.paused) return;
@@ -513,10 +517,14 @@ export function MissionDrawer({
     if (routeMatches && roleMatches) {
       arrived.current = true;
     } else if (arrived.current) {
-      dispatch({
-        type: 'PAUSE_TOUR', runId: session.runId,
-        reason: routeMatches ? 'role-change' : 'navigation',
-      });
+      const inTransit = MISSION_STEPS.some((missionStep) =>
+        isMissionRouteCompatible(missionStep, currentRoute, session));
+      if (!inTransit) {
+        dispatch({
+          type: 'PAUSE_TOUR', runId: session.runId,
+          reason: routeMatches ? 'role-change' : 'navigation',
+        });
+      }
     }
   }, [currentRole, currentRoute, dispatch, s, session, step]);
 

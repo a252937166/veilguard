@@ -67,41 +67,62 @@ test('completed evidence waits for an explicit Continue action', () => {
   expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: 'TOUR_STEP', step: 2 }));
 });
 
-test('a page-level step advance in transit does not pause the tour', () => {
-  let session = createDemoSession({ runId: 'transit-advance', now: 1, tourActive: true });
-  session = demoSessionReducer(session, {
-    type: 'TOUR_STEP', runId: session.runId, step: 3,
-    route: { page: 'payment-inbox' }, role: 'delegate', at: 2,
+test('a page-level CTA advance never pauses across route/step ordering, but a real exit still pauses', () => {
+  const atViolation = () => {
+    let session = createDemoSession({ runId: 'transit-advance', now: 1, tourActive: true });
+    return demoSessionReducer(session, {
+      type: 'TOUR_STEP', runId: session.runId, step: 3,
+      route: { page: 'payment-inbox' }, role: 'delegate', at: 2,
+    });
+  };
+  const advanced = (session: ReturnType<typeof atViolation>) => demoSessionReducer(session, {
+    type: 'TOUR_STEP', runId: session.runId, step: 4,
+    route: { page: 'disclosure-builder' }, role: 'delegate', at: 3,
   });
-  const dispatch = vi.fn();
-  const shared = {
-    dispatch,
+
+  const shared = () => ({
+    dispatch: vi.fn(),
     currentRole: 'delegate' as const,
     requests: [] as SpendRequest[],
     onNavigate: vi.fn(),
     onRefresh: vi.fn().mockResolvedValue({ status: 'unchanged' as const, checkedAt: 1, changedRequestIds: [] }),
     onGuide: vi.fn(),
     onClose: vi.fn(),
-  };
-  const { rerender } = render(
-    <MissionDrawer session={session} currentRoute={{ page: 'payment-inbox' }} {...shared} />,
-  );
-
-  // A mission CTA commits the next step via advanceGuidedMission; the router
-  // transition has not landed yet, so the drawer still observes the previous
-  // payment route for a frame. That frame is travel, not leaving the tour.
-  const advanced = demoSessionReducer(session, {
-    type: 'TOUR_STEP', runId: session.runId, step: 4,
-    route: { page: 'disclosure-builder' }, role: 'delegate', at: 3,
   });
-  rerender(<MissionDrawer session={advanced} currentRoute={{ page: 'payment-inbox' }} {...shared} />);
-  expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'PAUSE_TOUR' }));
 
-  // Once the transition lands, leaving the surface WITHOUT a step change must
-  // still pause the run.
-  rerender(<MissionDrawer session={advanced} currentRoute={{ page: 'disclosure-builder' }} {...shared} />);
-  rerender(<MissionDrawer session={advanced} currentRoute={{ page: 'policies' }} {...shared} />);
-  expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: 'PAUSE_TOUR', reason: 'navigation' }));
+  // Ordering A — the router route lands a frame BEFORE the session step pointer
+  // catches up. The step is still 3 (violation) while the route is already the
+  // step-4 disclosure builder. That in-transit frame must not pause.
+  {
+    const base = atViolation();
+    const s = shared();
+    const { rerender } = render(<MissionDrawer session={base} currentRoute={{ page: 'payment-inbox' }} {...s} />);
+    rerender(<MissionDrawer session={base} currentRoute={{ page: 'disclosure-builder' }} {...s} />);
+    rerender(<MissionDrawer session={advanced(base)} currentRoute={{ page: 'disclosure-builder' }} {...s} />);
+    expect(s.dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'PAUSE_TOUR' }));
+    cleanup();
+  }
+
+  // Ordering B — the session step lands before the route. Step is 4 while the
+  // route is still the previous payment inbox. Also must not pause.
+  {
+    const base = atViolation();
+    const s = shared();
+    const { rerender } = render(<MissionDrawer session={base} currentRoute={{ page: 'payment-inbox' }} {...s} />);
+    rerender(<MissionDrawer session={advanced(base)} currentRoute={{ page: 'payment-inbox' }} {...s} />);
+    rerender(<MissionDrawer session={advanced(base)} currentRoute={{ page: 'disclosure-builder' }} {...s} />);
+    expect(s.dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'PAUSE_TOUR' }));
+    cleanup();
+  }
+
+  // A route that belongs to no mission step is the user genuinely leaving.
+  {
+    const base = advanced(atViolation());
+    const s = shared();
+    const { rerender } = render(<MissionDrawer session={base} currentRoute={{ page: 'disclosure-builder' }} {...s} />);
+    rerender(<MissionDrawer session={base} currentRoute={{ page: 'policies' }} {...s} />);
+    expect(s.dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: 'PAUSE_TOUR', reason: 'navigation' }));
+  }
 });
 
 test('action step exposes an accessible compact-rail disclosure control', () => {
