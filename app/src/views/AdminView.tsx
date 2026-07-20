@@ -28,6 +28,7 @@ export function AdminView() {
   const [auditor, setAuditor] = useState<string>(ROLES.auditor);
   const [auditMandate, setAuditMandate] = useState<string>('');
   const [auditSel, setAuditSel] = useState<Set<string>>(new Set());
+  const [auditStep, setAuditStep] = useState<0 | 1>(0);
 
   const isAdmin = account?.toLowerCase() === ROLES.financeAdmin.toLowerCase();
 
@@ -120,6 +121,7 @@ export function AdminView() {
       });
       await publicClient.waitForTransactionReceipt({ hash });
       setAuditSel(new Set());
+      setAuditStep(0);
       toast('✓ Selective-disclosure packet created for the auditor.');
     });
 
@@ -156,7 +158,7 @@ export function AdminView() {
 
         {step === 0 && (
           <div className="wiz-body">
-            <div className="form-grid" style={{ gridTemplateColumns: '2fr 1fr' }}>
+            <div className="form-grid admin-delegate-grid">
               <div>
                 <label>Delegate address</label>
                 <input value={delegate} onChange={(e) => setDelegate(e.target.value)} className="mono" />
@@ -244,32 +246,55 @@ export function AdminView() {
             {paused && <span className="pill bad">PAUSED — only the Safe can resume</span>}
           </div>
         </div>
-        <div className="card">
-          <h3>Create disclosure packet <small>selective, immutable</small></h3>
-          <label>Auditor address</label>
-          <input value={auditor} onChange={(e) => setAuditor(e.target.value)} className="mono" />
-          {suggest(auditor, (a) => setAuditor(a))}
-          <label>Mandate</label>
-          <select value={packetMandate} onChange={(e) => { setAuditMandate(e.target.value); setAuditSel(new Set()); }}>
-            {mandates.map((m) => (
-              <option key={String(m.id)} value={String(m.id)}>#{String(m.id)} · {nameOf(m.delegate) ?? short(m.delegate)} · v{m.version}</option>
-            ))}
-          </select>
-          <label>Requests to disclose — tick finished ones ({auditSel.size}/8)</label>
-          <div className="req-picker">
-            {packetReqs.map((r) => (
-              <label key={String(r.id)} className={`req-opt ${auditSel.has(String(r.id)) ? 'on' : ''}`}>
-                <input type="checkbox" checked={auditSel.has(String(r.id))} onChange={() => toggleReq(String(r.id))} />
-                <span className="mono">#{String(r.id)}</span>
-                <span className="mono muted">→ {short(r.recipient)}</span>
-                <RequestPill state={r.state} />
-              </label>
-            ))}
-            {!packetReqs.length && <p className="muted" style={{ fontSize: 12.5 }}>No finished requests on this mandate yet.</p>}
+        <div className="card disclosure-builder">
+          <div className="section-heading compact">
+            <div><h3>Create disclosure packet</h3><p>Scoped, immutable and irreversible once granted.</p></div>
+            <span className="status-badge">{auditStep === 0 ? '1 · Select' : '2 · Review'}</span>
           </div>
-          <div style={{ marginTop: 12 }}>
-            <button className="btn" disabled={!!busy || !isAddress(auditor)} onClick={createPacket}>📦 Create snapshot packet</button>
-          </div>
+          {auditStep === 0 ? (
+            <>
+              <label htmlFor="audit-auditor">Auditor address</label>
+              <input id="audit-auditor" value={auditor} onChange={(e) => setAuditor(e.target.value)} className="mono" />
+              {suggest(auditor, (a) => setAuditor(a))}
+              <label htmlFor="audit-mandate">Mandate</label>
+              <select id="audit-mandate" value={packetMandate} onChange={(e) => { setAuditMandate(e.target.value); setAuditSel(new Set()); }}>
+                {mandates.map((m) => (
+                  <option key={String(m.id)} value={String(m.id)}>#{String(m.id)} · {nameOf(m.delegate) ?? short(m.delegate)} · v{m.version}</option>
+                ))}
+              </select>
+              <label>Terminal requests to disclose ({auditSel.size}/8)</label>
+              <div className="req-picker">
+                {packetReqs.map((r) => (
+                  <label key={String(r.id)} className={`req-opt ${auditSel.has(String(r.id)) ? 'on' : ''}`}>
+                    <input type="checkbox" checked={auditSel.has(String(r.id))} onChange={() => toggleReq(String(r.id))} />
+                    <span className="mono">#{String(r.id)}</span>
+                    <span className="mono muted">→ {short(r.recipient)}</span>
+                    <RequestPill state={r.state} />
+                  </label>
+                ))}
+                {!packetReqs.length && <p className="muted">No terminal requests on this mandate yet.</p>}
+              </div>
+              <div className="detail-actions"><button className="btn primary" disabled={!isAddress(auditor) || !auditSel.size} onClick={() => setAuditStep(1)}>Review irreversible scope →</button></div>
+            </>
+          ) : (
+            <div className="disclosure-review">
+              <div className="inline-alert bad"><b>This grant cannot be revoked.</b> The auditor receives isolated historical handles, never live policy state.</div>
+              <dl className="data-list">
+                <div><dt>Auditor</dt><dd className="mono">{short(auditor)}</dd></div>
+                <div><dt>Mandate</dt><dd className="mono">#{packetMandate}</dd></div>
+                <div><dt>Requests</dt><dd>{[...auditSel].sort().map((id) => `#${id}`).join(', ')}</dd></div>
+              </dl>
+              <div className="fixed-scope">
+                <h4>Contract v1 fixed policy scope</h4>
+                {['Auto-limit snapshot', 'Budget-left snapshot', 'Reserve-floor snapshot'].map((field) => <span key={field} className="status-badge ok">Included · {field}</span>)}
+                <p>The deployed contract always includes these three policy snapshots. They are not optional UI fields.</p>
+              </div>
+              <div className="sticky-decision-bar">
+                <button className="btn ghost" onClick={() => setAuditStep(0)}>Back to selection</button>
+                <button className="btn primary" disabled={!!busy} onClick={createPacket}>Create immutable packet</button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

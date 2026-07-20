@@ -9,7 +9,7 @@ import { publicClient } from './nox';
  *  rotate), so log queries use dedicated log-friendly endpoints. */
 const DEPLOY_BLOCK = 11_295_790n;
 const CHUNK = 9_500n;
-const LOG_RPCS = ['https://sepolia.drpc.org', 'https://ethereum-sepolia.blockpi.network/v1/rpc/public'];
+const LOG_RPCS = ['https://sepolia.drpc.org', 'https://gateway.tenderly.co/public/sepolia'];
 const logClients = LOG_RPCS.map((u) => createPublicClient({ chain: sepolia, transport: http(u) }));
 
 async function getLogsRobust(params: any): Promise<any[]> {
@@ -29,7 +29,17 @@ const EVENTS = {
   rejected: parseAbiItem('event EscalationCancelled(uint256 indexed requestId)'),
 } as const;
 
-export type RequestTxs = { request?: `0x${string}`; finalize?: `0x${string}`; approval?: `0x${string}` };
+export type RequestTxs = {
+  request?: `0x${string}`;
+  finalize?: `0x${string}`;
+  approval?: `0x${string}`;
+  cancellation?: `0x${string}`;
+  outcomePath?: 'direct' | 'approval' | 'blocked';
+  safeAction?: 'approve' | 'reject';
+};
+
+/** The event proves a cancellation transaction, never a user-selected Reject. */
+export const ESCALATION_CANCELLATION_EVIDENCE = Object.freeze({ outcomePath: 'approval' as const });
 
 let cache: Map<string, RequestTxs> | null = null;
 let inflight: Promise<Map<string, RequestTxs>> | null = null;
@@ -42,10 +52,13 @@ export function fetchRequestTxs(force = false): Promise<Map<string, RequestTxs>>
   if (inflight) return inflight;
   inflight = (async () => {
     const map = new Map<string, RequestTxs>();
-    const upsert = (id: bigint, k: keyof RequestTxs, tx: `0x${string}`) => {
+    const upsert = (id: bigint, k: 'request' | 'finalize' | 'approval' | 'cancellation', tx: `0x${string}`) => {
       const cur = map.get(String(id)) ?? {};
       cur[k] = tx;
       map.set(String(id), cur);
+    };
+    const annotate = (id: bigint, patch: Pick<RequestTxs, 'outcomePath' | 'safeAction'>) => {
+      map.set(String(id), { ...(map.get(String(id)) ?? {}), ...patch });
     };
     const latest = await publicClient.getBlockNumber();
     for (let from = DEPLOY_BLOCK; from <= latest; from += CHUNK) {
@@ -59,8 +72,11 @@ export function fetchRequestTxs(force = false): Promise<Map<string, RequestTxs>>
         getLogsRobust({ address: ADDR.VeilGuardModule, event: EVENTS.rejected, fromBlock: from, toBlock }),
       ]);
       req.forEach((l) => upsert(l.args.requestId!, 'request', l.transactionHash));
-      [...exe, ...blk, ...esc].forEach((l) => upsert(l.args.requestId!, 'finalize', l.transactionHash));
-      [...app, ...rej].forEach((l) => upsert(l.args.requestId!, 'approval', l.transactionHash));
+      exe.forEach((l) => { upsert(l.args.requestId!, 'finalize', l.transactionHash); annotate(l.args.requestId!, { outcomePath: 'direct' }); });
+      blk.forEach((l) => { upsert(l.args.requestId!, 'finalize', l.transactionHash); annotate(l.args.requestId!, { outcomePath: 'blocked' }); });
+      esc.forEach((l) => { upsert(l.args.requestId!, 'finalize', l.transactionHash); annotate(l.args.requestId!, { outcomePath: 'approval' }); });
+      app.forEach((l) => { upsert(l.args.requestId!, 'approval', l.transactionHash); annotate(l.args.requestId!, { outcomePath: 'approval', safeAction: 'approve' }); });
+      rej.forEach((l) => { upsert(l.args.requestId!, 'cancellation', l.transactionHash); annotate(l.args.requestId!, ESCALATION_CANCELLATION_EVIDENCE); });
     }
     cache = map;
     return map;

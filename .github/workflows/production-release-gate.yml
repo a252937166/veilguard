@@ -1,0 +1,164 @@
+name: Production Release Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_production:
+        description: I confirm this run will execute one real Approve and one real Reject on Ethereum Sepolia
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: veilguard-production-release-gate
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+  VEILGUARD_LIVE_BASE_URL: https://veilguard.axiqo.xyz
+
+jobs:
+  confirmation:
+    name: Confirm production mutation
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require explicit confirmation
+        env:
+          CONFIRMED: ${{ inputs.confirm_production }}
+        run: node -e "if (process.env.CONFIRMED !== 'true') { console.error('Explicit production confirmation is required.'); process.exit(1); }"
+
+  contract_tests:
+    name: Nox contract-tests (release blocking)
+    needs: confirmation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Run all 17 Nox contract tests
+        run: |
+          npm test -- \
+            "$PWD/test/00-stack.test.ts" \
+            "$PWD/test/10-veilguard-flows.test.ts" \
+            "$PWD/test/20-audit-isolation.test.ts" \
+            "$PWD/test/30-governance.test.ts"
+
+  live_approve:
+    name: Live Sepolia · Approve
+    needs: contract_tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        working-directory: app
+      - run: npx playwright install --with-deps chromium
+        working-directory: app
+      - name: Resolve tested UI SHA
+        id: ui
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Execute one real Approve path
+        timeout-minutes: 15
+        working-directory: app
+        env:
+          VEILGUARD_LIVE_E2E: '1'
+          VEILGUARD_LIVE_ACTION: approve
+          VEILGUARD_EXPECTED_UI_SHA: ${{ steps.ui.outputs.sha }}
+          VEILGUARD_SOURCE_COMMIT: ${{ github.sha }}
+          VEILGUARD_LIVE_EVIDENCE_PATH: release-evidence/approve.json
+        run: npx playwright test --project=live-sepolia
+      - name: Upload Approve evidence and trace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-approve-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            app/release-evidence/approve*.json
+            app/test-results
+            app/playwright-report
+          if-no-files-found: warn
+          retention-days: 90
+
+  live_reject:
+    name: Live Sepolia · Reject
+    needs: live_approve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        working-directory: app
+      - run: npx playwright install --with-deps chromium
+        working-directory: app
+      - name: Resolve tested UI SHA
+        id: ui
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Execute one real Reject path
+        timeout-minutes: 15
+        working-directory: app
+        env:
+          VEILGUARD_LIVE_E2E: '1'
+          VEILGUARD_LIVE_ACTION: reject
+          VEILGUARD_EXPECTED_UI_SHA: ${{ steps.ui.outputs.sha }}
+          VEILGUARD_SOURCE_COMMIT: ${{ github.sha }}
+          VEILGUARD_LIVE_EVIDENCE_PATH: release-evidence/reject.json
+        run: npx playwright test --project=live-sepolia
+      - name: Upload Reject evidence and trace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-reject-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            app/release-evidence/reject*.json
+            app/test-results
+            app/playwright-report
+          if-no-files-found: warn
+          retention-days: 90
+
+  manifest:
+    name: Release evidence manifest
+    if: always()
+    needs: [confirmation, contract_tests, live_approve, live_reject]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download action evidence
+        continue-on-error: true
+        uses: actions/download-artifact@v5
+        with:
+          pattern: release-gate-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .release-artifacts
+      - name: Validate and summarize both V1 evidence files
+        env:
+          RELEASE_CONFIRMATION_RESULT: ${{ needs.confirmation.result }}
+          RELEASE_NOX_RESULT: ${{ needs.contract_tests.result }}
+          RELEASE_APPROVE_RESULT: ${{ needs.live_approve.result }}
+          RELEASE_REJECT_RESULT: ${{ needs.live_reject.result }}
+        run: node .github/scripts/build-release-manifest.mjs --input .release-artifacts --output release-manifest.json
+      - name: Upload release manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-manifest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-manifest.json
+          if-no-files-found: error
+          retention-days: 90

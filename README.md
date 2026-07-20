@@ -19,7 +19,9 @@ and the chain only ever learns a coarse, publicly verifiable outcome:
 Exact limits, remaining budgets, thresholds and amounts are **never** revealed on-chain.
 Auditors receive **scoped, immutable disclosure snapshots** — not live state.
 
-**Live on Ethereum Sepolia** · dApp: **https://veilguard.axiqo.xyz**
+**Live contracts on Ethereum Sepolia** · current public dApp: **https://veilguard.axiqo.xyz**.
+The v1.2 Operations Desk is deployed there. Releases upload every hashed asset
+first, switch `index.html` last, then verify the live footer SHA and dynamic imports.
 
 ## Live deployment (Ethereum Sepolia)
 
@@ -33,7 +35,7 @@ Auditors receive **scoped, immutable disclosure snapshots** — not live state.
 
 Full addresses & roles: [`deployments.json`](./deployments.json).
 
-## On-chain evidence
+## Frozen on-chain evidence run
 
 One clean run on Sepolia (commit `2dde792`), **real 2-of-2 Safe governance** — a single owner cannot act alone. Every hash is verifiable on Etherscan:
 
@@ -89,25 +91,36 @@ scripts/
   smoke-sepolia.ts           on-chain within-mandate loop + latency
   e2e-sepolia.ts             three-state + cancel + audit coverage
   keeper.ts                  untrusted finalize courier (one-shot or loop)
-app/                         React + viem + Nox SDK dApp (5 role views)
+app/                         Hash-routed React + viem + Nox SDK operations desk
+docs/DESIGN.md               canonical judge journey, visual and recovery contract
+server/provisioner.mjs       bounded decision, audit, governance and onboarding API
 feedback.md                  developer feedback on the Nox tooling
 ```
 
 ## Development
 
-Prerequisites: Node.js ≥ 22, Docker running (the plugin boots the Nox off-chain
-stack locally).
+Prerequisites: Node.js **22.x** (pinned in `.nvmrc` / `.node-version`) and Docker
+running (the plugin boots the Nox off-chain stack locally). On Apple Silicon,
+use an arm64 Node process rather than an x64/Rosetta shell; the preflight check
+fails early with a clear message when the runtime is incompatible.
 
 ```sh
+nvm use
 npm install
-npx hardhat test "$PWD/test/00-stack.test.ts" \
-                 "$PWD/test/10-veilguard-flows.test.ts" \
-                 "$PWD/test/20-audit-isolation.test.ts" \
-                 "$PWD/test/30-governance.test.ts"   # 17 tests on the local Nox off-chain stack
+npm --prefix app install
+npm run check
+npm run test:server                    # bounded API and Safe-serialization tests
+npm test -- "$PWD/test/00-stack.test.ts" \
+            "$PWD/test/10-veilguard-flows.test.ts" \
+            "$PWD/test/20-audit-isolation.test.ts" \
+            "$PWD/test/30-governance.test.ts"   # 17 tests on the local Nox off-chain stack
 ```
 
 > Pass **absolute** test paths — `hardhat test` with a relative path can misresolve
 > against `node_modules/@iexec-nox/handle` when the suite imports the handle SDK.
+> With Colima, also export its socket for the Nox plugin, for example
+> `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock`; Docker CLI context selection
+> alone is not visible to the plugin.
 
 ### Deploy & exercise on Sepolia
 
@@ -122,6 +135,8 @@ npx hardhat run scripts/e2e-sepolia.ts    --network sepolia
 
 ```sh
 cd app && npm install && npm run dev      # http://localhost:5173
+npm test                                  # Vitest + React Testing Library
+npm run test:e2e                         # Playwright: 1366x768 + 390x844
 npm run build                             # → app/dist (static SPA)
 ```
 
@@ -133,21 +148,179 @@ KEEPER_LOOP=1 npx hardhat run scripts/keeper.ts --network sepolia   # loop
 ```
 Systemd/cron templates: [`scripts/keeper.service.example`](./scripts/keeper.service.example).
 
-## Interactive 2-of-2 & the demo committee
+## Confidential Operations Desk
 
-The Signer tab performs a **real in-browser 2-of-2**: you sign as **owner A** (the
-demo committee key, intentionally public on testnet) and **owner B is co-signed
-server-side** — but the co-signer refuses anything that is not a bounded
-governance call (`activateMandate` / `executeEscalated` / `cancelEscalated` /
-`retireMandate` / `unpauseAll`). Consequently owner A alone can never reach the
-Safe threshold for a raw transfer, so the public owner-A key cannot drain or
-brick the Safe. Both signatures are genuine EIP-712; `execTransaction` runs
-on-chain. This is a demo committee, not separate human approvers.
+The dApp is organized around work objects rather than disconnected role demos.
+Its refresh-safe routes include `#/overview`, `#/payments`, `#/payments/:id`,
+`#/policies/new`, `#/policies/:id`, `#/policies/:id/new-version`,
+`#/approvals/:id`, `#/disclosure`, `#/audit/:packetId`,
+`#/verify/:flowId`, `#/contracts`, `#/provenance` and `#/funds`. The guided
+Launch Day run cannot skip ahead:
 
-The self-service provisioner (`/api/provision`) is likewise hardened: idempotent
-per address, a global daily cap, a `PROVISION_ENABLED` kill switch, and CORS
-locked to the app origin. Owner B's key (`/api/cosign`, `/api/provision`) stays
-server-side only.
+1. submit the 25 cUSDC CloudNode invoice and verify direct execution;
+2. submit the 60 cUSDC ShieldOps request and explicitly choose Approve or Reject;
+3. submit the 600 cUSDC Atlas Contractor request, verify it is blocked, and decrypt
+   the private reason as its isolated Delegate;
+4. review the immutable v1 disclosure scope and create the run-bound packet set;
+5. unlock, review or flag every disclosed request, pass integrity checks, then
+   inspect the direct, committee, blocked and audit flows in Verify.
+
+`DemoSessionV2` binds every request and packet to one run. An unfinished run can
+be resumed. Restart is refused until any old pending escalation has been really
+cancelled and its escrow refund confirmed. The public view never receives
+plaintext amounts, policy values or blocked reasons.
+
+Each guided Invoice owns one immutable Attempt once its mission is strictly
+complete. A newer Request with the same run memo cannot replace that Request ID
+or erase its receipt, decision or disclosure identity. An incomplete Attempt is
+retryable only after an authenticated timeout cancellation or an on-chain
+`Expired` state; an unavailable decision attestation remains recoverable and is
+never treated as permission to submit again. Completed Invoice actions open the
+bound Request Detail, while “Start a new demo run” always enters the same guarded
+Restart flow rather than clearing browser state directly.
+
+Payment submission acknowledges the first click immediately and reports the
+single truthful Preflight → Encrypt → Submit → Private check → Publish result
+flow. The transaction hash is persisted at broadcast time; refresh recovery stays
+under Submit and then matches only the current run's domain-separated memo,
+scenario, mandate, delegate and recipient. Invoice drafts remain in the Inbox;
+created Request IDs open a dedicated timeline, Privacy Lens, settlement and
+transaction view. See
+[`docs/DESIGN.md`](./docs/DESIGN.md) for the canonical interaction and recovery
+contract.
+
+Mission evidence never triggers a timed page change. The completed Receipt,
+blocked reason or packet result stays visible until the visitor explicitly
+continues. On mobile, action-required missions collapse to a compact rail above
+the Safe decision dock instead of covering Approve or Reject.
+
+Each action-required Launch step also has a run-aware handoff button. It applies
+the required role, route and object selection together, preselects the fixed
+invoice or eligible disclosure scope, and places keyboard focus plus a visible
+coachmark on the one real next control. This handoff is navigation only: it never
+submits a payment, decrypts a value, chooses a Safe decision or invokes a wallet.
+If asynchronous content does not expose the target within 2.5 seconds, the
+drawer reopens with a retryable loading message instead of spinning forever.
+Multi-stage work keeps the coach attached across safe local transitions such as
+Review → Create and Unlock → Review → disposition → next Packet. Consequential
+submit, decrypt and Safe decision controls still require a separate explicit
+click and never fire automatically. Once a Follow action begins, its busy control
+retains the coach for the full bounded operation; the 2.5-second missing-target
+window starts only if that control actually disappears before its successor exists.
+
+## Real 2-of-2 demo committee
+
+The guided ShieldOps Approve/Reject buttons select a constrained demo action;
+they are not presented as the visitor's signature. Both current Safe owner keys
+remain server-side and produce a real threshold-2 `execTransaction`. There is no
+timer-based auto-approval: after the disclosed three-minute decision window the
+only automatic action is `cancelEscalated`, which returns escrow and restores the
+request budget.
+
+The provisioner enforces three narrow server interfaces:
+
+- `POST /api/demo-decision` accepts only the current run's pending ShieldOps
+  request, exact recipient and decrypted 60 cUSDC amount. Same-action retries are
+  idempotent; `202` returns the current validation/signing/broadcast/confirmation
+  phase and the transaction hash as soon as it exists. `409` is a
+  conflicting decision, `410` means the window expired and escrow was returned,
+  and `503` refuses to sign when Finance Admin cannot decrypt and verify the amount.
+- `GET /api/demo-decision?runId=…&requestId=…` is a read-only, run-bound
+  attestation over the persisted decision journal. A public state-5 cancellation
+  remains `Cancelled and refunded` unless this endpoint proves a matching user
+  Reject; watchdog expiry is reported separately and never impersonates a user.
+- `POST /api/demo-audit-packet` accepts only verified terminal requests from the
+  current run, groups them by mandate and creates or reuses real on-chain packets.
+  The returned bundle is explicitly a UI aggregate, never a synthetic contract object.
+- `POST /api/governance-execute` replaces the removed `/api/cosign`. It verifies a
+  current owner-A EIP-712 signature, canonical allow-listed module calldata and the
+  latest Safe nonce before owner B co-signs and broadcasts.
+
+The disclosure request list is a real scope selector. Guided runs may create one
+or more subsets; packet IDs and covered Request IDs accumulate, and the Auditor
+handoff unlocks only after CloudNode, ShieldOps and Atlas Contractor are all
+covered. Packets are still grouped by mandate and the displayed bundle remains a
+UI aggregate rather than a fabricated contract object.
+
+A connected Finance Admin's complete multi-mandate packet loop holds one
+resource-scoped Operation Coordinator lease for its wallet from the first nonce
+read through the last receipt, reinforced by an origin-wide Web Lock. Conflicting
+wallet operations remain on Review and perform no write. Immediately before
+`wallet_writeContract`, the app durably records an unknown-signature marker and
+starting block. A reload therefore cannot open a second prompt: it must recover a
+unique matching `AuditPacketCreated` transaction from chain. A rejection caught
+by the still-open page clears the pre-broadcast marker; after reload, an unknown
+outcome has no user-asserted clear path and requires manual chain reconciliation.
+A broadcast hash is a non-discardable recovery pointer and is checked against the
+receipt, the unique event and `getAuditPacket`. Only a reverted receipt clears
+that group for a new signature; fully verified success is archived before a new
+scope can begin.
+Guided facilitated creation continues to use the independent server-side Admin
+mutex and never claims the browser wallet resource.
+
+Policies expose the complete authority model without publishing privileged keys:
+the connected Finance Admin may propose a new encrypted mandate or replacement
+Draft and pause the module; a current Safe owner may activate, retire or resume
+through 2-of-2 governance. Finance Admin rotation remains a managed Safe/deployment
+operation outside the public automatic co-sign allowlist.
+
+Every Safe operation shares one serialized nonce boundary from state revalidation
+through receipt. The self-service `/api/provision` path remains idempotent per
+address, daily-capped, protected by `PROVISION_ENABLED`, and CORS-locked to the app
+origin. Finance-admin and both current Safe-owner secrets are never shipped in the
+browser bundle; only intentionally low-power Delegate and snapshot-Auditor testnet
+keys are public.
+
+In production, set `DEMO_DECISION_JOURNAL_PATH` to a writable persistent volume.
+The journal stores the first observed approval timestamp plus terminal decision
+receipts, so the three-minute window and idempotent retries survive a provisioner
+restart. The OS temporary-directory default is suitable only for local development.
+
+### Historical production acceptance
+
+The 2026-07-19 release gate executed both visitor-selectable outcomes as separate
+run-bound requests on the deployed threshold-2 Safe; these are transaction
+receipts, not health-check results or client-side completion flags:
+
+| Path | Request | Terminal proof | Safe transaction |
+| --- | ---: | --- | --- |
+| Approve | #35 | state 2 · `executeEscalated` · `EscalationExecuted` · `origin:user` | [`0xe5d36e…90c6`](https://sepolia.etherscan.io/tx/0xe5d36e657fc77823871f72a2f6d690a9cbad35421af8a3a5e46a4f8f22c890c6) |
+| Reject | #37 | state 5 · `cancelEscalated` · `EscalationCancelled` · `origin:user` | [`0x53aaf5…8c75`](https://sepolia.etherscan.io/tx/0x53aaf51e5874ea929740b90781f2609dca259edd6e351cf7365fb8ed6fa28c75) |
+
+Both receipts target the deployed Safe, call the VeilGuard module with operation
+0, and carry 130 signature bytes (two 65-byte owner signatures). They are
+historical acceptance evidence for this PR, not a claim that the new manual Gate
+has already run.
+
+### Manual Production Release Gate
+
+`.github/workflows/production-release-gate.yml` is intentionally separate from
+ordinary pull-request CI. It becomes manually dispatchable only after the
+workflow exists on the default branch. Before either live action it requires the
+explicit mutation confirmation and verifies that the production UI footer SHA
+equals the selected commit. The blocking order is the 17-test local Nox suite,
+one `live-sepolia` desktop Approve run, then one independent Reject run; neither
+action retries automatically and each has a 15-minute ceiling.
+
+The Actions runner receives no Safe owner or Finance Admin private key. It calls
+only the bounded production API, while keys remain in the production service.
+Each action emits versioned JSON, trace/report files and Etherscan links; the
+final manifest is retained for 90 days. If an assertion fails after broadcast,
+inspect the recovery artifact before any manual rerun instead of blindly creating
+another request.
+
+Ordinary desktop/mobile Playwright never collects the live file. It runs only
+against the local app and includes deterministic dark/reduced-motion visual
+baselines for Landing, Payments, Request Detail, Approval Decision, Disclosure
+Builder and Audit Review at 1366×768 and 390×844. Expected images are reviewed
+and committed; CI uses `threshold: 0.2` and `maxDiffPixelRatio: 0.003` and never
+updates them automatically. Public reads, all three local Demo write signers and
+wallet network setup use only the browser-CORS-verified dRPC, Tenderly and
+PublicNode fallback pool; historical log reads use dRPC and Tenderly. System
+Readiness independently verifies a reachable block, the latest Nox handle, the
+real Safe threshold and module enablement instead of displaying hard-coded green
+states. Provider changes and failed Nox client creation both invalidate their
+account-bound cache so retry remains real.
 
 ## Security & trust model
 
@@ -172,13 +345,22 @@ mandate.
 - **Recipient addresses are public** in P0 (the allow-list is plaintext).
 - **Escalation UX**: signers decrypt the amount in the VeilGuard view and confirm
   the escalated amount in the VeilGuard view; the official Safe UI does not decrypt Nox handles itself.
-- The Sepolia Safe is **2-of-2**: activation and escalation approval each require
-  two distinct owner EIP-712 signatures, threshold 2 (driven on-chain by `scripts/final-evidence.ts`). The signatures are produced by the demo automation, not collected from separate humans via the Safe Transaction Service / Safe{Wallet} queue.
+- The Sepolia Safe is **2-of-2**: activation and escalation decisions each require
+  two distinct owner EIP-712 signatures, threshold 2. Guided-demo signatures are
+  produced by the bounded server committee, not collected from separate humans via
+  the Safe Transaction Service / Safe{Wallet} queue.
+- The deployed v1 audit ABI always snapshots `autoLimit`, `budgetLeft` and
+  `reserveFloor`, plus amount and reason for every selected request. The UI labels
+  this fixed scope; per-field policy masking would require a new contract version.
 - **Changing the Safe owner set does not revoke access already granted to historical
   handles** (Nox ACLs are irreversible). Propose a new policy version after owner rotation.
-- Audit packets are **selective disclosure**, not a standalone compliance proof: they
-  disclose chosen policy values, request amounts and coarse reasons — verify the public
+- Audit packets are **selective disclosure**, not a standalone compliance proof: v1
+  discloses its three fixed policy snapshots plus selected request amounts and coarse
+  reasons — verify the public
   request state and transaction hashes alongside them.
+- The public prototype still discovers full historical Mandate and Request state
+  from ID 1 on each refresh. Multicall keeps the current testnet workload bounded;
+  pagination or an indexed history API is deferred until after the hackathon.
 
 ## License
 

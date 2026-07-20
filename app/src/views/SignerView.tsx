@@ -1,138 +1,308 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { ADDR, scan, scanTx, short } from '../config';
 import { makeWalletClient } from '../nox';
 import { governance2of2, type GovFn } from '../safe-browser';
+import { fetchRequestTxs, type RequestTxs } from '../txlog';
 import { useApp } from '../App';
-import { Decrypt } from '../ui';
-import ev from '../demo-evidence.json';
+import { Decrypt, RequestPill } from '../ui';
+import { completeMission, confirmApprovalDecision, getActiveDemoRunId } from '../missions';
+import { formatAppRoute, parseAppHash } from '../routes';
+import { loadDemoSession } from '../demo-session';
+import { trustedDemoScenarioForRequest } from '../demo-scenarios';
+import {
+  pollDemoSafeDecision,
+  SafeDecisionDock,
+  type SafeDecisionAction,
+  type SafeDecisionFlow,
+  type SafeDecisionPhase,
+} from '../components/SafeDecisionProgress';
+import { PanelBody } from '../components/workbench';
+import {
+  fetchDemoDecisionAttestation,
+  isAttestedUserDecision,
+  isAttestedUserReject,
+  type DemoDecisionAttestation,
+} from '../demo-decision-attestation';
+import { signerDecisionHistory, signerRequestIdentity } from '../signer-evidence';
 
 function ago(ts: bigint): string {
-  const s = Math.floor(Date.now() / 1000) - Number(ts);
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  return `${Math.floor(s / 3600)}h`;
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000) - Number(ts));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m`;
+  return `${Math.floor(seconds / 3_600)}h`;
 }
 
 export function SignerView() {
-  const { account, owners, mandates, requests, paused, run, busy, refresh, toast } = useApp();
-  const isOwner = owners.some((o) => o.toLowerCase() === account?.toLowerCase());
-  const [step, setStep] = useState<string | null>(null);
+  const { account, owners, mandates, requests, paused, run, busy, refresh, toast, demoRole } = useApp();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const route = useMemo(() => parseAppHash(`#${location.pathname}`), [location.pathname]);
+  const selectedId = route?.page === 'approval-detail' && /^\d+$/.test(route.requestId) ? BigInt(route.requestId) : null;
+  const isDetailRoute = route?.page === 'approval-detail';
+  const isOwner = owners.some((owner) => owner.toLowerCase() === account?.toLowerCase());
+  const isDemoDelegate = demoRole === 'delegate';
+  const isDemoMode = demoRole != null;
+  const demoRunId = loadDemoSession()?.runId;
+  const [decisionBusy, setDecisionBusy] = useState<'approve' | 'reject' | null>(null);
+  const [decisionFlow, setDecisionFlow] = useState<SafeDecisionFlow | null>(null);
+  const [selectedAttestation, setSelectedAttestation] = useState<DemoDecisionAttestation>();
+  const decisionLock = useRef(false);
+  const [txs, setTxs] = useState<Map<string, RequestTxs>>(new Map());
 
-  const escalated = requests.filter((r) => r.state === 3);
-  const drafts = mandates.filter((m) => m.state === 1);
+  const isCurrentDemoApproval = (request: (typeof requests)[number]) =>
+    trustedDemoScenarioForRequest(demoRunId, request)?.key === 'approval';
+  const queue = useMemo(() => requests
+    .filter((request) => request.state === 3 && (!isDemoMode || isCurrentDemoApproval(request)))
+    .sort((a, b) => Number(b.id - a.id)), [demoRunId, isDemoMode, requests]);
+  const history = useMemo(() => signerDecisionHistory(requests, txs, {
+    runId: demoRunId,
+    isDemoMode,
+  }), [demoRunId, isDemoMode, requests, txs]);
+  const selected = selectedId == null ? undefined : queue.find((request) => request.id === selectedId) ?? history.find((request) => request.id === selectedId);
+  const selectedIdentity = signerRequestIdentity(demoRunId, isDemoMode, selected);
+  const drafts = mandates.filter((mandate) => mandate.state === 1);
+  const selectedEvidence = selected ? txs.get(String(selected.id)) : undefined;
+  const safeDecisionTx = selectedEvidence?.approval ?? selectedEvidence?.cancellation ?? selectedAttestation?.hash;
+  const selectedIsAttestedApprove = isAttestedUserDecision(selectedAttestation, 'approve', 2);
+  const selectedIsAttestedReject = isAttestedUserReject(selectedAttestation);
+  const safeAction = selectedIsAttestedApprove ? 'approve' : selectedIsAttestedReject ? 'reject' : selectedEvidence?.safeAction;
+  const queueIsEmpty = queue.length === 0 && history.length === 0;
 
-  // real in-browser 2-of-2 (owner A signs here; owner B co-signs governance-only, server-side)
-  const gov = (label: string, fn: GovFn, args: unknown[]) =>
-    run(label, async () => {
-      if (!account) throw new Error('connect a Safe owner');
-      try {
-        const hash = await governance2of2(makeWalletClient(account), fn, args, setStep);
-        toast(`✓ ${label} — executed as a real 2-of-2 (tx ${short(hash)}).`);
-        refresh();
-      } finally { setStep(null); }
+  useEffect(() => { fetchRequestTxs().then(setTxs).catch(() => {}); }, []);
+  useEffect(() => {
+    if (!demoRunId || !selected || (selected.state !== 2 && selected.state !== 5) || !isCurrentDemoApproval(selected)) {
+      setSelectedAttestation(undefined);
+      return;
+    }
+    let stopped = false;
+    setSelectedAttestation(undefined);
+    void fetchDemoDecisionAttestation(demoRunId, selected.id).then((attestation) => {
+      if (stopped) return;
+      setSelectedAttestation(attestation);
+      const action = selected.state === 2 && isAttestedUserDecision(attestation, 'approve', 2)
+        ? 'approve'
+        : selected.state === 5 && isAttestedUserDecision(attestation, 'reject', 5)
+          ? 'reject'
+          : undefined;
+      if (!action) return;
+      confirmApprovalDecision(selected.id, action, {
+        runId: demoRunId,
+        transactionHash: attestation.hash,
+      });
+      completeMission('approval', {
+        requestId: selected.id,
+        outcome: action === 'reject' ? 'cancelled' : 'executed',
+        decision: action,
+        runId: demoRunId,
+      });
     });
+    return () => { stopped = true; };
+    // The trusted identity is fully determined by these primitive object fields.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demoRunId, selected?.id, selected?.state, selected?.memoHash]);
+
+  const selectRequest = (requestId: bigint) => {
+    navigate(formatAppRoute({ page: 'approval-detail', requestId: String(requestId) }).slice(1));
+  };
+
+  const backToApprovals = () => navigate(formatAppRoute({ page: 'approvals' }).slice(1));
+
+  const updateOwnerFlow = (
+    requestId: string,
+    action: SafeDecisionAction,
+    phase: SafeDecisionPhase,
+    hash?: `0x${string}`,
+  ) => setDecisionFlow((current) => ({
+    requestId,
+    action,
+    phase,
+    startedAt: current?.requestId === requestId && current.action === action ? current.startedAt : Date.now(),
+    hash: hash ?? current?.hash,
+  }));
+
+  const gov = async (label: string, fn: GovFn, args: unknown[]) => {
+    if (!account || !selected || decisionLock.current) return;
+    decisionLock.current = true;
+    const action: SafeDecisionAction = fn === 'cancelEscalated' ? 'reject' : 'approve';
+    const requestId = String(selected.id);
+    setDecisionBusy(action);
+    updateOwnerFlow(requestId, action, 'validating');
+    try {
+      const result = await run({
+        key: `safe-decision:${requestId}:${action}`,
+        label,
+        resources: [`safe:${ADDR.Safe.toLowerCase()}`, `request:${requestId}`],
+        feedback: 'inline',
+      }, async () => {
+        const hash = await governance2of2(makeWalletClient(account), fn, args, (message) => {
+          updateOwnerFlow(
+            requestId,
+            action,
+            message.startsWith('Owner') ? 'signing' : 'confirming',
+          );
+        });
+        updateOwnerFlow(requestId, action, 'settled', hash);
+        toast(`Safe 2-of-2 confirmed ${label} · ${short(hash)}`);
+        await refresh();
+        fetchRequestTxs(true).then(setTxs).catch(() => {});
+      });
+      if (result.status !== 'succeeded') setDecisionFlow(null);
+    } finally {
+      setDecisionBusy(null);
+      decisionLock.current = false;
+    }
+  };
+
+  const demoDecision = async (action: 'approve' | 'reject') => {
+    const runId = getActiveDemoRunId();
+    if (!selected || decisionLock.current || trustedDemoScenarioForRequest(runId, selected)?.key !== 'approval') {
+      toast('This request is not the current run-bound ShieldOps approval task.', true);
+      return;
+    }
+    decisionLock.current = true;
+    setDecisionBusy(action);
+    setDecisionFlow(null);
+    try {
+      const result = await pollDemoSafeDecision({
+        runId,
+        requestId: String(selected.id),
+        action,
+        onProgress: setDecisionFlow,
+      });
+      confirmApprovalDecision(selected.id, action, { runId, transactionHash: result.hash });
+      setSelectedAttestation({
+        requestId: Number(selected.id),
+        chainState: action === 'approve' ? 2 : 5,
+        origin: 'user',
+        action,
+        hash: result.hash,
+      });
+      completeMission('approval', {
+        requestId: selected.id,
+        outcome: action === 'reject' ? 'cancelled' : 'executed',
+        decision: action,
+        runId,
+      });
+      toast(action === 'approve' ? 'Safe approval confirmed on-chain.' : 'Safe rejection and escrow return confirmed on-chain.');
+      await refresh();
+      await fetchRequestTxs(true).then(setTxs).catch(() => {});
+    } catch (error: any) {
+      toast(`Decision not completed: ${error?.message ?? error}. Refresh and resume from this request.`, true);
+    } finally { setDecisionBusy(null); decisionLock.current = false; }
+  };
 
   return (
     <>
-      <div className="notice">
-        {isOwner ? (
-          <>You are a <b>Safe owner</b>. Activation and escalation approval each need <b>two owner
-          signatures</b> — you sign as owner A, the governance co-signer provides owner B (bounded
-          calls only). Every action is a real on-chain 2-of-2.</>
-        ) : (
-          <>The treasury committee is a <b>2-of-{owners.length || 2} Safe</b>. Its owner keys are
-          deliberately <b>not public</b> — a signer key could reshape treasury policy. In this demo the
-          committee reviews escalations <b>server-side</b> and approves them with a real 2-of-2 within
-          about a minute; everything it does lands on-chain below, where you can verify it.</>
-        )}
-      </div>
+      <header className="workspace-heading">
+        <div><span className="detail-kicker">Treasury controls</span><h1>Approval Workspace</h1><p>Inspect a reserved request, reveal only the amount you are authorised to view, then approve or return the funds.</p></div>
+        <a className="btn ghost" href={scan(ADDR.Safe)} target="_blank" rel="noopener">Open Safe on Sepolia ↗</a>
+      </header>
 
-      {step && <div className="flowbar"><span className="spin" /> <b>{step}</b></div>}
+      <section className={`workbench approval-workbench ${queueIsEmpty ? 'workbench-empty' : ''} ${isDetailRoute ? 'workbench-route-detail' : 'workbench-route-list'}`}>
+        <aside className="workbench-list" aria-label="Approval requests">
+          <div className="object-list-head"><div><h2>Pending approvals</h2><p>{queue.length} awaiting decision</p></div><span className="object-count">{queue.length}</span></div>
+          {[...queue, ...history].map((request) => {
+            const identity = signerRequestIdentity(demoRunId, isDemoMode, request);
+            return (
+              <button type="button" key={String(request.id)} className={`object-list-item ${selectedId === request.id ? 'selected' : ''}`} aria-current={selectedId === request.id ? 'page' : undefined} onClick={() => selectRequest(request.id)}>
+                <span className="object-avatar">{identity.trusted ? identity.vendor[0] : 'R'}</span>
+                <span><b>{identity.trusted ? identity.vendor : `Request #${request.id}`}</b><small>Request #{String(request.id)} · {short(request.recipient)} · {ago(request.createdAt)} ago</small></span>
+                <RequestPill state={request.state} />
+              </button>
+            );
+          })}
+          {queueIsEmpty && <div className="empty-state queue-empty-copy"><b>No approvals yet</b><span>{isDemoMode ? 'Submit the ShieldOps invoice from Payment Inbox.' : 'Reserved exceptions and indexed Safe decisions will appear here.'}</span></div>}
+        </aside>
 
-      <div className="card">
-        <h3>Pending approvals <small>{isOwner ? 'approve or reject with a 2-of-2' : 'the committee reviews these — watch them resolve live'}</small></h3>
-        {escalated.length ? (
-          <div className="approve-list">
-            {escalated.map((r) => (
-              <div className="approve-card" key={String(r.id)}>
-                <div className="ac-head">
-                  <b>Request #{String(r.id)}</b>
-                  <span className="pill warn">AWAITING APPROVAL</span>
-                  <span className="ac-age">waiting {ago(r.createdAt)}</span>
-                </div>
-                <div className="ac-grid">
-                  <div><span className="ac-label">Requested by</span><span className="mono">{short(r.delegate)}</span></div>
-                  <div><span className="ac-label">Pay to</span><span className="mono">{short(r.recipient)}</span></div>
-                  <div><span className="ac-label">Amount</span>{isOwner ? <Decrypt handle={r.amount} /> : <span className="enc">🔒 owner-gated</span>}</div>
-                  <div><span className="ac-label">Funds</span><span className="ok-text">reserved in escrow</span></div>
-                </div>
-                <div className="ac-why muted">Why: above the mandate's confidential auto-limit — policy requires committee sign-off.</div>
-                <div className="row" style={{ marginTop: 10 }}>
+        <article className="workbench-detail">
+          {selected ? (
+            <>
+              <button type="button" className="mobile-detail-back" onClick={backToApprovals}>
+                <span aria-hidden="true">←</span> Pending approvals
+              </button>
+              <header className="workbench-detail-head">
+                <div><span className="detail-kicker">Request #{String(selected.id)}</span><h2>{selectedIdentity.vendor}</h2><p>{selectedIdentity.purpose}</p></div>
+                {selectedIsAttestedReject
+                  ? <span className="pill bad">USER REJECTED · REFUNDED</span>
+                  : <RequestPill state={selected.state} />}
+              </header>
+              <PanelBody>
+                <dl className="data-list">
+                  <div><dt>Requested by</dt><dd className="mono">{short(selected.delegate)}</dd></div>
+                  <div><dt>Recipient</dt><dd>{selectedIdentity.trusted ? selectedIdentity.vendor : 'Private identity unavailable'} <span className="mono muted">{short(selected.recipient)}</span></dd></div>
+                  <div><dt>Amount</dt><dd>{isOwner || isDemoDelegate ? <Decrypt handle={selected.amount} /> : <span className="enc">Authorised roles only</span>}</dd></div>
+                  <div><dt>Escrow</dt><dd>{selected.state === 3 ? 'Reserved · awaiting decision' : selected.state === 2 ? 'Released to recipient' : 'Returned to treasury'}</dd></div>
+                  {selected.state === 5 && <div><dt>Decision origin</dt><dd>{selectedIsAttestedReject
+                    ? 'User selected Reject · authenticated by the run-bound server receipt'
+                    : selectedAttestation?.origin === 'timeout'
+                      ? 'Decision window timeout · no user Reject'
+                      : 'Cancellation confirmed · no user Reject attestation'}</dd></div>}
+                  <div><dt>Policy thresholds</dt><dd><span className="enc">Protected</span></dd></div>
+                </dl>
+
+                <ol className="signature-timeline" aria-label="Safe signature timeline">
+                  <li className={selectedEvidence?.outcomePath === 'approval' || selected.state === 3 || selected.state === 5 ? 'done' : ''}>
+                    <b>{selectedEvidence?.outcomePath === 'approval' || selected.state === 3 || selected.state === 5 ? 'Request escalated' : 'Execution path indexing'}</b>
+                    <span>{new Date(Number(selected.createdAt) * 1000).toLocaleString()}</span>
+                  </li>
+                  <li className={safeDecisionTx ? 'done' : selected.state === 3 ? 'active' : ''}><b>Owner A signature</b><span>{safeDecisionTx ? 'Present in the confirmed Safe execution' : selected.state === 3 ? 'Awaiting a decision' : 'Not claimed without transaction evidence'}</span></li>
+                  <li className={safeDecisionTx ? 'done' : ''}><b>Owner B co-signature</b><span>{safeDecisionTx ? 'Present in the confirmed threshold execution' : selected.state === 3 ? 'Not requested yet' : 'Not claimed without transaction evidence'}</span></li>
+                  <li className={safeDecisionTx ? 'done' : selected.state === 3 ? 'active' : ''}><b>Safe transaction</b><span>{safeDecisionTx ? <a href={scanTx(safeDecisionTx)} target="_blank" rel="noopener">{safeAction === 'reject' ? 'View attested user rejection' : safeAction === 'approve' ? 'View approval' : selected.state === 5 ? 'View cancellation' : 'View decision'} ↗</a> : selected.state === 3 ? 'Pending' : 'Event index unavailable'}</span></li>
+                </ol>
+              </PanelBody>
+
+              {selected.state === 3 && (
+                <SafeDecisionDock flow={decisionFlow}>
                   {isOwner ? (
                     <>
-                      <button className="btn small" disabled={!!busy} onClick={() => gov(`Reject escalation #${r.id}`, 'cancelEscalated', [r.id])}>✕ Reject</button>
-                      <button className="btn small primary" disabled={!!busy} onClick={() => gov(`Approve escalation #${r.id}`, 'executeEscalated', [r.id])}>✓ Approve payment (2-of-2)</button>
+                      <button className="btn danger" disabled={!!busy || !!decisionBusy} aria-busy={decisionBusy === 'reject'} onClick={() => void gov(`reject request #${selected.id}`, 'cancelEscalated', [selected.id])}>{decisionBusy === 'reject' ? <><span className="spin" aria-hidden="true" /> Returning funds…</> : 'Reject & return funds'}</button>
+                      <button className="btn primary" disabled={!!busy || !!decisionBusy} aria-busy={decisionBusy === 'approve'} onClick={() => void gov(`approve request #${selected.id}`, 'executeEscalated', [selected.id])}>{decisionBusy === 'approve' ? <><span className="spin" aria-hidden="true" /> Executing 2-of-2…</> : 'Approve payment'}</button>
                     </>
-                  ) : (
-                    <span className="muted" style={{ fontSize: 12.5 }}><span className="spin" /> committee review in progress — approves automatically in ≤1 min</span>
-                  )}
+                  ) : isDemoDelegate ? (
+                    <>
+                      <button className="btn danger" disabled={!!decisionBusy} aria-busy={decisionBusy === 'reject'} onClick={() => void demoDecision('reject')}>{decisionBusy === 'reject' ? <><span className="spin" aria-hidden="true" /> Returning funds…</> : 'Reject & return funds'}</button>
+                      <button className="btn primary" disabled={!!decisionBusy} aria-busy={decisionBusy === 'approve'} onClick={() => void demoDecision('approve')}>{decisionBusy === 'approve' ? <><span className="spin" aria-hidden="true" /> Executing 2-of-2…</> : 'Approve payment'}</button>
+                    </>
+                  ) : <span className="muted">Connect a current Safe owner or return to the guided Demo decision.</span>}
+                </SafeDecisionDock>
+              )}
+              {isDemoDelegate && <div className="inline-alert">Your click selects a strictly validated demo action. It is not represented as your signature; both Safe owner keys remain server-side.</div>}
+            </>
+          ) : (
+            <div className="workbench-empty-detail" role={isDetailRoute ? 'alert' : 'status'}>
+              {isDetailRoute && (
+                <button type="button" className="mobile-detail-back" onClick={backToApprovals}>
+                  <span aria-hidden="true">←</span> Pending approvals
+                </button>
+              )}
+              <header className="workbench-detail-head empty-detail-head">
+                <div>
+                  <span className="workbench-kicker">Committee workspace</span>
+                  <h2>{isDetailRoute ? 'Approval request not found' : queueIsEmpty ? 'Queue ready for ShieldOps' : 'Select a request'}</h2>
+                  <p>{isDetailRoute ? 'This request is not in the current pending or recent ShieldOps queue.' : queueIsEmpty ? 'The next reserved exception will appear here with its real Safe timeline.' : 'Pending and recent committee decisions appear here.'}</p>
                 </div>
+              </header>
+              <div className="empty-detail-body">
+                <b>{queueIsEmpty ? 'Create the approval task from Payment Inbox' : 'Choose a request from the queue'}</b>
+                <span>{queueIsEmpty ? 'Submit the 60 cUSDC ShieldOps invoice; once the TEE reserves escrow, this workspace exposes Approve and Reject.' : 'The detail view keeps the escrow, disclosure and transaction evidence together.'}</span>
+                {queueIsEmpty && <button type="button" className="btn primary" onClick={() => navigate(formatAppRoute({ page: 'payment-inbox' }).slice(1))}>Open Payment Inbox</button>}
               </div>
-            ))}
-          </div>
-        ) : (
-          <p className="muted">Nothing awaiting approval. Submit a payment above the auto-limit as the Delegate (try 60) to create one.</p>
-        )}
-      </div>
+            </div>
+          )}
+        </article>
+      </section>
 
       {isOwner && (
-        <div className="grid2">
-          <div className="card">
-            <h3>Draft policies — activate (2-of-2)</h3>
-            <div className="tbl"><table>
-              <thead><tr><th>ID</th><th>Delegate</th><th>Auto-limit</th><th></th></tr></thead>
-              <tbody>
-                {drafts.map((m) => (
-                  <tr key={String(m.id)}>
-                    <td className="mono">#{String(m.id)}</td>
-                    <td className="mono">{short(m.delegate)}</td>
-                    <td><Decrypt handle={m.autoLimit} /></td>
-                    <td><button className="btn small primary" disabled={!!busy} onClick={() => gov(`Activate mandate #${m.id}`, 'activateMandate', [m.id])}>✓ Activate 2-of-2</button></td>
-                  </tr>
-                ))}
-                {!drafts.length && <tr><td colSpan={4} className="muted">No drafts awaiting activation.</td></tr>}
-              </tbody>
-            </table></div>
+        <section className="surface-section governance-queue">
+          <div className="section-heading"><div><h2>Governance queue</h2><p>Policy activation and emergency recovery use the same real Safe threshold.</p></div></div>
+          <div className="governance-actions">
+            {drafts.map((mandate) => <div key={String(mandate.id)}><span>Activate mandate #{String(mandate.id)} · {short(mandate.delegate)}</span><button className="btn" disabled={!!busy} onClick={() => gov(`activate mandate #${mandate.id}`, 'activateMandate', [mandate.id])}>Activate 2-of-2</button></div>)}
+            {paused && <div><span>Module is paused</span><button className="btn primary" disabled={!!busy} onClick={() => gov('resume all mandates', 'unpauseAll', [])}>Resume 2-of-2</button></div>}
+            {!drafts.length && !paused && <div className="empty-state"><b>No governance actions waiting</b><span>The module is active and no policy draft needs activation.</span></div>}
           </div>
-
-          <div className="card">
-            <h3>Safe controls</h3>
-            <div className="row">
-              {paused
-                ? <button className="btn primary" disabled={!!busy} onClick={() => gov('Resume all mandates', 'unpauseAll', [])}>▶ Resume (2-of-2)</button>
-                : <span className="muted" style={{ fontSize: 13 }}>System active. If the admin pauses, resume it here with a 2-of-2.</span>}
-            </div>
-            <p className="muted" style={{ marginTop: 12, fontSize: 12.5 }}>
-              Owners: {owners.map(short).join(' · ')} · threshold {ev.threshold}. Owner B co-signs only
-              activate / approve / reject / retire / resume — never a raw transfer.
-            </p>
-          </div>
-        </div>
+        </section>
       )}
-
-      <div className="card">
-        <h3>Committee actions on-chain <small>every approval is a verifiable 2-of-2 execTransaction</small></h3>
-        <div className="tbl"><table>
-          <thead><tr><th>Governance action</th><th>Executed (2-of-2)</th></tr></thead>
-          <tbody>
-            <tr><td>Activate mandate #{ev.mandate.id}</td><td><a className="mono alink" href={scanTx(ev.mandate.activation.executeTxHash)} target="_blank" rel="noopener">{short(ev.mandate.activation.executeTxHash)} ↗</a></td></tr>
-            <tr><td>Approve escalation #{(ev.requests as any).escalated.id}</td><td><a className="mono alink" href={scanTx((ev.requests as any).escalated.approval.executeTxHash)} target="_blank" rel="noopener">{short((ev.requests as any).escalated.approval.executeTxHash)} ↗</a></td></tr>
-          </tbody>
-        </table></div>
-        <p className="muted" style={{ marginTop: 10, fontSize: 12.5 }}>
-          Safe <a className="mono alink" href={scan(ADDR.Safe)} target="_blank" rel="noopener">{short(ADDR.Safe)}</a> · each carries two confirmations — inspect them on-chain.
-        </p>
-      </div>
     </>
   );
 }

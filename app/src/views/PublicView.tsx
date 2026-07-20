@@ -1,301 +1,143 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { ADDR, FINALIZE_API, scan, short } from '../config';
-import { useApp } from '../App';
-import { handlesResolved } from '../nox';
-import { MandatePill, RequestPill } from '../ui';
-import { Donut } from '../Donut';
-
-/** Tiny sparkline for the stat tiles — real cumulative history, no fake data. */
-function Spark({ pts, color = '#7c5cff' }: { pts: number[]; color?: string }) {
-  if (pts.length < 2) return null;
-  const W = 92, H = 34, P = 2;
-  const mx = Math.max(...pts), mn = Math.min(...pts);
-  const xy = pts.map((v, i) => [
-    P + (i * (W - 2 * P)) / (pts.length - 1),
-    H - P - ((v - mn) / (mx - mn || 1)) * (H - 2 * P),
-  ]);
-  const d = xy.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join('');
-  return (
-    <svg className="spark" width={W} height={H} viewBox={`0 0 ${W} ${H}`} aria-hidden="true">
-      <path d={`${d} L${(W - P).toFixed(1)},${H - P} L${P},${H - P} Z`} fill={color} opacity="0.12" />
-      <path d={d} fill="none" stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-/** Cumulative count series over time (12 buckets between first and last event). */
-function cumSeries(ts: bigint[]): number[] {
-  if (ts.length < 2) return [];
-  const t = ts.map(Number).sort((a, b) => a - b);
-  const t0 = t[0], t1 = t[t.length - 1];
-  if (t1 <= t0) return [];
-  const N = 12;
-  return Array.from({ length: N }, (_, i) => {
-    const cut = t0 + ((t1 - t0) * (i + 1)) / N;
-    return t.filter((x) => x <= cut).length;
-  });
-}
-
-const I = {
-  people: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="9" cy="8.5" r="3.2" /><path d="M3.5 19c.7-3 2.9-4.5 5.5-4.5s4.8 1.5 5.5 4.5" /><path d="M15.5 5.8a3.2 3.2 0 010 5.4M17.8 14.7c1.6.7 2.4 2 2.7 4.3" /></svg>,
-  doc: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M7 3h7l4 4v14H7z" /><path d="M14 3v4h4M10 12h5M10 16h5" /></svg>,
-  check: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="8.5" /><path d="M8.5 12.2l2.4 2.4 4.6-4.8" /></svg>,
-  lock: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><rect x="6" y="10.5" width="12" height="9" rx="2" /><path d="M8.5 10.5V8a3.5 3.5 0 017 0v2.5" /></svg>,
-};
+import { useEffect, useMemo, useState } from 'react';
+import { ADDR, scan, short } from '../config';
+import { DEMO_SCENARIOS } from '../demo-scenarios';
+import { useApp, type SpendRequest } from '../App';
+import { INITIAL_SYSTEM_READINESS, probeSystemReadiness } from '../system-readiness';
+import { RequestPill } from '../ui';
 
 function ago(ts: bigint): string {
-  const s = Math.floor(Date.now() / 1000) - Number(ts);
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000) - Number(ts));
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3_600)}h ago`;
+  return `${Math.floor(seconds / 86_400)}d ago`;
 }
 
-const A = (addr: string) => (
-  <a href={scan(addr)} target="_blank" rel="noopener" className="mono alink">{short(addr)}</a>
-);
+function outcomeLabel(request?: SpendRequest) {
+  if (!request) return 'Ready to review';
+  return ['Unknown', request.decisionReady ? 'Proof ready' : 'TEE evaluating', 'Executed', 'Awaiting approval', 'Blocked', 'Cancelled · refunded', 'Expired'][request.state] ?? 'Unknown';
+}
+
+function requestTime(request?: SpendRequest) {
+  if (!request) return 'Not submitted';
+  const date = new Date(Number(request.createdAt) * 1_000);
+  return Number.isNaN(date.getTime())
+    ? 'Time unavailable'
+    : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
 
 export function PublicView() {
-  const { mandates, requests, run, busy, refresh, lastUpdated, loadError } = useApp();
+  const { mandates, requests, goTab, refresh } = useApp();
+  const [readiness, setReadiness] = useState(INITIAL_SYSTEM_READINESS);
 
-  // Real health, not decoration: keeper/provisioner via /api/health, TEE gateway
-  // via a live handle-status probe, RPC/module from the app's own poll results.
-  const [health, setHealth] = useState<{ keeper: boolean | null; gateway: boolean | null }>({ keeper: null, gateway: null });
   useEffect(() => {
-    let stop = false;
+    let stopped = false;
     const probe = async () => {
-      let keeper: boolean | null = null;
-      try {
-        const h = await fetch('/api/health').then((r) => r.json());
-        keeper = !!h?.ok && h?.sweep !== false;
-      } catch { keeper = false; }
-      let gateway: boolean | null = null;
-      try {
-        const handle = requests.find((r) => r.decision && r.decision !== `0x${'00'.repeat(32)}`)?.decision;
-        gateway = handle ? await handlesResolved([handle]).then(() => true).catch(() => false) : null;
-      } catch { gateway = false; }
-      if (!stop) setHealth({ keeper, gateway });
+      const handle = [...requests]
+        .filter((request) => request.decision && !/^0x0+$/.test(request.decision))
+        .sort((a, b) => Number(b.createdAt - a.createdAt))[0]?.decision;
+      const result = await probeSystemReadiness(handle);
+      if (!stopped) setReadiness(result);
     };
     probe();
-    const iv = setInterval(probe, 30_000);
-    return () => { stop = true; clearInterval(iv); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [requests.length]);
-
-  const stats = useMemo(() => {
-    const active = mandates.filter((m) => m.state === 2).length;
-    const executed = requests.filter((r) => r.state === 2).length;
-    const escalated = requests.filter((r) => r.state === 3).length;
-    const blocked = requests.filter((r) => r.state === 4).length;
-    const pending = requests.filter((r) => r.state === 1).length;
-    return { active, executed, escalated, blocked, pending, total: requests.length, mandates: mandates.length };
-  }, [mandates, requests]);
-
-  const ACT: Record<number, { icon: string; tone: string; title: string }> = {
-    1: { icon: '◔', tone: 'veil', title: 'Spend requested' },
-    2: { icon: '✓', tone: 'ok', title: 'Request executed' },
-    3: { icon: '⚠', tone: 'warn', title: 'Escalated to signers' },
-    4: { icon: '✕', tone: 'bad', title: 'Request blocked' },
-    5: { icon: '⚠', tone: 'warn', title: 'Awaiting Safe approval' },
-    6: { icon: '⌛', tone: 'bad', title: 'Request expired' },
-  };
-  const activity = useMemo(() => (
-    [...requests]
-      .sort((a, b) => Number(b.createdAt - a.createdAt))
-      .slice(0, 6)
-      .map((r) => {
-        const a = ACT[r.state] ?? ACT[1];
-        return { key: String(r.id), icon: a.icon, tone: a.tone, title: a.title, sub: `#${String(r.id)} · → ${short(r.recipient)}`, time: ago(r.createdAt) };
-      })
-  ), [requests]);
-  const lastSync = useMemo(() => {
-    const ts = [...requests.map((r) => r.createdAt)].sort((a, b) => Number(b - a))[0];
-    return ts ? ago(ts) : 'live';
+    const timer = setInterval(probe, 30_000);
+    return () => { stopped = true; clearInterval(timer); };
   }, [requests]);
 
-  // Proof-gated finalize via the sponsored keeper — no wallet or gas needed.
-  const finalize = (id: bigint) =>
-    run(`Finalize request #${id}`, async () => {
-      const res = await fetch(FINALIZE_API, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requestId: Number(id) }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error ?? 'finalize failed');
-      for (let k = 0; k < 6; k++) { await new Promise((r) => setTimeout(r, 1500)); refresh(); }
-    });
+  const storyRequests = useMemo(() => DEMO_SCENARIOS.map((scenario) => ({
+    scenario,
+    request: [...requests]
+      .filter((request) => request.recipient.toLowerCase() === scenario.recipient.toLowerCase())
+      .sort((a, b) => Number(b.id - a.id))[0],
+  })), [requests]);
 
-  const escalatedCount = stats.escalated + requests.filter((r) => r.state === 5).length;
-  const successPct = stats.total ? Math.round((stats.executed / stats.total) * 100) : 0;
-  const reqSeries = useMemo(() => cumSeries(requests.map((r) => r.createdAt)), [requests]);
-  const execSeries = useMemo(() => cumSeries(requests.filter((r) => r.state === 2).map((r) => r.createdAt)), [requests]);
-  const mandateSeries = useMemo(() => cumSeries(mandates.map((m) => m.validFrom)), [mandates]);
-  const requestsRef = useRef<HTMLDivElement>(null);
-  const viewAll = () => requestsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const recent = useMemo(() => [...requests]
+    .sort((a, b) => Number(b.createdAt - a.createdAt))
+    .slice(0, 5), [requests]);
 
+  const activeMandates = mandates.filter((mandate) => mandate.state === 2).length;
+  const awaiting = requests.filter((request) => request.state === 1 || request.state === 3).length;
+  const terminal = requests.filter((request) => [2, 4, 5, 6].includes(request.state)).length;
   return (
     <>
-      <div className="dash-head">
+      <header className="workspace-heading">
         <div>
-          <h2 className="dash-title">Dashboard overview</h2>
-          <p className="dash-sub">Confidential treasury · Secure on-chain governance · Ethereum Sepolia</p>
+          <span className="detail-kicker">Live treasury · Ethereum Sepolia</span>
+          <h1>Launch Day Treasury Shift</h1>
+          <p>Three invoices, one confidential treasury workflow, and a complete trail from private policy evaluation to public proof.</p>
         </div>
-        <a className="pill dim" href={`https://sepolia.etherscan.io/address/${ADDR.Safe}`} target="_blank" rel="noopener">Safe {short(ADDR.Safe)} ↗</a>
+        <button className="btn primary" onClick={() => goTab('Delegate')}>Open Payment Inbox</button>
+      </header>
+
+      <div className="proof-strip" aria-label="Live proof stack">
+        <a href={scan(ADDR.Safe)} target="_blank" rel="noopener"><b>Safe 2-of-2</b><span>{short(ADDR.Safe)} ↗</span></a>
+        <a href={scan(ADDR.VeilGuardModule)} target="_blank" rel="noopener"><b>VeilGuard Module</b><span>{short(ADDR.VeilGuardModule)} ↗</span></a>
+        <span><b>iExec Nox TEE</b><span>proof-gated outcomes</span></span>
+        <span><b>Scoped disclosure</b><span>immutable snapshot handles</span></span>
       </div>
 
-      <div className="tiles">
-        <div className="tile">
-          <span className="tile-ico">{I.people}</span>
-          <div className="tile-main"><div className="tile-label">Total mandates</div><div className="tile-val">{stats.mandates}</div><div className="tile-sub">{stats.active} active</div></div>
-          <Spark pts={mandateSeries} />
+      <section className="launch-board" aria-labelledby="launch-board-title">
+        <div className="section-heading">
+          <div><h2 id="launch-board-title">Today’s payment queue</h2><p>Vendor and purpose labels are clearly identified Demo input metadata. Live chain rows expose only ciphertext handles, timestamps and coarse outcomes.</p></div>
+          <button className="btn ghost" onClick={refresh}>Refresh chain state</button>
         </div>
-        <div className="tile">
-          <span className="tile-ico">{I.doc}</span>
-          <div className="tile-main"><div className="tile-label">Total requests</div><div className="tile-val">{stats.total}</div><div className="tile-sub">{stats.pending} in flight</div></div>
-          <Spark pts={reqSeries} />
+        <div className="launch-rows">
+          {storyRequests.map(({ scenario, request }) => (
+            <button className="launch-row" key={scenario.key} onClick={() => goTab('Delegate')}>
+              <span className="launch-time">{requestTime(request)}</span>
+              <span className="object-avatar">{scenario.vendor[0]}</span>
+              <span className="launch-copy"><b>{scenario.vendor}</b><small>Demo metadata · {scenario.purpose}</small></span>
+              <span className="launch-amount">{request ? 'Encrypted amount' : 'Awaiting submission'}</span>
+              <span className="launch-state">{request ? <RequestPill state={request.state} decisionReady={request.decisionReady} /> : <span className="status-badge">{outcomeLabel()}</span>}</span>
+            </button>
+          ))}
         </div>
-        <div className="tile">
-          <span className="tile-ico ok">{I.check}</span>
-          <div className="tile-main"><div className="tile-label">Executed</div><div className="tile-val ok">{stats.executed}</div><div className="tile-sub">{successPct}% of requests</div></div>
-          <Spark pts={execSeries} color="#3ecf8e" />
-        </div>
-        <div className="tile hero-tile">
-          <span className="tile-ico">{I.lock}</span>
-          <div className="tile-main"><div className="tile-label">Treasury balance</div><div className="tile-val dots">●●●●●●●</div><div className="tile-sub">Encrypted · role-gated decryption</div></div>
-        </div>
-      </div>
+      </section>
 
-      <div className="dash-grid">
-        <div className="card donutcard">
-          <h3>Request outcomes <small>All time</small></h3>
-          <Donut total={stats.total} size={168}
-            segments={[
-              { label: 'Executed', value: stats.executed, color: '#3ecf8e' },
-              { label: 'Escalated / approved', value: escalatedCount, color: '#f5b83d' },
-              { label: 'Blocked', value: stats.blocked, color: '#ff6b6b' },
-              { label: 'In flight', value: stats.pending, color: '#7c5cff' },
-            ]} />
-          <div className="donut-foot">
-            <div><div className="sr-label">Success rate</div><div className="sr-val">{successPct}%</div></div>
-            <button className="btn small ghost" onClick={viewAll}>📊 View analytics →</button>
-          </div>
-        </div>
-        <div className="card">
-          <h3>Recent activity <small>Latest on-chain events</small>
-            <button className="h3-link" onClick={viewAll}>View all</button>
-          </h3>
-          <div className="activity">
-            {activity.length ? activity.map((a) => (
-              <div className="act-row" key={a.key}>
-                <span className={`act-ico ${a.tone}`}>{a.icon}</span>
-                <div className="act-main">
-                  <div className="act-title">{a.title}</div>
-                  <div className="act-sub mono">{a.sub}</div>
-                </div>
-                <span className="act-time">{a.time}</span>
+      <div className="overview-split">
+        <section className="surface-section">
+          <div className="section-heading"><div><h2>Live operations</h2><p>Derived from current on-chain objects, not demo counters.</p></div></div>
+          <dl className="status-summary">
+            <div><dt>Active mandates</dt><dd>{activeMandates}</dd></div>
+            <div><dt>Requests in flight</dt><dd>{awaiting}</dd></div>
+            <div><dt>Terminal requests</dt><dd>{terminal}</dd></div>
+          </dl>
+          <div className="activity-list">
+            {recent.map((request) => (
+              <div className="activity-row" key={String(request.id)}>
+                <span className="activity-marker" />
+                <div><b>Request #{String(request.id)}</b><small>{short(request.delegate)} → {short(request.recipient)}</small></div>
+                <RequestPill state={request.state} decisionReady={request.decisionReady} />
+                <time>{ago(request.createdAt)}</time>
               </div>
-            )) : <p className="muted">No activity yet.</p>}
-          </div>
-        </div>
-      </div>
-
-      <div className="dash-grid">
-        <div className="card">
-          <h3>System status <small>live checks, refreshed every 30s</small></h3>
-          <div className="sysstat">
-            {(() => {
-              const rpcOk = !loadError && !!lastUpdated;
-              const moduleOk = mandates.length > 0 || requests.length > 0;
-              const rows: [string, boolean | null][] = [
-                ['VeilGuard module', moduleOk],
-                ['Nox TEE gateway', health.gateway],
-                ['Keeper & committee', health.keeper],
-                ['RPC connection', rpcOk],
-              ];
-              const anyBad = rows.some(([, ok]) => ok === false);
-              const S = ({ ok, yes, no }: { ok: boolean | null; yes: string; no: string }) =>
-                ok === null ? <span className="mono muted">checking…</span>
-                  : ok ? <span className="sys-ok">● {yes}</span>
-                    : <span className="sys-ok" style={{ color: 'var(--warn)' }}>● {no}</span>;
-              return (
-                <>
-                  <div className="sys-banner" style={anyBad ? { color: 'var(--warn)' } : undefined}>
-                    <span className={`netdot ${anyBad ? 'bad' : 'ok'}`} /> {anyBad ? 'Degraded — one or more checks failing' : 'All systems operational'}
-                  </div>
-                  <div className="sys-row"><span>VeilGuard module</span><S ok={moduleOk} yes="live" no="unreachable" /></div>
-                  <div className="sys-row"><span>Nox TEE gateway</span><S ok={health.gateway} yes="reachable" no="unreachable" /></div>
-                  <div className="sys-row"><span>Keeper & committee</span><S ok={health.keeper} yes="sweeping" no="offline" /></div>
-                  <div className="sys-row"><span>RPC connection</span><S ok={rpcOk} yes="connected" no="degraded" /></div>
-                  <div className="sys-row"><span>Chain indexed</span><span className="mono muted">{lastUpdated ? `${Math.max(0, Math.round((Date.now() - lastUpdated) / 1000))}s ago` : lastSync}</span></div>
-                </>
-              );
-            })()}
-          </div>
-        </div>
-        <div className="card">
-          <h3>What stays private <small>vs. what the chain sees</small></h3>
-          <div className="privacy-split">
-            <div><div className="ps-h enc">🔒 Encrypted</div><ul><li>Payment amounts</li><li>Auto-limit, budget, reserve floor</li><li>Blocked reasons (public gets none)</li></ul></div>
-            <div><div className="ps-h pub">👁 Public</div><ul><li>Who requested &amp; when</li><li>The three-state outcome</li><li>Transaction hashes</li></ul></div>
-          </div>
-          <p className="muted" style={{ marginTop: 10, fontSize: 12.5 }}>Full proof links live in <b>Verify on-chain</b> in the sidebar.</p>
-        </div>
-      </div>
-
-      <div className="card">
-        <h3>Spending mandates <small>policy numbers are encrypted handles — decryptable only by authorised roles</small></h3>
-        <div className="tbl"><table>
-          <thead><tr><th>ID</th><th>Version</th><th>Delegate</th><th>Recipients</th><th>Auto-limit</th><th>Budget</th><th>Reserve</th><th>Status</th></tr></thead>
-          <tbody>
-            {mandates.map((m) => (
-              <tr key={String(m.id)}>
-                <td className="mono">#{String(m.id)}</td>
-                <td className="mono">v{m.version}</td>
-                <td>{A(m.delegate)}</td>
-                <td>{m.recipients.map((r, i) => <span key={r}>{i > 0 && ', '}{A(r)}</span>)}</td>
-                <td><span className="enc">🔒 encrypted</span></td>
-                <td><span className="enc">🔒 encrypted</span></td>
-                <td><span className="enc">🔒 encrypted</span></td>
-                <td><MandatePill state={m.state} /></td>
-              </tr>
             ))}
-            {!mandates.length && <tr><td colSpan={8} className="muted">No mandates yet.</td></tr>}
-          </tbody>
-        </table></div>
-      </div>
+            {!recent.length && <div className="empty-state"><b>No requests yet</b><span>Open Payment Inbox to start the live flow.</span></div>}
+          </div>
+        </section>
 
-      <div className="card" ref={requestsRef}>
-        <h3>
-          Spend requests <small>three-state outcomes, publicly verifiable via TEE decryption proofs</small>
-          <button className="btn small ghost" style={{ float: 'right' }} onClick={refresh}>↻ refresh</button>
-        </h3>
-        <div className="tbl"><table>
-          <thead><tr><th>ID</th><th>Mandate</th><th>Delegate</th><th>Recipient</th><th>Amount</th><th>When</th><th>Outcome</th><th></th></tr></thead>
-          <tbody>
-            {[...requests].reverse().map((r) => (
-              <tr key={String(r.id)}>
-                <td className="mono">#{String(r.id)}</td>
-                <td className="mono">#{String(r.mandateId)}</td>
-                <td>{A(r.delegate)}</td>
-                <td>{A(r.recipient)}</td>
-                <td><span className="enc">🔒 encrypted</span></td>
-                <td className="muted" title={new Date(Number(r.createdAt) * 1000).toLocaleString()}>{ago(r.createdAt)}</td>
-                <td><RequestPill state={r.state} decisionReady={r.decisionReady} /></td>
-                <td>
-                  {r.state === 1 && r.decisionReady && (
-                    <button className="btn small primary" disabled={!!busy} onClick={() => finalize(r.id)}>Finalize</button>
-                  )}
-                  {r.state === 1 && !r.decisionReady && <span className="muted" style={{ fontSize: 11.5 }}>TEE working…</span>}
-                </td>
-              </tr>
+        <section className="surface-section">
+          <div className="section-heading"><div><h2>System readiness</h2><p>Health checks support the flow; they do not replace testing the real CTA.</p></div></div>
+          <div className="system-list">
+            {([
+              ['Sepolia RPC', readiness.rpc],
+              ['Proof keeper', readiness.keeper],
+              ['Nox gateway', readiness.gateway],
+              ['Safe threshold', readiness.safeThreshold],
+              ['Safe module', readiness.module],
+            ] as const).map(([label, check]) => (
+              <div key={label}>
+                <span><strong>{label}</strong><small>{check.detail}</small></span>
+                <b className={check.ok === null ? 'muted' : check.ok ? 'ok-text' : 'warn-text'}>
+                  {check.ok === null ? 'Pending' : check.ok ? 'Ready' : 'Degraded'}
+                </b>
+              </div>
             ))}
-            {!requests.length && <tr><td colSpan={8} className="muted">No requests yet — head to the Delegate tab to submit one.</td></tr>}
-          </tbody>
-        </table></div>
-        <p className="muted" style={{ marginTop: 10, fontSize: 12.5 }}>
-          Finalization is <b>proof-gated</b>: the Nox gateway's signed decryption proof decides the outcome —
-          anyone (a keeper, or you) may submit it. States: Requested · Executed · AwaitingSafeApproval · Blocked · Cancelled · Expired.
-        </p>
+          </div>
+          <div className="privacy-compact">
+            <div><b>Encrypted</b><span>Amounts · limits · budget · reserve · blocked reason</span></div>
+            <div><b>Public</b><span>Actors · timestamps · three-state outcome · transaction hashes</span></div>
+          </div>
+        </section>
       </div>
     </>
   );

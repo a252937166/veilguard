@@ -4,8 +4,15 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Confidential spending policies for Safe treasuries, powered by iExec Nox",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
+    "check": "node scripts/check-runtime.mjs && node scripts/check-deployments.mjs",
+    "pretest": "npm run check",
     "test": "hardhat test",
+    "test:server": "node --test server/test/*.test.mjs",
+    "prebuild": "npm run check",
     "build": "hardhat build"
   },
   "devDependencies": {
