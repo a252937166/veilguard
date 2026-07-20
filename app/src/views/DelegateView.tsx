@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { keccak256, parseEventLogs, stringToBytes } from 'viem';
-import { ADDR, FINALIZE_API, PROVISION_API, moduleAbi, parseUsdc, scanTx, short, vendorName } from '../config';
+import { ADDR, PROVISION_API, moduleAbi, parseUsdc, scanTx, short, vendorName } from '../config';
 import { handleClientFor, publicClient } from '../nox';
 import { walletWrite } from '../walletTx';
 import { fetchRequestTxs, type RequestTxs } from '../txlog';
@@ -25,6 +25,7 @@ import {
   type DemoDecisionAttestation,
 } from '../demo-decision-attestation';
 import { deriveGuidedInvoiceAction, type GuidedInvoiceAction } from '../guided-invoice-action';
+import { requestFinalize } from '../finalize-courier';
 import {
   loadPaymentTrack as loadTrack,
   savePaymentTrack as saveTrack,
@@ -595,7 +596,10 @@ export function DelegateView({
   const finalizeRetryAt = useRef(0);
   useEffect(() => {
     if (!latest || latest.state !== 1 || !latest.decisionReady) {
-      if (latest && finalizingRef.current?.id === latest.id) finalizingRef.current = null;
+      if (latest && finalizingRef.current?.id === latest.id) {
+        finalizingRef.current = null;
+        clearFlow();
+      }
       return;
     }
     const activeFinalize = finalizingRef.current;
@@ -613,18 +617,32 @@ export function DelegateView({
       finalizingRef.current = { id: latest.id, startedAt: Date.now() };
       setFlow('finalizing', 'The decision is ready — the keeper is publishing the TEE proof on-chain…', 22, lastTx ?? undefined);
       try {
-        const res = await fetch(FINALIZE_API, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ requestId: Number(latest.id) }),
-          signal: AbortSignal.timeout(20_000),
-        });
-        if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d?.error ?? 'finalize failed'); }
-        for (let k = 0; k < 6; k++) { await new Promise((r) => setTimeout(r, 1500)); refresh(); }
+        const courier = await requestFinalize(latest.id);
+        if (courier === 'accepted') {
+          setFlow('finalizing', `Keeper accepted request #${latest.id} — checking its Sepolia result…`, 30, lastTx ?? undefined);
+        } else {
+          // A lost HTTP response is ambiguous: the keeper may already be
+          // decrypting or waiting for its receipt. Never label it failed and
+          // never create another request; follow this exact ID on-chain.
+          setFlow('finalizing', `Keeper response is delayed — recovering request #${latest.id} from Sepolia…`, 30, lastTx ?? undefined);
+        }
+
+        // Keep visible, deterministic progress while the normal request poll
+        // refreshes the shared snapshot. A re-render clears finalizingRef as
+        // soon as this exact request leaves state 1.
+        for (let attempt = 0; attempt < 30 && finalizingRef.current?.id === latest.id; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 2_000));
+          await refresh();
+        }
+        if (finalizingRef.current?.id !== latest.id) return;
+        finalizingRef.current = null;
+        finalizeRetryAt.current = Date.now() + 5_000;
+        setFlow('finalizing', `Request #${latest.id} is still proof-gated — it remains bound and will resume automatically…`, 30, lastTx ?? undefined);
       } catch (error) {
         finalizingRef.current = null;
         finalizeRetryAt.current = Date.now() + 5_000;
         throw error;
-      } finally { clearFlow(); }
+      }
     });
     // `requests` retries a transient failure on the next bounded chain poll;
     // `busy` ensures a decision that became ready during submission is not lost.

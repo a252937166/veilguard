@@ -7,6 +7,7 @@ import {
   http,
   parseAbi,
   parseAbiItem,
+  parseEventLogs,
   type PublicClient,
 } from 'viem';
 import { sepolia } from 'viem/chains';
@@ -26,6 +27,10 @@ const RECOVERY_OUTPUT = EVIDENCE_OUTPUT.replace(/\.json$/i, '.recovery.json');
 const EXPECTED_UI_SHA = process.env.VEILGUARD_EXPECTED_UI_SHA?.trim();
 const SOURCE_COMMIT = process.env.VEILGUARD_SOURCE_COMMIT?.trim() || EXPECTED_UI_SHA || 'unknown';
 const ACTION = process.env.VEILGUARD_LIVE_ACTION as LiveReleaseAction | undefined;
+const RECOVERY_MODE = process.env.VEILGUARD_RECOVERY_MODE?.trim();
+const RECOVERY_RUN_ID = process.env.VEILGUARD_RECOVERY_RUN_ID?.trim();
+const RECOVERY_REQUEST_ID = process.env.VEILGUARD_RECOVERY_REQUEST_ID?.trim();
+const RECOVERY_REQUEST_TX = process.env.VEILGUARD_RECOVERY_REQUEST_TX?.trim() as `0x${string}` | undefined;
 const DEPLOY_BLOCK = 11_295_790n;
 const LOG_CHUNK = 9_500n;
 const ETHERSCAN_TX = 'https://sepolia.etherscan.io/tx/';
@@ -343,6 +348,211 @@ async function verifyOnchainDecision(action: LiveReleaseAction, requestIdText: s
   };
 }
 
+function buildLiveEvidence({
+  action,
+  observedUiSha,
+  runId,
+  requestId,
+  transactionHash,
+  attestation,
+  onchain,
+}: {
+  action: LiveReleaseAction;
+  observedUiSha: string;
+  runId: string;
+  requestId: string;
+  transactionHash: `0x${string}`;
+  attestation: LiveDecisionAttestation;
+  onchain: Awaited<ReturnType<typeof verifyOnchainDecision>>;
+}): LiveReleaseEvidenceV1 {
+  const chainState = action === 'approve' ? 2 : 5;
+  return {
+    schema: 'veilguard.live-release-evidence',
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    workflow: {
+      repository: process.env.GITHUB_REPOSITORY,
+      runId: process.env.GITHUB_RUN_ID,
+      sourceCommit: SOURCE_COMMIT,
+    },
+    production: {
+      baseUrl: LIVE_BASE_URL,
+      expectedUiSha: expectedUiSha(),
+      observedUiSha,
+    },
+    chain: {
+      id: 11155111,
+      network: 'ethereum-sepolia',
+      module: deployments.contracts.VeilGuardModule as `0x${string}`,
+      safe: deployments.contracts.Safe as `0x${string}`,
+      safeThreshold: 2,
+      safeOwnerCount: onchain.safeOwnerCount,
+    },
+    scenario: { name: 'ShieldOps', runId, requestId },
+    decision: {
+      action,
+      origin: 'user',
+      chainState,
+      transactionHash,
+      etherscanUrl: `${ETHERSCAN_TX}${transactionHash}`,
+    },
+    transactions: {
+      request: onchain.request,
+      teeFinalize: onchain.teeFinalize,
+      safeDecision: onchain.safeDecision,
+    },
+    attestation,
+  };
+}
+
+async function readLiveDecisionAttestation(runId: string, requestId: string) {
+  const query = new URLSearchParams({ runId, requestId });
+  const response = await fetch(`${LIVE_BASE_URL}/api/demo-decision?${query}`, {
+    cache: 'no-store',
+    signal: AbortSignal.timeout(15_000),
+  });
+  return { status: response.status, body: await response.json() as any };
+}
+
+async function settleBoundReject(runId: string, requestId: string): Promise<LiveDecisionAttestation> {
+  for (let attempt = 0; attempt < 125; attempt++) {
+    const attested = await readLiveDecisionAttestation(runId, requestId);
+    if (attested.status === 200 && attested.body?.origin === 'user') {
+      expect(attested.body).toEqual(expect.objectContaining({
+        ok: true,
+        requestId: Number(requestId),
+        action: 'reject',
+        chainState: 5,
+        hash: expect.stringMatching(/^0x[0-9a-f]{64}$/i),
+      }));
+      return attested.body as LiveDecisionAttestation;
+    }
+    if (attested.status === 200 && attested.body?.origin === 'timeout') {
+      throw new Error(`bound Reject request #${requestId} expired by watchdog; it cannot be represented as a user decision`);
+    }
+    if (attested.status === 200 && attested.body?.chainState !== 3) {
+      throw new Error(`bound Reject request #${requestId} reached state ${attested.body?.chainState} without a user attestation`);
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(`${LIVE_BASE_URL}/api/demo-decision`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ runId, requestId: Number(requestId), action: 'reject' }),
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (error) {
+      // The endpoint is run/request/action idempotent. A missing HTTP response
+      // is ambiguous, so re-attest the same object instead of creating a run.
+      console.info(`[live-reject] decision response delayed; re-attesting request #${requestId}`, error);
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      continue;
+    }
+    const body = await response.json().catch(() => ({})) as any;
+    if (response.status === 202) {
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      continue;
+    }
+    if (!response.ok) throw new Error(body?.error ?? `bound Reject returned ${response.status}`);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error(`bound Reject request #${requestId} did not produce a user attestation before the release timeout`);
+}
+
+async function recoverBoundReject(observedUiSha: string) {
+  if (!RECOVERY_RUN_ID || !/^[A-Za-z0-9_-]{8,96}$/.test(RECOVERY_RUN_ID)) {
+    throw new Error('bound Reject recovery requires a valid run ID');
+  }
+  if (!RECOVERY_REQUEST_ID || !/^\d{1,9}$/.test(RECOVERY_REQUEST_ID)) {
+    throw new Error('bound Reject recovery requires a valid request ID');
+  }
+  if (!RECOVERY_REQUEST_TX || !/^0x[0-9a-f]{64}$/i.test(RECOVERY_REQUEST_TX)) {
+    throw new Error('bound Reject recovery requires the exact request transaction');
+  }
+  const request = await withRpc((client) => client.readContract({
+    address: MODULE,
+    abi: moduleReadAbi,
+    functionName: 'getRequest',
+    args: [BigInt(RECOVERY_REQUEST_ID)],
+  }));
+  expect([3, 5], 'a bound Reject may only resume from awaiting or cancelled state').toContain(Number(request[5]));
+  const requestReceipt = await withRpc((client) => client.getTransactionReceipt({ hash: RECOVERY_REQUEST_TX }));
+  expect(requestReceipt.status, 'recovered request transaction must be successful').toBe('success');
+  expect(requestReceipt.to?.toLowerCase(), 'recovered request transaction must target the module').toBe(MODULE.toLowerCase());
+  const requestEvents = parseEventLogs({
+    abi: [requestEvent],
+    logs: requestReceipt.logs,
+    eventName: 'SpendRequested',
+    strict: true,
+  });
+  expect(requestEvents).toHaveLength(1);
+  expect(requestEvents[0].args.requestId, 'recovered transaction must create the exact request').toBe(BigInt(RECOVERY_REQUEST_ID));
+
+  const recoveryBase = {
+    schema: 'veilguard.live-release-recovery' as const,
+    version: 1 as const,
+    generatedAt: new Date().toISOString(),
+    workflow: {
+      repository: process.env.GITHUB_REPOSITORY,
+      runId: process.env.GITHUB_RUN_ID,
+      sourceCommit: SOURCE_COMMIT,
+    },
+    production: {
+      baseUrl: LIVE_BASE_URL,
+      expectedUiSha: expectedUiSha(),
+      observedUiSha,
+    },
+    scenario: {
+      name: 'ShieldOps' as const,
+      runId: RECOVERY_RUN_ID,
+      requestId: RECOVERY_REQUEST_ID,
+    },
+  };
+  await persistRecoveryPointer({
+    ...recoveryBase,
+    phase: 'request-bound',
+    activeBroadcast: {
+      mission: 'approval',
+      requestId: RECOVERY_REQUEST_ID,
+      transactionHash: RECOVERY_REQUEST_TX,
+    },
+    decision: { action: 'reject' },
+  });
+
+  const attestation = await settleBoundReject(RECOVERY_RUN_ID, RECOVERY_REQUEST_ID);
+  await persistRecoveryPointer({
+    ...recoveryBase,
+    generatedAt: new Date().toISOString(),
+    phase: 'decision-observed',
+    activeBroadcast: {
+      mission: 'approval',
+      requestId: RECOVERY_REQUEST_ID,
+      transactionHash: RECOVERY_REQUEST_TX,
+    },
+    decision: {
+      action: 'reject',
+      transactionHash: attestation.hash,
+      etherscanUrl: `${ETHERSCAN_TX}${attestation.hash}`,
+    },
+    attestation,
+  });
+  const onchain = await verifyOnchainDecision('reject', RECOVERY_REQUEST_ID, attestation.hash);
+  expect(onchain.request.hash.toLowerCase(), 'recovered request pointer must match the on-chain request event')
+    .toBe(RECOVERY_REQUEST_TX.toLowerCase());
+  const evidence = buildLiveEvidence({
+    action: 'reject',
+    observedUiSha,
+    runId: RECOVERY_RUN_ID,
+    requestId: RECOVERY_REQUEST_ID,
+    transactionHash: attestation.hash,
+    attestation,
+    onchain,
+  });
+  await persistEvidence(evidence);
+  console.info(`[live-reject] recovered exact bound request ${JSON.stringify(evidence)}`);
+}
+
 test.describe('production Sepolia release gate', () => {
   test.describe.configure({ mode: 'serial', retries: 0 });
 
@@ -352,6 +562,12 @@ test.describe('production Sepolia release gate', () => {
 
     // This check runs before any CTA that can mutate Sepolia.
     const observedUiSha = await assertProductionUiSha(page);
+
+    if (RECOVERY_MODE === 'bound') {
+      expect(action, 'only the sequential Reject job may resume a bound request').toBe('reject');
+      await recoverBoundReject(observedUiSha);
+      return;
+    }
 
     console.info(`[live-${action}] starting fresh production run`);
     await startFreshLiveRun(page);
@@ -487,47 +703,15 @@ test.describe('production Sepolia release gate', () => {
       session.transactionHash as `0x${string}`,
     );
 
-    const evidence: LiveReleaseEvidenceV1 = {
-      schema: 'veilguard.live-release-evidence',
-      version: 1,
-      generatedAt: new Date().toISOString(),
-      workflow: {
-        repository: process.env.GITHUB_REPOSITORY,
-        runId: process.env.GITHUB_RUN_ID,
-        sourceCommit: SOURCE_COMMIT,
-      },
-      production: {
-        baseUrl: LIVE_BASE_URL,
-        expectedUiSha: expectedUiSha(),
-        observedUiSha,
-      },
-      chain: {
-        id: 11155111,
-        network: 'ethereum-sepolia',
-        module: deployments.contracts.VeilGuardModule as `0x${string}`,
-        safe: deployments.contracts.Safe as `0x${string}`,
-        safeThreshold: 2,
-        safeOwnerCount: onchain.safeOwnerCount,
-      },
-      scenario: {
-        name: 'ShieldOps',
-        runId: session.runId!,
-        requestId: session.requestId!,
-      },
-      decision: {
-        action,
-        origin: 'user',
-        chainState,
-        transactionHash: session.transactionHash as `0x${string}`,
-        etherscanUrl: transactionLink!,
-      },
-      transactions: {
-        request: onchain.request,
-        teeFinalize: onchain.teeFinalize,
-        safeDecision: onchain.safeDecision,
-      },
+    const evidence = buildLiveEvidence({
+      action,
+      observedUiSha,
+      runId: session.runId!,
+      requestId: session.requestId!,
+      transactionHash: session.transactionHash as `0x${string}`,
       attestation: attestation.body,
-    };
+      onchain,
+    });
     await persistEvidence(evidence);
     console.info(`[live-${action}] ${JSON.stringify(evidence)}`);
     } finally {
