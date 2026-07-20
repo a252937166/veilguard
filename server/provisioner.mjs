@@ -37,7 +37,7 @@ import {
   parseDemoRequestId,
   verifyDemoAmount,
 } from './lib/demo-decision.mjs';
-import { createSerialExecutor, sameAddressList } from './lib/demo-security.mjs';
+import { createSerialExecutor, recentRequestIds, sameAddressList } from './lib/demo-security.mjs';
 
 const {
   ADMIN_KEY, SIGNER_B_KEY, MODULE, SAFE,
@@ -522,8 +522,19 @@ async function demoReady(delegate) {
   const coolLeft = Number(cool) - Math.floor(Date.now() / 1000);
   if (coolLeft > 0) return { ready: false, reason: 'anti-probing cooldown', cooldownLeft: coolLeft };
   const nextR = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'nextRequestId' });
-  for (let i = nextR - 1n; i > 0n && i > nextR - 30n; i--) {
-    const r = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getRequest', args: [i] });
+  const recentIds = recentRequestIds(nextR);
+  const recent = recentIds.length ? await pub.multicall({
+    allowFailure: true,
+    contracts: recentIds.map((requestId) => ({
+      address: MODULE,
+      abi: MODULE_ABI,
+      functionName: 'getRequest',
+      args: [requestId],
+    })),
+  }) : [];
+  for (const item of recent) {
+    if (item.status !== 'success') throw item.error;
+    const r = item.result;
     if ([1, 3].includes(Number(r[5])) && r[1].toLowerCase() === delegate.toLowerCase()) {
       return { ready: false, reason: 'a payment is already in flight — it clears in under a minute' };
     }

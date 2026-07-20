@@ -224,6 +224,10 @@ The provisioner enforces narrowly scoped server interfaces:
   receipt continue in the background; the browser keeps the Request bound,
   shows the real stage/elapsed time and reads its terminal chain state. A lost
   HTTP response is recovery, not failure, and never submits another payment.
+- `POST /api/demo-ready` performs its bounded recent-Request check in one
+  Multicall. The browser may retry this read-only preflight once with visible
+  feedback; both attempts happen before encryption, signing or submission, so a
+  timeout can never create a duplicate payment.
 - `POST /api/demo-decision` accepts only the current run's pending ShieldOps
   request, exact recipient and decrypted 60 cUSDC amount. Same-action retries are
   idempotent; `202` returns the current validation/signing/broadcast/confirmation

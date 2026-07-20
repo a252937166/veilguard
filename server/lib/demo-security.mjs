@@ -34,3 +34,13 @@ export function sameAddressList(actual, expected) {
   return actual.length === expected.length
     && actual.every((address, index) => address.toLowerCase() === expected[index].toLowerCase());
 }
+
+/** IDs covered by the bounded readiness scan, newest first. */
+export function recentRequestIds(nextRequestId, window = 30n) {
+  const next = BigInt(nextRequestId);
+  const size = BigInt(window);
+  if (next <= 1n || size <= 1n) return [];
+  const ids = [];
+  for (let id = next - 1n; id > 0n && id > next - size; id--) ids.push(id);
+  return ids;
+}

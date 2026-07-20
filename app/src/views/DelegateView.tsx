@@ -26,6 +26,7 @@ import {
 } from '../demo-decision-attestation';
 import { deriveGuidedInvoiceAction, type GuidedInvoiceAction } from '../guided-invoice-action';
 import { requestFinalize } from '../finalize-courier';
+import { fetchDemoReadiness } from '../demo-readiness';
 import {
   loadPaymentTrack as loadTrack,
   savePaymentTrack as saveTrack,
@@ -669,19 +670,17 @@ export function DelegateView({
   /** Ask the server whether a demo delegate is truly ready (mandate/slot/cooldown/gas/budget). */
   const ensureReady = async (delegate: string): Promise<boolean> => {
     try {
-      const res = await fetch('/api/demo-ready', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ delegate }),
-        signal: AbortSignal.timeout(8_000),
+      const d = await fetchDemoReadiness({
+        delegate,
+        onRetry: () => setFlow('preflight', 'Readiness response is delayed — retrying the safe preflight…', 15),
       });
-      const d = await res.json();
       if (d?.ready === false) {
         toast(d.cooldownLeft ? `${d.reason} — ${mmss(d.cooldownLeft)} left` : (d.reason ?? 'demo treasury not ready — retry shortly'), true);
         return false;
       }
       return true;
     } catch {
-      toast('Demo readiness check timed out. No transaction was sent; retry when the connection is stable.', true);
+      toast('Demo readiness remained unavailable after two safe preflight checks. No transaction was sent; retry when the connection is stable.', true);
       return false;
     }
   };
