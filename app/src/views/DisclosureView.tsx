@@ -404,19 +404,28 @@ export function DisclosureView() {
   const createFacilitatedPackets = async (): Promise<PacketResult> => {
     if (!session) throw new Error('Start or resume the Launch Day demo before requesting facilitated disclosure.');
     const body = { runId: session.runId, requestIds: selectedIds };
-    for (let attempt = 0; attempt < 45; attempt++) {
-      const response = await fetch('/api/demo-audit-packet', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(30_000),
-      });
+    for (let attempt = 0; attempt < 60; attempt++) {
+      let response: Response;
+      try {
+        response = await fetch('/api/demo-audit-packet', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(30_000),
+        });
+      } catch {
+        // The packet job keeps running server-side under this exact scope key.
+        // A timed-out or dropped response is recovery, not failure: poll the
+        // idempotent endpoint again instead of surfacing a raw network error.
+        await sleep(2_000);
+        continue;
+      }
       const data = await response.json().catch(() => ({}));
       if (response.status === 202) { await sleep(2_000); continue; }
       if (!response.ok) throw new Error(data.error ?? `packet service returned ${response.status}`);
       return data as PacketResult;
     }
-    throw new Error('Packet creation is still processing; retry to resume it.');
+    throw new Error('Packet creation is still processing on the server; request facilitated creation again to resume the same scope.');
   };
 
   const createAdminPackets = async (): Promise<PacketResult> => {

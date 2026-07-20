@@ -110,9 +110,13 @@ export function AuditorView() {
   const [unlockingHandle, setUnlockingHandle] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
   const completedGate = useRef(new Set<string>());
+  const txBaseLoaded = useRef(false);
+  const txForcedScan = useRef(false);
 
   useEffect(() => {
-    fetchRequestTxs().then(setTxs).catch(() => { /* Transaction links remain explicitly unavailable. */ });
+    fetchRequestTxs()
+      .then((map) => { txBaseLoaded.current = true; setTxs(map); })
+      .catch(() => { /* Transaction links remain explicitly unavailable. */ });
   }, []);
 
   useEffect(() => {
@@ -176,6 +180,16 @@ export function AuditorView() {
   useEffect(() => {
     setReviews(storageKey ? loadStoredReviews(storageKey) : {});
   }, [storageKey]);
+
+  useEffect(() => {
+    // The session-long tx cache may predate this run's requests (a scan primed
+    // before they finalized reports them as "Not indexed" forever). One forced
+    // rescan per mount reconciles the granted packet's evidence links.
+    if (!packet || !txBaseLoaded.current || txForcedScan.current) return;
+    if (!packet.requestIds.some((id) => !txs.get(String(id))?.request)) return;
+    txForcedScan.current = true;
+    fetchRequestTxs(true).then(setTxs).catch(() => { /* links stay unavailable */ });
+  }, [packet, txs]);
 
   const requestRows = useMemo(() => {
     if (!packet) return [];

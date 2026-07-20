@@ -470,6 +470,7 @@ export function MissionDrawer({
   const step = Math.min(Math.max(session.tour.step, 0), MISSION_STEPS.length - 1);
   const s = MISSION_STEPS[step];
   const arrived = useRef(false);
+  const transitFromStep = useRef(step);
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<ChainRefreshResult | null>(null);
   const preparation = deriveGuidedStepPreparation(session, requests, step);
@@ -497,6 +498,15 @@ export function MissionDrawer({
   }, [dispatch, onGuide, onNavigate, requests, session]);
 
   useEffect(() => {
+    // A step change from ANY source — this drawer or a page-level mission CTA
+    // committing advanceGuidedMission — means the run is in transit to the new
+    // step's surface. Router navigations commit inside a startTransition after
+    // the session update, so this render can still show the previous route and
+    // role; that frame is travel, not the user leaving the tour.
+    if (transitFromStep.current !== step) {
+      transitFromStep.current = step;
+      arrived.current = false;
+    }
     if (session.tour.paused) return;
     const routeMatches = isMissionRouteCompatible(s, currentRoute, session);
     const roleMatches = !s.role || currentRole === s.role;
@@ -508,7 +518,7 @@ export function MissionDrawer({
         reason: routeMatches ? 'role-change' : 'navigation',
       });
     }
-  }, [currentRole, currentRoute, dispatch, s, session]);
+  }, [currentRole, currentRoute, dispatch, s, session, step]);
 
   useEffect(() => setCheckResult(null), [step]);
 
