@@ -316,7 +316,8 @@ Builder and Audit Review at 1366×768 and 390×844. Expected images are reviewed
 and committed; CI uses `threshold: 0.2` and `maxDiffPixelRatio: 0.003` and never
 updates them automatically. Public reads, all three local Demo write signers and
 wallet network setup use only the browser-CORS-verified dRPC, Tenderly and
-PublicNode fallback pool; historical log reads use dRPC and Tenderly. System
+PublicNode-first, Tenderly, then dRPC fallback pool; archive log reads use one
+six-event OR filter per block chunk through Tenderly with dRPC fallback. System
 Readiness independently verifies a reachable block, the latest Nox handle, the
 real Safe threshold and module enablement instead of displaying hard-coded green
 states. Provider changes and failed Nox client creation both invalidate their
