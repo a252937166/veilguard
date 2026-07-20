@@ -187,8 +187,11 @@ fixed to UTC/dark/reduced-motion, make no Sepolia calls, and mask only the UI SH
 CI uses a 0.2 perceptual threshold with at most 0.003 differing-pixel ratio.
 
 Browser reads, the main guided Delegate, isolated violation Delegate and Free
-Play signer all use the same ordered CORS-verified Sepolia pool: dRPC, Tenderly,
-then PublicNode. The wallet-add network metadata advertises the same pool.
+Play signer all use the same ordered CORS-verified Sepolia pool: PublicNode,
+Tenderly, then dRPC. PublicNode avoids free-pool burst limits for current-state
+reads; archive request evidence uses one six-event OR filter per 9,500-block
+chunk through Tenderly with dRPC fallback. The wallet-add network metadata
+advertises the same three endpoints.
 Readiness is evidence, not decoration: it independently reads the latest block,
 the latest Nox decision-handle resolution, Safe threshold `2`, and Safe module
 enablement, alongside the proof-keeper health response. An unavailable check is
