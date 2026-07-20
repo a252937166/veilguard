@@ -269,6 +269,7 @@ async function decisionResolved(handle) {
     const r = await fetch(`${GATEWAY_URL}/v0/public/handles/status`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ handles: [handle] }),
+      signal: AbortSignal.timeout(6_000),
     });
     if (!r.ok) return false;
     const d = await r.json();

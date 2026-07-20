@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ADDR, scan, short } from '../config';
 import { DEMO_SCENARIOS } from '../demo-scenarios';
-import { handlesResolved } from '../nox';
 import { useApp, type SpendRequest } from '../App';
+import { INITIAL_SYSTEM_READINESS, probeSystemReadiness } from '../system-readiness';
 import { RequestPill } from '../ui';
 
 function ago(ts: bigint): string {
@@ -27,23 +27,17 @@ function requestTime(request?: SpendRequest) {
 }
 
 export function PublicView() {
-  const { mandates, requests, goTab, lastUpdated, loadError, refresh } = useApp();
-  const [health, setHealth] = useState<{ keeper: boolean | null; gateway: boolean | null }>({ keeper: null, gateway: null });
+  const { mandates, requests, goTab, refresh } = useApp();
+  const [readiness, setReadiness] = useState(INITIAL_SYSTEM_READINESS);
 
   useEffect(() => {
     let stopped = false;
     const probe = async () => {
-      let keeper = false;
-      try {
-        const response = await fetch('/api/health', { signal: AbortSignal.timeout(6_000) });
-        const result = await response.json();
-        keeper = response.ok && result?.ok && result?.sweep !== false;
-      } catch { keeper = false; }
-
-      let gateway: boolean | null = null;
-      const handle = requests.find((request) => request.decision && !/^0x0+$/.test(request.decision))?.decision;
-      if (handle) gateway = await handlesResolved([handle]).then(() => true).catch(() => false);
-      if (!stopped) setHealth({ keeper, gateway });
+      const handle = [...requests]
+        .filter((request) => request.decision && !/^0x0+$/.test(request.decision))
+        .sort((a, b) => Number(b.createdAt - a.createdAt))[0]?.decision;
+      const result = await probeSystemReadiness(handle);
+      if (!stopped) setReadiness(result);
     };
     probe();
     const timer = setInterval(probe, 30_000);
@@ -64,15 +58,13 @@ export function PublicView() {
   const activeMandates = mandates.filter((mandate) => mandate.state === 2).length;
   const awaiting = requests.filter((request) => request.state === 1 || request.state === 3).length;
   const terminal = requests.filter((request) => [2, 4, 5, 6].includes(request.state)).length;
-  const rpcOk = !loadError && !!lastUpdated;
-
   return (
     <>
       <header className="workspace-heading">
         <div>
           <span className="detail-kicker">Live treasury · Ethereum Sepolia</span>
           <h1>Launch Day Treasury Shift</h1>
-          <p>Three invoices, one confidential mandate, and a complete trail from private policy evaluation to public proof.</p>
+          <p>Three invoices, one confidential treasury workflow, and a complete trail from private policy evaluation to public proof.</p>
         </div>
         <button className="btn primary" onClick={() => goTab('Delegate')}>Open Payment Inbox</button>
       </header>
@@ -126,13 +118,19 @@ export function PublicView() {
         <section className="surface-section">
           <div className="section-heading"><div><h2>System readiness</h2><p>Health checks support the flow; they do not replace testing the real CTA.</p></div></div>
           <div className="system-list">
-            {[
-              ['RPC & module', rpcOk],
-              ['Proof keeper', health.keeper],
-              ['Nox gateway', health.gateway],
-              ['Safe threshold', true],
-            ].map(([label, ok]) => (
-              <div key={String(label)}><span>{label as string}</span><b className={ok === null ? 'muted' : ok ? 'ok-text' : 'warn-text'}>{ok === null ? 'Checking' : ok ? 'Ready' : 'Degraded'}</b></div>
+            {([
+              ['Sepolia RPC', readiness.rpc],
+              ['Proof keeper', readiness.keeper],
+              ['Nox gateway', readiness.gateway],
+              ['Safe threshold', readiness.safeThreshold],
+              ['Safe module', readiness.module],
+            ] as const).map(([label, check]) => (
+              <div key={label}>
+                <span><strong>{label}</strong><small>{check.detail}</small></span>
+                <b className={check.ok === null ? 'muted' : check.ok ? 'ok-text' : 'warn-text'}>
+                  {check.ok === null ? 'Pending' : check.ok ? 'Ready' : 'Degraded'}
+                </b>
+              </div>
             ))}
           </div>
           <div className="privacy-compact">

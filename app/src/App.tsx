@@ -47,6 +47,7 @@ import { reconcileRunBoundMissionEvidence } from './mission-recovery';
 import { OperationCoordinator, type OperationSpec } from './operation-lock';
 import { chainSnapshotFingerprint, changedRequestIds as diffChangedRequestIds, requestStateSnapshot } from './chain-refresh';
 import { loadPaymentTrack, savePaymentTrack, unresolvedRunBroadcast } from './payment-track';
+import { BROWSER_RPC_URLS } from './rpc';
 
 const EVIDENCE_COMMIT = evidence.commit;
 
@@ -379,7 +380,7 @@ export function App() {
         await eth.request({ method: 'wallet_addEthereumChain', params: [{
           chainId: '0xaa36a7', chainName: 'Sepolia',
           nativeCurrency: { name: 'Sepolia ETH', symbol: 'ETH', decimals: 18 },
-          rpcUrls: ['https://ethereum-sepolia-rpc.publicnode.com'],
+          rpcUrls: [...BROWSER_RPC_URLS],
           blockExplorerUrls: ['https://sepolia.etherscan.io'],
         }] });
       }

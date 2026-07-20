@@ -18,6 +18,10 @@ export function GuidedActionPointer({
   const [placement, setPlacement] = useState<'above' | 'below'>('above');
   const [position, setPosition] = useState<GuidedPointerPosition>({ top: 12, left: 12 });
   const targetRef = useRef<HTMLElement | null>(null);
+  const statusChangeRef = useRef(onStatusChange);
+  const completeRef = useRef(onComplete);
+  statusChangeRef.current = onStatusChange;
+  completeRef.current = onComplete;
 
   // Focus only after the coach has committed, so aria-describedby always
   // references a real node when keyboard and screen-reader users arrive.
@@ -36,6 +40,7 @@ export function GuidedActionPointer({
     let originalTabIndex: string | null = null;
     let insertedTabIndex = false;
     let targetClickHandler: ((event: MouseEvent) => void) | null = null;
+    let following = false;
     const coachId = `guided-action-coach-${intent.id}`;
 
     const updatePosition = () => {
@@ -85,7 +90,7 @@ export function GuidedActionPointer({
         if (targetRef.current) return;
         expired = true;
         observer?.disconnect();
-        onStatusChange('missing');
+        statusChangeRef.current('missing');
       }, 2_500);
     };
 
@@ -94,7 +99,7 @@ export function GuidedActionPointer({
       if (targetRef.current === element) {
         setInstruction(nextInstruction);
         updatePosition();
-        onStatusChange('found');
+        statusChangeRef.current('found');
         return;
       }
       detach();
@@ -123,12 +128,17 @@ export function GuidedActionPointer({
         // choice and must not dismiss or advance the guide.
         if (!activatedControl) return;
         if (element.dataset.guidedFollow !== 'true') {
-          onComplete();
+          completeRef.current();
           return;
         }
-        detach();
-        onStatusChange('locating');
-        scheduleMissing();
+        // Follow actions can stay busy for many seconds while Nox handles
+        // resolve and decrypt. Keep the current control highlighted and let
+        // the observer hand the coach directly to the next real control.
+        // The missing timer is only meaningful after this control leaves.
+        following = true;
+        window.clearTimeout(missingTimer);
+        missingTimer = 0;
+        statusChangeRef.current('locating');
         window.cancelAnimationFrame(frame);
         frame = window.requestAnimationFrame(locate);
       };
@@ -137,7 +147,7 @@ export function GuidedActionPointer({
       setTarget(element);
       window.clearTimeout(missingTimer);
       missingTimer = 0;
-      onStatusChange('found');
+      statusChangeRef.current('found');
       resizeObserver = typeof ResizeObserver === 'undefined'
         ? null
         : new ResizeObserver(updatePosition);
@@ -160,30 +170,57 @@ export function GuidedActionPointer({
         const disabled = 'disabled' in element && Boolean((element as HTMLButtonElement).disabled);
         return !disabled && rect.width > 0 && rect.height > 0;
       });
+      const current = targetRef.current;
       if (next) {
+        if (following && next !== current) following = false;
         attach(next);
         return;
       }
 
-      const current = targetRef.current;
+      const busyTarget = following
+        ? matches.find((element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        })
+        : null;
+      if (busyTarget && busyTarget !== current) {
+        // Some async controls replace their DOM node when they enter a busy
+        // state. Rebind to that visible replacement without ever entering the
+        // missing-target countdown.
+        attach(busyTarget);
+        statusChangeRef.current('locating');
+        return;
+      }
+
       // Keep a busy action highlighted while it is disabled in place. Its
       // marker disappears (or moves) only when the UI has a genuine next step.
       if (current?.isConnected && current.dataset.guidedAction === intent.targetId) {
+        // React may reconcile the control's className while toggling its busy
+        // state. Restore the imperative coach marker without rebinding or
+        // stealing focus from the in-flight action.
+        current.classList.add('guided-action-target');
         setInstruction(current.dataset.guidedInstruction ?? intent.instruction);
         updatePosition();
+        if (following) statusChangeRef.current('locating');
         return;
       }
-      if (current) detach();
-      onStatusChange('locating');
+      if (current) {
+        detach();
+        following = false;
+      }
+      statusChangeRef.current('locating');
       scheduleMissing();
     };
 
-    onStatusChange('locating');
+    statusChangeRef.current('locating');
     locate();
     observer = new MutationObserver(() => {
       if (expired) return;
       window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(locate);
+      // DOM transitions such as enabled -> busy and busy -> next action are
+      // already delivered after React commits. Reconcile the coach now so a
+      // rerender cannot leave a one-frame gap or outrun a fake/slow RAF.
+      locate();
     });
     observer.observe(document.body, {
       childList: true,
@@ -202,7 +239,7 @@ export function GuidedActionPointer({
       frame = window.requestAnimationFrame(updatePosition);
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onComplete();
+      if (event.key === 'Escape') completeRef.current();
     };
     window.addEventListener('resize', onViewportResize);
     window.addEventListener('scroll', onViewportScroll, true);
@@ -218,7 +255,7 @@ export function GuidedActionPointer({
       document.removeEventListener('keydown', onKeyDown);
       detach(false);
     };
-  }, [intent, onComplete, onStatusChange]);
+  }, [intent]);
 
   if (!target) return null;
 
