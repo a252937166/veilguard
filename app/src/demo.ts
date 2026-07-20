@@ -1,7 +1,7 @@
-import { createWalletClient, http, type WalletClient } from 'viem';
+import { createWalletClient, type WalletClient } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
-import { RPC_URL } from './config';
+import { sepoliaWriteTransport } from './rpc';
 
 /**
  * DEMO MODE — intentionally public testnet keys, LOW-POWER ROLES ONLY.
@@ -68,7 +68,7 @@ export function demoWallet(role: DemoRole): WalletClient {
     c = createWalletClient({
       account: privateKeyToAccount(DEMO_ROLES[role].key),
       chain: sepolia,
-      transport: http(RPC_URL),
+      transport: sepoliaWriteTransport,
     });
     clients.set(role, c);
   }
@@ -86,7 +86,7 @@ export function violationWallet(): WalletClient {
     c = createWalletClient({
       account: privateKeyToAccount(VIOLATION_DELEGATE.key),
       chain: sepolia,
-      transport: http(RPC_URL),
+      transport: sepoliaWriteTransport,
     });
     clients.set('violation', c);
   }
@@ -99,7 +99,7 @@ export function freeplayWallet(): WalletClient {
     c = createWalletClient({
       account: privateKeyToAccount(FREEPLAY_DELEGATE.key),
       chain: sepolia,
-      transport: http(RPC_URL),
+      transport: sepoliaWriteTransport,
     });
     clients.set('freeplay', c);
   }

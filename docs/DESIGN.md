@@ -46,10 +46,13 @@ The visitor must activate the highlighted control explicitly.
 
 The target is exposed through `aria-describedby` and a non-intercepting local
 coachmark. The drawer collapses after a successful handoff so it cannot cover the
-workspace, but remains expandable. Target discovery observes asynchronous route
-content for at most 2.5 seconds before reporting a recoverable loading state.
-Replacing a target during evidence reconciliation transfers focus and semantics
-to the replacement. Safe local transitions keep the same intent alive across
+workspace, but remains expandable. Initial target discovery observes asynchronous
+route content for at most 2.5 seconds before reporting a recoverable loading state.
+A Follow action keeps its current busy control and coach attached for the full
+bounded network operation; the missing timer starts only after that control has
+actually left the DOM with no replacement. Replacing a target during evidence
+reconciliation transfers focus and semantics to the replacement. Safe local
+transitions keep the same intent alive across
 Disclosure Review → Create and Audit Unlock → Review → per-Request disposition →
 next Packet. Consequential submit, decrypt, packet-create and Safe-decision
 activation ends that pointer and waits for real evidence. `Escape`, closing the
@@ -183,6 +186,16 @@ Builder and Audit Review at desktop and mobile sizes. Fixtures are test-only,
 fixed to UTC/dark/reduced-motion, make no Sepolia calls, and mask only the UI SHA;
 CI uses a 0.2 perceptual threshold with at most 0.003 differing-pixel ratio.
 
+Browser reads, the main guided Delegate, isolated violation Delegate and Free
+Play signer all use the same ordered CORS-verified Sepolia pool: dRPC, Tenderly,
+then PublicNode. The wallet-add network metadata advertises the same pool.
+Readiness is evidence, not decoration: it independently reads the latest block,
+the latest Nox decision-handle resolution, Safe threshold `2`, and Safe module
+enablement, alongside the proof-keeper health response. An unavailable check is
+never converted into a green state. Nox Handle Client bootstrap failures are
+evicted from cache, and switching an injected provider invalidates account-bound
+clients even when the address is unchanged.
+
 Narrow reflow is a structural contract, not a root-level clipping trick. Detail
 headings and `PanelBody` content share the same gutter; definition rows can
 shrink and wrap; Privacy Lens facts stack below 480px; and action-bearing Funds,
@@ -206,6 +219,18 @@ document scroll width.
   real lifecycle result.
 
 ## Change log
+
+### 2026-07-20
+
+- Kept the Auditor coach attached across slow handle resolution/decryption and
+  added a five-second delayed Unlock → Review handoff regression.
+- Moved every browser Demo write signer and wallet network setup onto the shared
+  three-endpoint RPC fallback used by reads.
+- Replaced optimistic readiness labels with live RPC, keeper, Nox handle, Safe
+  threshold and module-enable checks; fixed provider-bound and rejected Nox
+  client cache recovery.
+- Corrected Overview to describe one confidential treasury workflow rather than
+  claiming that the isolated Atlas scenario shares one mandate.
 
 ### 2026-07-19
 

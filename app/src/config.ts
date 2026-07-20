@@ -32,6 +32,8 @@ export const wrapperAbi = [
 
 export const safeAbi = [
   { type: 'function', name: 'getOwners', stateMutability: 'view', inputs: [], outputs: [{ type: 'address[]' }] },
+  { type: 'function', name: 'getThreshold', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'isModuleEnabled', stateMutability: 'view', inputs: [{ name: 'module', type: 'address' }], outputs: [{ type: 'bool' }] },
   { type: 'function', name: 'execTransaction', stateMutability: 'payable', inputs: [
     { name: 'to', type: 'address' }, { name: 'value', type: 'uint256' }, { name: 'data', type: 'bytes' },
     { name: 'operation', type: 'uint8' }, { name: 'safeTxGas', type: 'uint256' }, { name: 'baseGas', type: 'uint256' },

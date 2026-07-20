@@ -233,6 +233,9 @@ footer a { color: #9ff2e5; text-decoration: underline; text-underline-offset: 3p
 .activity-marker { width: 7px; height: 7px; border-radius: 50%; background: var(--brand); }
 .system-list > div { display: flex; justify-content: space-between; gap: 14px; padding: 10px 0; border-bottom: 1px solid var(--border-subtle); }
 .system-list > div > * { min-width: 0; overflow-wrap: anywhere; }
+.system-list > div > span { display: flex; flex-direction: column; gap: 2px; }
+.system-list strong { color: var(--text-primary); font-size: 13px; }
+.system-list small { color: var(--text-tertiary); font-size: 12px; font-weight: 450; }
 .warn-text { color: var(--warning); }
 .privacy-compact { margin: 0 20px 20px; background: var(--surface-2); border-radius: var(--row-radius); }
 .privacy-compact > div { padding: 12px 14px; display: flex; flex-direction: column; border-bottom: 1px solid var(--border-subtle); }

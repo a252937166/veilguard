@@ -204,7 +204,9 @@ drawer reopens with a retryable loading message instead of spinning forever.
 Multi-stage work keeps the coach attached across safe local transitions such as
 Review → Create and Unlock → Review → disposition → next Packet. Consequential
 submit, decrypt and Safe decision controls still require a separate explicit
-click and never fire automatically.
+click and never fire automatically. Once a Follow action begins, its busy control
+retains the coach for the full bounded operation; the 2.5-second missing-target
+window starts only if that control actually disappears before its successor exists.
 
 ## Real 2-of-2 demo committee
 
@@ -312,9 +314,13 @@ against the local app and includes deterministic dark/reduced-motion visual
 baselines for Landing, Payments, Request Detail, Approval Decision, Disclosure
 Builder and Audit Review at 1366×768 and 390×844. Expected images are reviewed
 and committed; CI uses `threshold: 0.2` and `maxDiffPixelRatio: 0.003` and never
-updates them automatically. The public client uses only browser-CORS-verified
-PublicNode, dRPC and Tenderly endpoints; historical log reads use dRPC and
-Tenderly.
+updates them automatically. Public reads, all three local Demo write signers and
+wallet network setup use only the browser-CORS-verified dRPC, Tenderly and
+PublicNode fallback pool; historical log reads use dRPC and Tenderly. System
+Readiness independently verifies a reachable block, the latest Nox handle, the
+real Safe threshold and module enablement instead of displaying hard-coded green
+states. Provider changes and failed Nox client creation both invalidate their
+account-bound cache so retry remains real.
 
 ## Security & trust model
 
@@ -352,6 +358,9 @@ mandate.
   discloses its three fixed policy snapshots plus selected request amounts and coarse
   reasons — verify the public
   request state and transaction hashes alongside them.
+- The public prototype still discovers full historical Mandate and Request state
+  from ID 1 on each refresh. Multicall keeps the current testnet workload bounded;
+  pagination or an indexed history API is deferred until after the hackathon.
 
 ## License
 

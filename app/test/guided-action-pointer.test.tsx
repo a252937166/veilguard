@@ -256,6 +256,85 @@ test('follow targets hand the coach to the next real control before completing',
   expect(complete).toHaveBeenCalledTimes(1);
 });
 
+test('a slow follow action keeps its coach and hands off after a five second gateway delay', async () => {
+  vi.useFakeTimers();
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+    configurable: true,
+    value: vi.fn(),
+  });
+  Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => ({
+      x: 20, y: 120, top: 120, right: 300, bottom: 164, left: 20,
+      width: 280, height: 44, toJSON: () => ({}),
+    }),
+  });
+  vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })));
+  const status = vi.fn();
+  const intent = {
+    id: 14,
+    step: 5,
+    route: { page: 'audit-detail' as const, packetId: '1' },
+    role: 'auditor' as const,
+    selected: { packetId: '1' },
+    targetId: 'mission-audit',
+    instruction: 'Unlock disclosed values',
+  };
+
+  function SlowUnlock() {
+    const [phase, setPhase] = useState<'locked' | 'unlocking' | 'review'>('locked');
+    const unlock = () => {
+      setPhase('unlocking');
+      window.setTimeout(() => setPhase('review'), 5_000);
+    };
+    return (
+      <>
+        {phase === 'review' ? (
+          <button type="button" data-guided-action="mission-audit" data-guided-instruction="Review included requests">
+            Review included requests
+          </button>
+        ) : (
+          <button
+            type="button"
+            data-guided-action="mission-audit"
+            data-guided-follow="true"
+            data-guided-instruction="Unlock disclosed values"
+            disabled={phase === 'unlocking'}
+            onClick={unlock}
+          >
+            {phase === 'unlocking' ? 'Unlocking values' : 'Unlock disclosed values'}
+          </button>
+        )}
+        <GuidedActionPointer
+          intent={intent}
+          onStatusChange={status}
+          onComplete={vi.fn()}
+        />
+      </>
+    );
+  }
+
+  render(<SlowUnlock />);
+  const unlock = screen.getByRole('button', { name: 'Unlock disclosed values' });
+  expect(unlock).toHaveClass('guided-action-target');
+  fireEvent.click(unlock);
+
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.getByRole('button', { name: 'Unlocking values' })).toBe(unlock);
+  act(() => vi.advanceTimersByTime(16));
+  expect(screen.getByRole('button', { name: 'Unlocking values' })).toHaveClass('guided-action-target');
+  act(() => vi.advanceTimersByTime(2_500));
+  expect(status).not.toHaveBeenCalledWith('missing');
+
+  act(() => vi.advanceTimersByTime(2_500));
+  await act(async () => { await Promise.resolve(); });
+  const review = screen.getByRole('button', { name: 'Review included requests' });
+  expect(review).toHaveClass('guided-action-target');
+  expect(review).toHaveFocus();
+  expect(screen.getByRole('status')).toHaveTextContent('Review included requests');
+  expect(status).not.toHaveBeenCalledWith('missing');
+});
+
 test('choice-group padding does not dismiss the coach without a real control activation', async () => {
   Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
     configurable: true,
