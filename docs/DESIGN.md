@@ -178,6 +178,13 @@ minutes. GitHub stores no Safe/Admin key: the runner reaches only the bounded
 production decision API and retains versioned evidence JSON, Etherscan links,
 traces and a manifest for 90 days.
 
+A partial Gate has one narrow recovery path: `resume_run_id` may reuse a prior
+Approve and execute only the missing Reject. The validator accepts it only when
+the prior manifest has one valid Approve while the Reject recovery pointer is
+exactly `run-started` and contains no request, broadcast, attestation or decision
+hash. The recovered evidence is re-uploaded under the new Gate run before the
+combined manifest is built; any ambiguous pointer blocks the resume.
+
 The sharing identity is `VeilGuard — Confidential Operations Desk for Safe`.
 The versioned 1200×630 PNG depicts only the real Confidential payment → Safe
 2-of-2 decision → Selective disclosure flow. Twelve deterministic visual

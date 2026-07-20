@@ -149,7 +149,17 @@ async function submitSelectedInvoice(page: Page, expectedOutcome: RegExp) {
   await expect(submit).toBeEnabled({ timeout: 30_000 });
   await submit.click();
   await expect(page.getByRole('region', { name: /active payment operation/i })).toBeVisible({ timeout: 8_000 });
-  await expect(page.getByText(expectedOutcome)).toBeVisible({ timeout: 300_000 });
+  const outcome = page.getByText(expectedOutcome);
+  const failure = page.locator('.toast.err[role="alert"]');
+  let terminal = 'pending';
+  await expect.poll(async () => {
+    if (await failure.isVisible()) terminal = `error:${await failure.innerText()}`;
+    else if (await outcome.isVisible()) terminal = 'outcome';
+    return terminal;
+  }, { timeout: 300_000 }).not.toBe('pending');
+  if (terminal.startsWith('error:')) {
+    throw new Error(`payment operation failed before a terminal outcome: ${terminal.slice('error:'.length)}`);
+  }
 }
 
 type SessionEvidence = {
