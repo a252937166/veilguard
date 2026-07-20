@@ -5,9 +5,9 @@ import { publicClient } from './nox';
 
 /** Module deploy block (2026-07-17) — logs are fetched from here in ≤9.5k-block
  *  chunks because public Sepolia RPCs cap eth_getLogs ranges. publicnode rejects
- *  ranged getLogs outright (deterministic error, so the fallback transport won't
- *  rotate), so log queries use dedicated log-friendly endpoints. Tenderly
- *  leads because dRPC's free pool rate-limits bursty explorer reads. */
+ *  archive getLogs without a token, so log queries use dedicated log-friendly
+ *  endpoints. All six event signatures share one OR-filtered request per chunk;
+ *  issuing one request per event exhausts public browser rate limits on reload. */
 const DEPLOY_BLOCK = 11_295_790n;
 const CHUNK = 9_500n;
 const LOG_RPCS = ['https://gateway.tenderly.co/public/sepolia', 'https://sepolia.drpc.org'];
@@ -29,6 +29,14 @@ const EVENTS = {
   approved: parseAbiItem('event EscalationExecuted(uint256 indexed requestId)'),
   rejected: parseAbiItem('event EscalationCancelled(uint256 indexed requestId)'),
 } as const;
+const REQUEST_EVENTS = Object.values(EVENTS);
+
+export const requestLogQuery = (fromBlock: bigint, toBlock: bigint) => ({
+  address: ADDR.VeilGuardModule,
+  events: REQUEST_EVENTS,
+  fromBlock,
+  toBlock,
+});
 
 export type RequestTxs = {
   request?: `0x${string}`;
@@ -64,20 +72,36 @@ export function fetchRequestTxs(force = false): Promise<Map<string, RequestTxs>>
     const latest = await publicClient.getBlockNumber();
     for (let from = DEPLOY_BLOCK; from <= latest; from += CHUNK) {
       const toBlock = from + CHUNK - 1n > latest ? latest : from + CHUNK - 1n;
-      const [req, exe, blk, esc, app, rej] = await Promise.all([
-        getLogsRobust({ address: ADDR.VeilGuardModule, event: EVENTS.requested, fromBlock: from, toBlock }),
-        getLogsRobust({ address: ADDR.VeilGuardModule, event: EVENTS.executed, fromBlock: from, toBlock }),
-        getLogsRobust({ address: ADDR.VeilGuardModule, event: EVENTS.blocked, fromBlock: from, toBlock }),
-        getLogsRobust({ address: ADDR.VeilGuardModule, event: EVENTS.escalated, fromBlock: from, toBlock }),
-        getLogsRobust({ address: ADDR.VeilGuardModule, event: EVENTS.approved, fromBlock: from, toBlock }),
-        getLogsRobust({ address: ADDR.VeilGuardModule, event: EVENTS.rejected, fromBlock: from, toBlock }),
-      ]);
-      req.forEach((l) => upsert(l.args.requestId!, 'request', l.transactionHash));
-      exe.forEach((l) => { upsert(l.args.requestId!, 'finalize', l.transactionHash); annotate(l.args.requestId!, { outcomePath: 'direct' }); });
-      blk.forEach((l) => { upsert(l.args.requestId!, 'finalize', l.transactionHash); annotate(l.args.requestId!, { outcomePath: 'blocked' }); });
-      esc.forEach((l) => { upsert(l.args.requestId!, 'finalize', l.transactionHash); annotate(l.args.requestId!, { outcomePath: 'approval' }); });
-      app.forEach((l) => { upsert(l.args.requestId!, 'approval', l.transactionHash); annotate(l.args.requestId!, { outcomePath: 'approval', safeAction: 'approve' }); });
-      rej.forEach((l) => { upsert(l.args.requestId!, 'cancellation', l.transactionHash); annotate(l.args.requestId!, ESCALATION_CANCELLATION_EVIDENCE); });
+      const logs = await getLogsRobust(requestLogQuery(from, toBlock));
+      for (const log of logs) {
+        const id = log.args?.requestId as bigint | undefined;
+        if (id === undefined) continue;
+        switch (log.eventName) {
+          case 'SpendRequested':
+            upsert(id, 'request', log.transactionHash);
+            break;
+          case 'SpendExecuted':
+            upsert(id, 'finalize', log.transactionHash);
+            annotate(id, { outcomePath: 'direct' });
+            break;
+          case 'SpendBlocked':
+            upsert(id, 'finalize', log.transactionHash);
+            annotate(id, { outcomePath: 'blocked' });
+            break;
+          case 'EscalationReady':
+            upsert(id, 'finalize', log.transactionHash);
+            annotate(id, { outcomePath: 'approval' });
+            break;
+          case 'EscalationExecuted':
+            upsert(id, 'approval', log.transactionHash);
+            annotate(id, { outcomePath: 'approval', safeAction: 'approve' });
+            break;
+          case 'EscalationCancelled':
+            upsert(id, 'cancellation', log.transactionHash);
+            annotate(id, ESCALATION_CANCELLATION_EVIDENCE);
+            break;
+        }
+      }
     }
     cache = map;
     return map;
