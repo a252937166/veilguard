@@ -309,6 +309,18 @@ final manifest is retained for 90 days. If an assertion fails after broadcast,
 inspect the recovery artifact before any manual rerun instead of blindly creating
 another request.
 
+If Approve succeeds but the independent Reject Job fails before binding any
+request, dispatching the Gate with `resume_run_id` reuses the prior validated
+Approve evidence and runs Reject only. That path is refused unless the prior
+manifest contains exactly one valid Approve and the uploaded Reject recovery
+pointer is still `run-started` with no request, broadcast, attestation or
+transaction hash. This prevents a recovery run from duplicating a Safe action.
+
+```bash
+gh workflow run production-release-gate.yml --ref main \
+  -f confirm_production=true -f resume_run_id=<failed-run-id> -f resume_run_attempt=1
+```
+
 Ordinary desktop/mobile Playwright never collects the live file. It runs only
 against the local app and includes deterministic dark/reduced-motion visual
 baselines for Landing, Payments, Request Detail, Approval Decision, Disclosure
