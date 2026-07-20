@@ -158,6 +158,44 @@ test('guided builder submits and records the exact selected subset', async () =>
   }));
 });
 
+test('facilitated creation recovers a lost response by polling the same scope', async () => {
+  const packetPayload = {
+    bundleId: handle,
+    bundleKind: 'ui-aggregate',
+    onchainObject: false,
+    packets: [{ packetId: 9, mandateId: 1, requestIds: [11, 12, 13], manifestHash: handle, reused: true }],
+    fixedPolicyFields: ['autoLimit', 'budgetLeft', 'reserveFloor'],
+  };
+  const attempts = [
+    () => Promise.reject(Object.assign(new Error('signal timed out'), { name: 'TimeoutError' })),
+    () => Promise.resolve({ status: 202, ok: false, json: async () => ({ ok: true, processing: true }) }),
+    () => Promise.resolve({ status: 200, ok: true, json: async () => packetPayload }),
+  ];
+  vi.stubGlobal('fetch', vi.fn(() => attempts.shift()!()));
+
+  render(<DisclosureView />);
+  await screen.findByRole('checkbox', { name: /CloudNode/i });
+  fireEvent.click(screen.getByRole('button', { name: /review selected scope/i }));
+
+  vi.useFakeTimers();
+  try {
+    fireEvent.click(screen.getByRole('button', { name: /request facilitated packet creation/i }));
+    // Attempt 1 aborts client-side; the job keeps running server-side, so the
+    // loop must reconcile through the poll instead of surfacing the error.
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_100); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_100); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(screen.queryByText(/signal timed out/i)).not.toBeInTheDocument();
+    expect(completeMission).toHaveBeenCalledWith('audit', expect.objectContaining({
+      packetIds: [9],
+      runId: 'launch-selection-test',
+    }));
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test('guided preparation restores Select, preselects the current uncovered scope and hands off Review to Create', async () => {
   sessionState.current = {
     ...sessionState.current,

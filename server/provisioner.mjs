@@ -38,6 +38,7 @@ import {
   verifyDemoAmount,
 } from './lib/demo-decision.mjs';
 import { createSerialExecutor, recentRequestIds, sameAddressList } from './lib/demo-security.mjs';
+import { createSingleFlight } from './lib/single-flight.mjs';
 
 const {
   ADMIN_KEY, SIGNER_B_KEY, MODULE, SAFE,
@@ -722,7 +723,11 @@ async function performDemoAuditPacket({ runId, requestIds }) {
   };
 }
 
-const auditJobs = new Map();
+// Multi-mandate packet creation spans several Sepolia transactions and can
+// outlive any sane browser timeout. The job is acknowledged with 202 up front
+// and continues server-owned; polls of the same scope key pick up the cached
+// terminal result (success stays redeliverable, an error is delivered once).
+const auditFlights = createSingleFlight();
 let auditDayStart = 0;
 let auditDayCount = 0;
 function startDemoAuditPacket(input) {
@@ -730,12 +735,7 @@ function startDemoAuditPacket(input) {
   if (!Array.isArray(input.requestIds)) throw new HttpError(400, 'requestIds must be an array');
   const ids = input.requestIds.map(requestIdFrom).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const key = `${input.runId}:${ids.map(String).join(',')}`;
-  const existing = auditJobs.get(key);
-  if (existing) return { processing: true };
-  const promise = performDemoAuditPacket({ ...input, requestIds: ids });
-  auditJobs.set(key, promise);
-  promise.finally(() => auditJobs.delete(key)).catch(() => {});
-  return { processing: false, promise };
+  return auditFlights.take(key, () => performDemoAuditPacket({ ...input, requestIds: ids }));
 }
 
 // ------- http -------
@@ -764,7 +764,7 @@ http.createServer((req, res) => {
   if (req.url === '/api/health') return json(res, 200, {
     ok: true, enabled, module: MODULE, safe: SAFE, dayCount, dayCap,
     sweep: SWEEP_ENABLED, finalizing: finalizingIds.size,
-    decisions: demoDecisionService.processingCount, auditJobs: auditJobs.size,
+    decisions: demoDecisionService.processingCount, auditJobs: auditFlights.inFlight,
     auditDayCount, auditDayCap,
     demoDecisionWindowSeconds: Math.floor(DEMO_DECISION_WINDOW_MS / 1000),
   });
@@ -819,7 +819,8 @@ http.createServer((req, res) => {
       try {
         const started = startDemoAuditPacket(parseJsonObject(body));
         if (started.processing) return json(res, 202, { ok: true, processing: true });
-        json(res, 200, await started.promise);
+        if (started.error) throw started.error;
+        json(res, 200, started.result);
       } catch (e) {
         json(res, e?.status ?? 500, { error: e?.shortMessage ?? e?.message ?? 'audit packet creation failed', ...(e?.details ? { details: e.details } : {}) });
       }
