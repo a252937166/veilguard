@@ -134,6 +134,9 @@ npx hardhat run scripts/smoke-sepolia.ts  --network sepolia
 npx hardhat run scripts/e2e-sepolia.ts    --network sepolia
 ```
 
+All four `DEMO_*` role keys must be brand-new test-only identities; the deploy
+preflight refuses any role that reuses a checked-in Safe owner or deployment role.
+
 This sequence is only for a **fresh deployment**. It creates a Safe with exactly
 two distinct owners and threshold `2`, then every module enable, mandate
 activation, escalation approval and cancellation is signed by both owners with
@@ -148,6 +151,32 @@ checked-in production manifest. If the dApp should target the fresh deployment,
 copy the generated root manifest to `app/src/deployments.json` and run
 `npm run check` before building it; otherwise leave both checked-in production
 manifests untouched.
+
+This is a **fresh protocol reproduction**, not a one-command clone of the full
+public Operations Desk demo. It proves the new contracts, exact 2-of-2 Safe,
+direct/escalated/blocked requests and audit snapshots with one configured
+Delegate and Auditor. Copying the manifest only retargets contract and role
+addresses; it does not replace the public test-only identities or provision the
+guided scenarios.
+
+To reproduce the complete public Guided Demo on the fresh deployment, also:
+
+- choose test-only keys for the main, violation and Free Play Delegates plus the
+  Auditor; keep those identities aligned between `app/src/demo.ts` and the
+  provisioner demo-role settings, then rebuild the dApp. Never put the Finance
+  Admin or either Safe-owner key in the browser bundle;
+- fund all three Delegate accounts with Sepolia gas, seed the Safe with enough
+  cUSDC, and create/activate an eligible mandate for each Delegate with the same
+  three guided recipients and sufficient confidential capacity;
+- run the provisioner against the fresh `MODULE` and `SAFE`, with matching
+  `ADMIN_KEY`/`SIGNER_B_KEY`, RPC, Nox gateway/subgraph, allowed origin, demo
+  role/recipient overrides and a durable decision journal; and
+- verify `/api/demo-ready`, Approve and Reject, audit-packet creation and every
+  Guided Demo mission against that environment before presenting it.
+
+The deploy script funds only its configured Admin, second signer, one Delegate
+and one Auditor. The smoke/E2E sequence creates only its single protocol-test
+mandate, so neither step satisfies the additional public-demo prerequisites.
 
 #### Existing production deployment
 

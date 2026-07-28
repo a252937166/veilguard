@@ -17,7 +17,15 @@
 import { network } from 'hardhat';
 import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { createWalletClient, encodeFunctionData, http, padHex } from 'viem';
+import {
+  createWalletClient,
+  encodeAbiParameters,
+  encodeFunctionData,
+  http,
+  keccak256,
+  padHex,
+  parseEventLogs,
+} from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
 import { createViemHandleClient } from '@iexec-nox/handle';
@@ -66,14 +74,61 @@ const waitResolved = async (handles: string[], timeoutMs = 300_000) => {
 
 const send = async (label: string, w: any, tx: any) => {
   const hash = await w.writeContract(tx);
-  const rc = await publicClient.waitForTransactionReceipt({ hash });
-  if (rc.status !== 'success') throw new Error(`${label} reverted: ${hash}`);
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  if (receipt.status !== 'success') throw new Error(`${label} reverted: ${hash}`);
   console.log(`  ${label}: ${hash}`);
-  return hash as string;
+  return { hash: hash as `0x${string}`, receipt };
 };
 const getRequest = async (id: bigint) => (await publicClient.readContract({
   address: MODULE, abi: moduleAbi, functionName: 'getRequest', args: [id],
 })) as any[];
+const assertBigIntEqual = (label: string, actual: unknown, expected: bigint) => {
+  const normalized = BigInt(actual as bigint | number | string);
+  if (normalized !== expected) {
+    throw new Error(`${label} mismatch: expected ${expected}, got ${normalized}`);
+  }
+};
+const assertBigIntSequence = (
+  label: string,
+  actual: readonly unknown[],
+  expected: readonly bigint[],
+) => {
+  if (actual.length !== expected.length) {
+    throw new Error(`${label} length mismatch: expected ${expected.length}, got ${actual.length}`);
+  }
+  for (let i = 0; i < expected.length; i++) {
+    assertBigIntEqual(`${label}[${i}]`, actual[i], expected[i]);
+  }
+};
+const assertAddressEqual = (label: string, actual: string, expected: string) => {
+  if (actual.toLowerCase() !== expected.toLowerCase()) {
+    throw new Error(`${label} mismatch: expected ${expected}, got ${actual}`);
+  }
+};
+const assertHexEqual = (label: string, actual: string, expected: string) => {
+  if (actual.toLowerCase() !== expected.toLowerCase()) {
+    throw new Error(`${label} mismatch: expected ${expected}, got ${actual}`);
+  }
+};
+type ModuleEventName = 'MandateProposed' | 'SpendRequested' | 'AuditPacketCreated';
+const requireSingleModuleEvent = (
+  label: string,
+  receipt: Awaited<ReturnType<typeof publicClient.waitForTransactionReceipt>>,
+  eventName: ModuleEventName,
+) => {
+  const events = parseEventLogs({
+    abi: moduleAbi,
+    logs: receipt.logs,
+    eventName,
+    strict: true,
+  });
+  if (events.length !== 1) {
+    throw new Error(`${label} expected exactly one ${eventName} event, got ${events.length}`);
+  }
+  const event = events[0] as any;
+  assertAddressEqual(`${eventName} event address`, String(event.address), MODULE);
+  return event;
+};
 
 /** Guard against public-RPC read-after-write lag: poll until the mandate is Active. */
 const waitMandateActive = async (id: bigint, timeoutMs = 60_000) => {
@@ -107,14 +162,24 @@ const [l, b, f] = await Promise.all([
   adminClient.encryptInput(usdc(300), 'uint256', MODULE),
 ]);
 const now = BigInt(Math.floor(Date.now() / 1000));
-const proposeTx = await send('proposeMandate', admin, {
+const { hash: proposeTx, receipt: proposeReceipt } = await send('proposeMandate', admin, {
   address: MODULE, abi: moduleAbi, functionName: 'proposeMandate',
   args: [delegate.account.address, 0n, now + 86_400n * 60n, [deployer.account.address],
     l.handle, l.handleProof, b.handle, b.handleProof, f.handle, f.handleProof],
 });
-const mandateId = ((await publicClient.readContract({
-  address: MODULE, abi: moduleAbi, functionName: 'nextMandateId',
-})) as bigint) - 1n;
+const mandateProposedEvent = requireSingleModuleEvent(
+  'proposeMandate receipt',
+  proposeReceipt,
+  'MandateProposed',
+);
+const mandateId = BigInt(mandateProposedEvent.args.mandateId);
+if (mandateId <= 0n) throw new Error(`MandateProposed emitted invalid mandateId ${mandateId}`);
+assertAddressEqual(
+  'MandateProposed.delegate',
+  String(mandateProposedEvent.args.delegate),
+  delegate.account.address,
+);
+assertBigIntEqual('MandateProposed.version', mandateProposedEvent.args.version, mandateId);
 console.log(`[2] Safe 2-of-2 activates mandate #${mandateId}`);
 const activation = await safeExec2of2(
   SAFE, MODULE,
@@ -127,18 +192,41 @@ await waitMandateActive(mandateId);
 const delegateClient = await clientFor(delegate);
 const spend = async (n: number, memo: string) => {
   const enc = await delegateClient.encryptInput(usdc(n), 'uint256', MODULE);
-  const requestTx = await send(`requestSpend ${n}`, delegate, {
+  const { hash: requestTx, receipt: requestReceipt } = await send(`requestSpend ${n}`, delegate, {
     address: MODULE, abi: moduleAbi, functionName: 'requestSpend',
     args: [mandateId, deployer.account.address, enc.handle, enc.handleProof,
       padHex(memo as `0x${string}`, { size: 32 })],
   });
-  const id = ((await publicClient.readContract({
-    address: MODULE, abi: moduleAbi, functionName: 'nextRequestId',
-  })) as bigint) - 1n;
+  const spendRequestedEvent = requireSingleModuleEvent(
+    `requestSpend ${n} receipt`,
+    requestReceipt,
+    'SpendRequested',
+  );
+  const id = BigInt(spendRequestedEvent.args.requestId);
+  if (id <= 0n) throw new Error(`SpendRequested emitted invalid requestId ${id}`);
+  assertBigIntEqual('SpendRequested.mandateId', spendRequestedEvent.args.mandateId, mandateId);
+  assertAddressEqual(
+    'SpendRequested.delegate',
+    String(spendRequestedEvent.args.delegate),
+    delegate.account.address,
+  );
+  assertAddressEqual(
+    'SpendRequested.recipient',
+    String(spendRequestedEvent.args.recipient),
+    deployer.account.address,
+  );
   const r = await getRequest(id);
+  assertBigIntEqual('request.mandateId', r[0], mandateId);
+  assertAddressEqual('request.delegate', String(r[1]), delegate.account.address);
+  assertAddressEqual('request.recipient', String(r[2]), deployer.account.address);
+  assertHexEqual(
+    'SpendRequested.decisionHandle',
+    String(spendRequestedEvent.args.decisionHandle),
+    String(r[7]),
+  );
   const tee = await waitResolved([r[7]]);
   const { value: decision, decryptionProof } = await delegateClient.publicDecrypt(r[7]);
-  const finalizeTx = await send('finalize', deployer, {
+  const { hash: finalizeTx } = await send('finalize', deployer, {
     address: MODULE, abi: moduleAbi, functionName: 'finalize', args: [id, decryptionProof],
   });
   console.log(`  request #${id}: decision=${decision} (TEE ${tee.toFixed(1)}s)`);
@@ -177,23 +265,84 @@ evidence.teeLatencySec.blocked = blocked.tee;
 
 // 6. selective disclosure packet
 console.log('[6] selective-disclosure packet for the auditor');
-const packetTx = await send('createAuditPacket', admin, {
+const auditor = wallet('DEMO_AUDITOR_KEY');
+const auditorAddress = auditor.account.address;
+const auditorClient = await clientFor(auditor);
+const expectedRequestIds = [within.id, escalated.id, blocked.id] as const;
+const { hash: packetTx, receipt: packetReceipt } = await send('createAuditPacket', admin, {
   address: MODULE, abi: moduleAbi, functionName: 'createAuditPacket',
-  args: [env('DEMO_AUDITOR_ADDR'), mandateId, [within.id, escalated.id, blocked.id]],
+  args: [auditorAddress, mandateId, expectedRequestIds],
 });
-const packetId = ((await publicClient.readContract({
-  address: MODULE, abi: moduleAbi, functionName: 'nextPacketId',
-})) as bigint) - 1n;
+const auditPacketCreatedEvent = requireSingleModuleEvent(
+  'createAuditPacket receipt',
+  packetReceipt,
+  'AuditPacketCreated',
+);
+const packetId = BigInt(auditPacketCreatedEvent.args.packetId);
+if (packetId <= 0n) throw new Error(`AuditPacketCreated emitted invalid packetId ${packetId}`);
+assertAddressEqual(
+  'AuditPacketCreated.auditor',
+  String(auditPacketCreatedEvent.args.auditor),
+  auditorAddress,
+);
+assertBigIntEqual('AuditPacketCreated.mandateId', auditPacketCreatedEvent.args.mandateId, mandateId);
+const eventManifestHash = String(auditPacketCreatedEvent.args.manifestHash);
 const packet = (await publicClient.readContract({
   address: MODULE, abi: moduleAbi, functionName: 'getAuditPacket', args: [packetId],
 })) as any[];
-const snaps: `0x${string}`[] = packet[6];
+const mandate = (await publicClient.readContract({
+  address: MODULE, abi: moduleAbi, functionName: 'getMandate', args: [mandateId],
+})) as any[];
+const policyVersion = Number(mandate[3]);
+const packetRequestIds = packet[5] as readonly bigint[];
+const snaps = [...(packet[6] as readonly `0x${string}`[])];
+
+// Fail closed on every public packet binding before attempting disclosure or
+// writing demo-evidence.json. The request-state checks also ensure the IDs bound
+// by this run's SpendRequested receipts still identify the expected terminal requests.
+assertAddressEqual('packet auditor', String(packet[0]), auditorAddress);
+assertBigIntEqual('packet mandateId', packet[1], mandateId);
+assertBigIntEqual('packet policyVersion', packet[2], BigInt(policyVersion));
+assertBigIntSequence('packet requestIds', packetRequestIds, expectedRequestIds);
+assertHexEqual('packet manifest vs AuditPacketCreated', String(packet[3]), eventManifestHash);
+if (snaps.length !== 3 + expectedRequestIds.length * 2) {
+  throw new Error(`snapshot handle count mismatch: expected 9, got ${snaps.length}`);
+}
+for (const [index, expectedState] of [2n, 2n, 4n].entries()) {
+  const request = await getRequest(expectedRequestIds[index]);
+  assertBigIntEqual(`request[${index}].mandateId`, request[0], mandateId);
+  assertBigIntEqual(`request[${index}].state`, request[5], expectedState);
+}
+
+// Solidity computes keccak256(abi.encode(address,uint256,uint32,uint256[],bytes32[])).
+// viem's standard ABI encoder is byte-for-byte equivalent to abi.encode here.
+const expectedManifestHash = keccak256(encodeAbiParameters(
+  [
+    { name: 'auditor', type: 'address' },
+    { name: 'mandateId', type: 'uint256' },
+    { name: 'policyVersion', type: 'uint32' },
+    { name: 'requestIds', type: 'uint256[]' },
+    { name: 'snapshotHandles', type: 'bytes32[]' },
+  ],
+  [auditorAddress, mandateId, policyVersion, expectedRequestIds, snaps],
+));
+if (eventManifestHash.toLowerCase() !== expectedManifestHash.toLowerCase()) {
+  throw new Error(`packet manifest mismatch: expected ${expectedManifestHash}, got ${eventManifestHash}`);
+}
+
 await waitResolved(snaps);
-const auditor = wallet('DEMO_AUDITOR_KEY');
-const auditorClient = await clientFor(auditor);
-const vals: number[] = [];
-for (const s of snaps) vals.push(Number((await auditorClient.decrypt(s)).value));
-console.log(`  auditor decrypts [limit,budget,floor, amt/reason ×3] = ${vals.map((v, i) => (i < 3 || i % 2 === 1 ? v / 1e6 : v)).join(', ')}`);
+const vals: bigint[] = [];
+for (const s of snaps) vals.push(BigInt((await auditorClient.decrypt(s)).value));
+const expectedSnapshotValues = [
+  usdc(40),
+  usdc(500) - usdc(25) - usdc(60),
+  usdc(300),
+  usdc(25), 0n,
+  usdc(60), 0n,
+  usdc(600), 1n,
+] as const;
+assertBigIntSequence('decrypted packet snapshots', vals, expectedSnapshotValues);
+console.log(`  auditor decrypts [limit,budget,floor, amt/reason ×3] = ${vals.map((v, i) => (i < 3 || i % 2 === 1 ? Number(v) / 1e6 : v)).join(', ')}`);
 
 // 7. freeze evidence
 evidence.mandate = { id: Number(mandateId), proposeTx, activation };
@@ -202,7 +351,16 @@ evidence.requests = {
   escalated: { id: Number(escalated.id), requestTx: escalated.requestTx, finalizeTx: escalated.finalizeTx, approval },
   blocked: { id: Number(blocked.id), requestTx: blocked.requestTx, finalizeTx: blocked.finalizeTx },
 };
-evidence.packet = { id: Number(packetId), createTx: packetTx, requestIds: [Number(within.id), Number(escalated.id), Number(blocked.id)] };
+evidence.packet = {
+  id: Number(packetId),
+  createTx: packetTx,
+  auditor: auditorAddress,
+  mandateId: Number(mandateId),
+  policyVersion,
+  manifestHash: eventManifestHash,
+  requestIds: expectedRequestIds.map(Number),
+  snapshotHandleCount: snaps.length,
+};
 writeFileSync(new URL('../app/src/demo-evidence.json', import.meta.url), JSON.stringify(evidence, null, 2));
 console.log('\n✅ evidence frozen → app/src/demo-evidence.json');
 process.exit(0);

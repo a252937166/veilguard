@@ -16,6 +16,7 @@ const sources = {
   smoke: await readFile(new URL('../../scripts/smoke-sepolia.ts', import.meta.url), 'utf8'),
   e2e: await readFile(new URL('../../scripts/e2e-sepolia.ts', import.meta.url), 'utf8'),
   evidence: await readFile(new URL('../../scripts/final-evidence.ts', import.meta.url), 'utf8'),
+  historicalEvidence: await readFile(new URL('../../scripts/complete-evidence.ts', import.meta.url), 'utf8'),
   helper: await readFile(new URL('../../scripts/safe-lib.ts', import.meta.url), 'utf8'),
 };
 
@@ -53,6 +54,78 @@ test('fresh Sepolia reproduction scripts can only use the exact 2-of-2 helper', 
     assert.deepEqual(auditSafeScriptSource(sources[kind], kind), [], `${kind} policy violations`);
   }
   assert.deepEqual(auditSafeHelperSource(sources.helper), [], 'safe-lib policy violations');
+});
+
+test('fresh deploy completes every read-only safety preflight before its first chain write', () => {
+  const writePositions = [
+    'await viem.deployContract(',
+    'await deployer.writeContract(',
+    'await deployer.sendTransaction(',
+    'await safeExec2of2(',
+  ].map((fragment) => sources.deploy.indexOf(fragment));
+  assert.ok(writePositions.every((position) => position >= 0), 'expected deploy write paths');
+  const firstWrite = Math.min(...writePositions);
+
+  for (const requiredPreflight of [
+    'const chainId = await publicClient.getChainId();',
+    'if (chainId !== sepolia.id) {',
+    'throw new Error(`fresh deployment requires Sepolia',
+    'new Set(demoRoleAddresses).size !== demoRoleAddresses.length',
+    'demoRoleAddresses.includes(deployerAddress)',
+    "readFileSync(new URL('../deployments.json', import.meta.url), 'utf8')",
+    'const checkedInIdentityValues = [',
+    'checkedInIdentityValues.some((value) => !isAddress(value))',
+    'demoRoleAddresses.some((address) => checkedInIdentities.has(address))',
+    'const factoryCode = await publicClient.getCode({ address: SAFE_FACTORY })',
+    'for (const candidate of [SAFE_SINGLETON_L1, SAFE_SINGLETON_L2])',
+    "throw new Error('canonical Safe v1.4.1 factory/singleton not found on Sepolia",
+    'const balance = await publicClient.getBalance(',
+    'if (balance < MIN_DEPLOYER_BALANCE) {',
+  ]) {
+    const position = sources.deploy.indexOf(requiredPreflight);
+    assert.ok(position >= 0, `missing deploy preflight: ${requiredPreflight}`);
+    assert.ok(position < firstWrite, `${requiredPreflight} must run before the first chain write`);
+  }
+
+  const preflight = sources.deploy.slice(0, firstWrite);
+  assert.match(
+    preflight,
+    /if \(new Set\(demoRoleAddresses\)\.size !== demoRoleAddresses\.length\) {\s*throw new Error/,
+  );
+  assert.match(
+    preflight,
+    /if \(demoRoleAddresses\.includes\(deployerAddress\)\) {\s*throw new Error/,
+  );
+  assert.match(
+    preflight,
+    /if \(demoRoleAddresses\.some\(\(address\) => checkedInIdentities\.has\(address\)\)\) {\s*throw new Error/,
+  );
+  assert.match(
+    preflight,
+    /if \(balance < MIN_DEPLOYER_BALANCE\) {\s*throw new Error/,
+  );
+  assert.doesNotMatch(
+    preflight,
+    /checkedInDeployments\.contracts/,
+    'contract addresses are not identities and must not block a fresh reproduction',
+  );
+
+  assert.match(
+    sources.deploy,
+    /const DEMO_ROLE_FUNDING = parseEther\('0\.004'\);\s*const ROLE_FUNDING_TOTAL = DEMO_ROLE_FUNDING \* 4n;\s*const DEPLOY_GAS_RESERVE = parseEther\('0\.02'\);\s*const MIN_DEPLOYER_BALANCE = ROLE_FUNDING_TOTAL \+ DEPLOY_GAS_RESERVE;/,
+  );
+  assert.match(
+    sources.deploy,
+    /value: DEMO_ROLE_FUNDING/,
+    'the funding loop and preflight total must use the same per-role amount',
+  );
+  assert.match(sources.deploy, /ROLE_FUNDING_TOTAL.*four demo roles/s);
+  assert.match(sources.deploy, /DEPLOY_GAS_RESERVE.*deployment gas reserve/s);
+  assert.doesNotMatch(
+    sources.deploy,
+    /balance < parseEther\('0\.02'\)/,
+    '0.02 ETH cannot cover both 0.016 ETH role funding and a safe gas reserve',
+  );
 });
 
 test('Safe reproduction policy detects threshold, direct-exec and duplicate-signer regressions', () => {
@@ -363,6 +436,101 @@ test('final evidence records the immutable results returned by both Safe executi
   );
 });
 
+test('final evidence derives the auditor key and verifies the complete audit packet before writing', () => {
+  assert.doesNotMatch(sources.evidence, /DEMO_AUDITOR_ADDR/);
+  assert.match(sources.evidence, /const auditor = wallet\('DEMO_AUDITOR_KEY'\);/);
+  assert.match(
+    sources.evidence,
+    /args: \[auditorAddress, mandateId, expectedRequestIds\]/,
+  );
+
+  const evidenceWrite = sources.evidence.lastIndexOf('writeFileSync(');
+  assert.ok(evidenceWrite > 0, 'final evidence must write only after verification');
+  for (const requiredCheck of [
+    "assertAddressEqual('packet auditor'",
+    "assertBigIntEqual('packet mandateId'",
+    "assertBigIntEqual('packet policyVersion'",
+    "assertBigIntSequence('packet requestIds'",
+    'snapshot handle count mismatch',
+    'request[${index}].mandateId',
+    'request[${index}].state',
+    'const expectedManifestHash = keccak256(encodeAbiParameters(',
+    'packet manifest mismatch',
+    "assertBigIntSequence('decrypted packet snapshots'",
+  ]) {
+    const checkPosition = sources.evidence.indexOf(requiredCheck);
+    assert.ok(checkPosition > 0, `missing fail-closed check: ${requiredCheck}`);
+    assert.ok(
+      checkPosition < evidenceWrite,
+      `${requiredCheck} must execute before demo-evidence.json is written`,
+    );
+  }
+
+  assert.match(
+    sources.evidence,
+    /\{ name: 'auditor', type: 'address' \}[\s\S]*\{ name: 'mandateId', type: 'uint256' \}[\s\S]*\{ name: 'policyVersion', type: 'uint32' \}[\s\S]*\{ name: 'requestIds', type: 'uint256\[\]' \}[\s\S]*\{ name: 'snapshotHandles', type: 'bytes32\[\]' \}/,
+  );
+  assert.match(
+    sources.evidence,
+    /const expectedSnapshotValues = \[\s*usdc\(40\),\s*usdc\(500\) - usdc\(25\) - usdc\(60\),\s*usdc\(300\),\s*usdc\(25\), 0n,\s*usdc\(60\), 0n,\s*usdc\(600\), 1n,/,
+  );
+  assert.match(sources.evidence, /parseEventLogs\(\{[\s\S]*strict: true,/);
+  for (const eventName of ['MandateProposed', 'SpendRequested', 'AuditPacketCreated']) {
+    assert.match(
+      sources.evidence,
+      new RegExp(`requireSingleModuleEvent\\([\\s\\S]*?'${eventName}'`),
+      `final evidence must bind ${eventName} to its transaction receipt`,
+    );
+  }
+  assert.match(
+    sources.evidence,
+    /assertHexEqual\('packet manifest vs AuditPacketCreated', String\(packet\[3\]\), eventManifestHash\)/,
+  );
+  assert.doesNotMatch(sources.evidence, /next(?:Mandate|Request|Packet)Id/);
+});
+
+test('fresh E2E validates all eleven audit snapshot slots as raw bigint values', () => {
+  for (const [label, raw] of [
+    ['policy.autoLimit', 'usdc(40)'],
+    ['policy.budgetLeft', 'usdc(15)'],
+    ['policy.reserveFloor', 'usdc(500)'],
+    ['request#1.amount', 'usdc(25)'],
+    ['request#1.blockedReason', '0n'],
+    ['request#${a.id}.amount', 'usdc(60)'],
+    ['request#${a.id}.blockedReason', '0n'],
+    ['request#${b.id}.amount', 'usdc(60)'],
+    ['request#${b.id}.blockedReason', '0n'],
+    ['request#${c.id}.amount', 'usdc(500)'],
+    ['request#${c.id}.blockedReason', '1n'],
+  ]) {
+    assert.match(
+      sources.e2e,
+      new RegExp(`label: [\`']${label.replaceAll('$', '\\$')}[\`'], raw: ${raw.replace(/[()]/g, '\\$&')}`),
+      `missing raw snapshot assertion for ${label}`,
+    );
+  }
+  assert.match(sources.e2e, /snaps\.length !== expectedSnapshots\.length/);
+  assert.match(sources.e2e, /const values: bigint\[\] = \[\];/);
+  assert.doesNotMatch(
+    sources.e2e,
+    /auditorClient\.decrypt\(s\)\)\.value\)\s*\/\s*1e6/,
+  );
+});
+
+test('unsupported historical evidence completion cannot overwrite canonical evidence', async () => {
+  assert.match(sources.historicalEvidence, /@deprecated Unsupported historical one-off/);
+  assert.match(sources.historicalEvidence, /prefer scripts\/final-evidence\.ts/);
+  assert.match(
+    sources.historicalEvidence,
+    /const evidenceOutput = new URL\('\.\.\/app\/src\/demo-evidence\.recovery\.json', import\.meta\.url\)/,
+  );
+  assert.match(sources.historicalEvidence, /writeFileSync\(evidenceOutput,/);
+  assert.doesNotMatch(
+    sources.historicalEvidence,
+    /app\/src\/demo-evidence\.json/,
+  );
+});
+
 test('ABI declarations, comments, reads and ordinary memo padding are not mistaken for Safe execution', () => {
   const sample = `
     import { safeExec2of2 } from './safe-lib.js';
@@ -391,6 +559,14 @@ test('README separates fresh mutation scripts from the existing production path'
   const readme = await readFile(new URL('../../README.md', import.meta.url), 'utf8');
   assert.match(readme, /#### Fresh deployment \(new contracts and Safe\)/);
   assert.match(readme, /#### Existing production deployment/);
+  assert.match(readme, /fresh protocol reproduction/);
+  assert.match(readme, /not a one-command clone of the full/);
+  assert.match(readme, /main, violation and Free Play Delegates/);
+  assert.match(readme, /Never put the Finance\s+Admin or either Safe-owner key in the browser bundle/);
+  assert.match(readme, /run the provisioner against the fresh `MODULE` and `SAFE`/);
+  assert.match(readme, /deploy script funds only its configured Admin, second signer, one Delegate/);
+  assert.match(readme, /four `DEMO_\*` role keys must be brand-new test-only identities/);
+  assert.match(readme, /refuses any role that reuses a checked-in Safe owner or deployment role/);
   assert.match(readme, /Do \*\*not\*\* start at `smoke-sepolia\.ts` or `e2e-sepolia\.ts`/);
   assert.match(readme, /Do not run the fresh deploy\/smoke\/E2E scripts or the historical/);
   assert.match(readme, /`redeploy-module\.ts` migration/);

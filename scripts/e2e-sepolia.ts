@@ -187,13 +187,45 @@ const packet = (await publicClient.readContract({
   address: VeilGuardModule, abi: moduleAbi, functionName: 'getAuditPacket', args: [1n],
 })) as any[];
 const snaps: `0x${string}`[] = packet[6];
+const expectedSnapshots = [
+  { label: 'policy.autoLimit', raw: usdc(40) },
+  { label: 'policy.budgetLeft', raw: usdc(15) },
+  { label: 'policy.reserveFloor', raw: usdc(500) },
+  { label: 'request#1.amount', raw: usdc(25) },
+  { label: 'request#1.blockedReason', raw: 0n },
+  { label: `request#${a.id}.amount`, raw: usdc(60) },
+  { label: `request#${a.id}.blockedReason`, raw: 0n },
+  { label: `request#${b.id}.amount`, raw: usdc(60) },
+  { label: `request#${b.id}.blockedReason`, raw: 0n },
+  { label: `request#${c.id}.amount`, raw: usdc(500) },
+  { label: `request#${c.id}.blockedReason`, raw: 1n },
+] as const;
+if (snaps.length !== expectedSnapshots.length) {
+  throw new Error(
+    `audit snapshot count mismatch: expected ${expectedSnapshots.length}, got ${snaps.length}\n`
+    + `expected order: ${expectedSnapshots.map(({ label }) => label).join(', ')}`,
+  );
+}
 await waitResolved(snaps);
-const values = [];
-for (const s of snaps) values.push(Number((await auditorClient.decrypt(s)).value) / 1e6);
-console.log(`  snapshots [limit,budget,floor,amt1,amtA,amtB,amtC] = ${values.join(', ')}`);
-const expected = [40, 15, 500, 25, 60, 60, 500];
-if (JSON.stringify(values) !== JSON.stringify(expected))
-  throw new Error(`snapshot mismatch: ${values}`);
+const values: bigint[] = [];
+for (const s of snaps) values.push(BigInt((await auditorClient.decrypt(s)).value));
+
+console.log('  audit snapshots (raw bigint):');
+for (let i = 0; i < expectedSnapshots.length; i++) {
+  console.log(`    [${i}] ${expectedSnapshots[i].label} = ${values[i]}`);
+}
+
+const mismatches = expectedSnapshots.flatMap(({ label, raw }, index) =>
+  values[index] === raw
+    ? []
+    : [`[${index}] ${label}: expected ${raw}, got ${values[index]}`],
+);
+if (mismatches.length > 0) {
+  throw new Error(
+    `audit snapshot mismatch (${mismatches.length}/${expectedSnapshots.length} slots):\n`
+    + mismatches.join('\n'),
+  );
+}
 
 console.log('\n✅ E2E complete — all three states + cancel + audit live on Sepolia.');
 process.exit(0);
