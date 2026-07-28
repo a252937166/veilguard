@@ -1,10 +1,11 @@
 /**
- * Gas-efficient evidence completion: the within-mandate and escalated flows
- * (including a REAL 2-of-2 Safe execution) are already frozen on-chain from the
- * final-evidence run; this does the remaining BLOCKED request + finalize + the
- * selective-disclosure packet, then writes the consolidated evidence file.
+ * @deprecated Unsupported historical one-off for completing the interrupted
+ * 2dde792 evidence run. It mixes pinned historical transactions with a new
+ * BLOCKED request and audit packet, so it is not a fresh reproduction or a
+ * release gate. Use scripts/final-evidence.ts for supported evidence generation.
  *
- * Run: npx hardhat run scripts/complete-evidence.ts --network sepolia
+ * It writes app/src/demo-evidence.recovery.json, which the dApp does not import.
+ * This script cannot replace the judge-facing canonical evidence.
  */
 import { network } from 'hardhat';
 import { execSync } from 'node:child_process';
@@ -20,6 +21,10 @@ const { Safe: SAFE, VeilGuardModule: MODULE } = deployments.contracts;
 const GATEWAY = 'https://gateway-testnets.noxprotocol.dev';
 const usdc = (n: number) => BigInt(Math.round(n * 1e6));
 const MANDATE = 4n;
+const evidenceOutput = new URL('../app/src/demo-evidence.recovery.json', import.meta.url);
+
+console.warn('⚠️  unsupported historical one-off; prefer scripts/final-evidence.ts');
+console.warn('Canonical evidence is protected. Recovery output is not imported by the dApp.');
 
 // Already on-chain (real 2-of-2 activation + within + escalated flows):
 const KNOWN = {
@@ -49,6 +54,7 @@ const [deployer] = await viem.getWalletClients();
 const wallet = (k: string) => createWalletClient({ account: privateKeyToAccount(env(k)! as `0x${string}`), chain: sepolia, transport: http(RPC) });
 const admin = wallet('DEMO_ADMIN_KEY');
 const delegate = wallet('DEMO_DELEGATE_KEY');
+const auditor = wallet('DEMO_AUDITOR_KEY');
 const clientFor = async (w: any) => await createViemHandleClient({ ...w, getAddresses: async () => [w.account.address] });
 const moduleAbi = JSON.parse(readFileSync(new URL('../artifacts/contracts/VeilGuardModule.sol/VeilGuardModule.json', import.meta.url), 'utf8')).abi;
 
@@ -82,12 +88,12 @@ console.log(`  request #${blockedId}: BLOCKED (TEE ${teeBlocked.toFixed(1)}s)`);
 
 console.log('[6] selective-disclosure packet');
 const reqIds = [BigInt(KNOWN.within.id), BigInt(KNOWN.escalated.id), blockedId];
-const packetTx = await send('createAuditPacket', admin, { address: MODULE, abi: moduleAbi, functionName: 'createAuditPacket', args: [env('DEMO_AUDITOR_ADDR'), MANDATE, reqIds] });
+const packetTx = await send('createAuditPacket', admin, { address: MODULE, abi: moduleAbi, functionName: 'createAuditPacket', args: [auditor.account.address, MANDATE, reqIds] });
 const packetId = ((await publicClient.readContract({ address: MODULE, abi: moduleAbi, functionName: 'nextPacketId' })) as bigint) - 1n;
 const packet = (await publicClient.readContract({ address: MODULE, abi: moduleAbi, functionName: 'getAuditPacket', args: [packetId] })) as any[];
 const snaps: `0x${string}`[] = packet[6];
 await waitResolved(snaps);
-const auditorClient = await clientFor(wallet('DEMO_AUDITOR_KEY'));
+const auditorClient = await clientFor(auditor);
 const vals: number[] = [];
 for (const s of snaps) vals.push(Number((await auditorClient.decrypt(s)).value));
 console.log(`  auditor decrypts ${snaps.length} snapshots ✓ [${vals.map((v, i) => (i < 3 || i % 2 === 1 ? v / 1e6 : v)).join(', ')}]`);
@@ -104,6 +110,6 @@ const evidence = {
   },
   packet: { id: Number(packetId), createTx: packetTx, requestIds: reqIds.map(Number) },
 };
-writeFileSync(new URL('../app/src/demo-evidence.json', import.meta.url), JSON.stringify(evidence, null, 2));
-console.log('\n✅ evidence frozen → app/src/demo-evidence.json');
+writeFileSync(evidenceOutput, JSON.stringify(evidence, null, 2));
+console.log(`\n✅ historical recovery evidence written → ${evidenceOutput.pathname}`);
 process.exit(0);

@@ -12,3 +12,4 @@ offchain-services.log
 server/dist/
 app/test-results/
 app/playwright-report/
+app/src/demo-evidence.recovery.json

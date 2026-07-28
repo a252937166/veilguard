@@ -10,7 +10,7 @@
  * Run: npx hardhat run scripts/deploy-sepolia.ts --network sepolia
  */
 import { network } from 'hardhat';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import {
   encodeFunctionData,
   formatEther,
@@ -18,6 +18,7 @@ import {
   parseEventLogs,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import { sepolia } from 'viem/chains';
 import { env, safeExec2of2 } from './safe-lib.js';
 
 // Canonical Safe v1.4.1 deployment (same addresses on all chains).
@@ -25,6 +26,12 @@ const SAFE_FACTORY = '0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67' as const;
 const SAFE_SINGLETON_L1 = '0x41675C099F32341bf84BFc5382aF534df5C7461a' as const;
 const SAFE_SINGLETON_L2 = '0x29fcB43b46531BcA003ddC8FCB67FFE91900C762' as const;
 const SAFE_FALLBACK_HANDLER = '0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99' as const;
+// Four roles receive 0.004 ETH each (0.016 total); keep a separate 0.02 ETH
+// reserve so role funding cannot consume the deployment gas budget.
+const DEMO_ROLE_FUNDING = parseEther('0.004');
+const ROLE_FUNDING_TOTAL = DEMO_ROLE_FUNDING * 4n;
+const DEPLOY_GAS_RESERVE = parseEther('0.02');
+const MIN_DEPLOYER_BALANCE = ROLE_FUNDING_TOTAL + DEPLOY_GAS_RESERVE;
 
 const safeAbi = [
   { type: 'function', name: 'setup', stateMutability: 'nonpayable', inputs: [
@@ -64,19 +71,80 @@ const admin = privateKeyToAccount(adminKey);
 const signerB = privateKeyToAccount(env('DEMO_SIGNER_B_KEY')! as `0x${string}`);
 const delegate = privateKeyToAccount(env('DEMO_DELEGATE_KEY')! as `0x${string}`);
 const auditor = privateKeyToAccount(env('DEMO_AUDITOR_KEY')! as `0x${string}`);
+const checkedInDeployments = JSON.parse(
+  readFileSync(new URL('../deployments.json', import.meta.url), 'utf8'),
+) as {
+  safe?: { owners?: unknown[] };
+  roles?: Record<string, unknown>;
+};
+
+// ------------------------------------------------------------ read-only preflight
+
+// Every safety check in this section must remain before the first chain write.
+// network.connect('sepolia') selects a config name; only the RPC response proves
+// that the endpoint is actually Ethereum Sepolia.
+const chainId = await publicClient.getChainId();
+if (chainId !== sepolia.id) {
+  throw new Error(`fresh deployment requires Sepolia (${sepolia.id}), got chain ${chainId}`);
+}
+
+const demoRoleAddresses = [admin, signerB, delegate, auditor]
+  .map(({ address }) => address.toLowerCase());
+if (new Set(demoRoleAddresses).size !== demoRoleAddresses.length) {
+  throw new Error('fresh deployment requires four distinct demo role accounts');
+}
+const deployerAddress = deployer.account.address.toLowerCase();
+if (demoRoleAddresses.includes(deployerAddress)) {
+  throw new Error('fresh deployment requires every demo role account to differ from the deployer');
+}
+
+// A fresh reproduction must not silently reuse any privileged or test identity
+// recorded by the checked-in deployment. Contract addresses are intentionally
+// excluded: only Safe owners and role accounts define the identity boundary.
+const checkedInIdentityValues = [
+  ...(checkedInDeployments.safe?.owners ?? []),
+  ...Object.values(checkedInDeployments.roles ?? {}),
+];
+const isAddress = (value: unknown): value is string =>
+  typeof value === 'string' && /^0x[0-9a-fA-F]{40}$/.test(value);
+if (
+  checkedInIdentityValues.length === 0
+  || checkedInIdentityValues.some((value) => !isAddress(value))
+) {
+  throw new Error('checked-in deployment identity manifest is missing or invalid');
+}
+const checkedInIdentities = new Set(
+  checkedInIdentityValues.filter(isAddress).map((address) => address.toLowerCase()),
+);
+if (demoRoleAddresses.some((address) => checkedInIdentities.has(address))) {
+  throw new Error('fresh deployment demo roles must not reuse checked-in deployment identities');
+}
+
+// Safe is the integration target, so prove that its canonical factory and at
+// least one supported singleton exist before deploying even the first token.
+const factoryCode = await publicClient.getCode({ address: SAFE_FACTORY }).catch(() => undefined);
+let singleton: `0x${string}` | undefined;
+for (const candidate of [SAFE_SINGLETON_L1, SAFE_SINGLETON_L2]) {
+  const code = await publicClient.getCode({ address: candidate }).catch(() => undefined);
+  if (code && code !== '0x') {
+    singleton = candidate;
+    break;
+  }
+}
+if (!factoryCode || factoryCode === '0x' || !singleton) {
+  throw new Error('canonical Safe v1.4.1 factory/singleton not found on Sepolia; aborting before deployment');
+}
 
 console.log(`deployer: ${deployer.account.address}`);
 const balance = await publicClient.getBalance({ address: deployer.account.address });
 console.log(`balance:  ${formatEther(balance)} ETH`);
 
-if (balance < parseEther('0.02')) {
-  console.error(
-    `\n⛽ Not enough Sepolia ETH to deploy (need ≥ 0.02).\n` +
-      `Fund the deployer:  ${deployer.account.address}\n` +
-      `Faucets: https://cloud.google.com/application/web3/faucet/ethereum/sepolia\n` +
-      `         https://sepolia-faucet.pk910.de\n`,
+if (balance < MIN_DEPLOYER_BALANCE) {
+  throw new Error(
+    `not enough Sepolia ETH: need at least ${formatEther(MIN_DEPLOYER_BALANCE)} ETH; `
+      + `${formatEther(ROLE_FUNDING_TOTAL)} ETH is transferred to four demo roles `
+      + `and ${formatEther(DEPLOY_GAS_RESERVE)} ETH is retained as deployment gas reserve`,
   );
-  process.exit(1);
 }
 
 // ---------------------------------------------------------------- contracts
@@ -95,17 +163,6 @@ console.log('[3/5] Safe…');
 let safeAddress: `0x${string}`;
 let safeKind: string;
 
-const factoryCode = await publicClient.getCode({ address: SAFE_FACTORY }).catch(() => undefined);
-let singleton: `0x${string}` | undefined;
-for (const s of [SAFE_SINGLETON_L1, SAFE_SINGLETON_L2]) {
-  const code = await publicClient.getCode({ address: s }).catch(() => undefined);
-  if (code && code !== '0x') { singleton = s; break; }
-}
-
-if (!factoryCode || factoryCode === '0x' || !singleton) {
-  // Safe IS the integration target — no stand-ins on a real network.
-  throw new Error('canonical Safe v1.4.1 contracts not found on this chain; aborting');
-}
 {
   const initializer = encodeFunctionData({
     abi: safeAbi,
@@ -142,7 +199,7 @@ console.log(`  VeilGuardModule: ${module_.address}`);
 
 console.log('[5/5] Funding demo roles + enabling module…');
 for (const acct of [admin, signerB, delegate, auditor]) {
-  const h = await deployer.sendTransaction({ to: acct.address, value: parseEther('0.004') });
+  const h = await deployer.sendTransaction({ to: acct.address, value: DEMO_ROLE_FUNDING });
   await publicClient.waitForTransactionReceipt({ hash: h });
 }
 
