@@ -50,6 +50,10 @@ function mmss(sec: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function scrollElementIntoView(element: HTMLElement | null, options: ScrollIntoViewOptions): void {
+  if (typeof element?.scrollIntoView === 'function') element.scrollIntoView(options);
+}
+
 function ActivePaymentOperationDock({
   flow,
   isDemo,
@@ -398,7 +402,7 @@ export function DelegateView({
     }
     if (attributedMission === 'free' || completed) saveTrack(null);
     clearFlow();
-    setTimeout(() => receiptRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 250);
+    setTimeout(() => scrollElementIntoView(receiptRef.current, { behavior: 'smooth', block: 'center' }), 250);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [latest?.state, latest?.id, missionOf, decisionAttestations]);
   useEffect(() => { fetchRequestTxs().then(setTxs).catch(() => {}); }, []);
@@ -662,7 +666,7 @@ export function DelegateView({
   const loadScenario = (amt: string, label: string, to?: `0x${string}`) => {
     setAmount(amt); if (to) setRecipient(to); setTrackId(null); setReasonVal(null);
     setLastAmount(''); setLastAmountRequestId(null); setLastTx(null); setLastTxRequestId(null);
-    requestAnimationFrame(() => freeFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    requestAnimationFrame(() => scrollElementIntoView(freeFormRef.current, { behavior: 'smooth', block: 'center' }));
     setTimeout(() => amountRef.current?.focus(), 420);
     toast(`${label} loaded — press Submit to run it with your wallet.`);
   };
@@ -866,7 +870,7 @@ export function DelegateView({
         setReasonVal(null); setLastAmount(''); setLastAmountRequestId(null);
         setLastTx(null); setLastTxRequestId(null); setMissionOf(null); setTrackId(exhibit.id);
         toast('Another run just triggered this live block. You may inspect it, but it cannot complete or enter your run-bound audit packet.');
-        setTimeout(() => receiptRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 250);
+        setTimeout(() => scrollElementIntoView(receiptRef.current, { behavior: 'smooth', block: 'center' }), 250);
         return;
       }
       toast(`The violation delegate is cooling down (${mmss(violationCoolLeft)}) — try again shortly.`, true);
@@ -1171,7 +1175,7 @@ export function DelegateView({
     setMissionOf(null);
     setReasonVal(null);
     navigate(formatAppRoute({ page: 'payment-inbox' }).slice(1));
-    requestAnimationFrame(() => inboxRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    requestAnimationFrame(() => scrollElementIntoView(inboxRef.current, { behavior: 'smooth', block: 'start' }));
   }
 
   // ---------------- render ----------------

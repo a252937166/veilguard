@@ -10,7 +10,12 @@
  * on-chain security property).
  */
 import { readFileSync } from 'node:fs';
-import Safe from '@safe-global/protocol-kit';
+import * as ProtocolKit from '@safe-global/protocol-kit';
+import { createPublicClient, http } from 'viem';
+import { sepolia } from 'viem/chains';
+import { assertExact2of2, assertTwoSignatures } from './lib/safe-policy.mjs';
+
+const Safe = ProtocolKit.default as unknown as typeof import('@safe-global/protocol-kit').default;
 
 const envText = readFileSync(new URL('../.env', import.meta.url), 'utf8');
 export const env = (k: string) =>
@@ -27,30 +32,67 @@ export type MultisigResult = {
   threshold: number;
 };
 
-/** Owner A signs, owner B signs, then the tx executes on-chain (2-of-N). */
-export async function safeMultisig(
+/**
+ * Owner A signs, owner B signs, then the tx executes on-chain.
+ *
+ * This helper deliberately refuses anything except the project's exact
+ * two-owner, threshold-two Safe shape. That keeps deployment and evidence
+ * scripts from silently proving a weaker 1-of-2 setup.
+ */
+export async function safeExec2of2(
   safeAddress: string,
   to: string,
   data: string,
   { ownerAKey, ownerBKey }: { ownerAKey: string; ownerBKey: string },
   log: (m: string) => void = console.log,
 ): Promise<MultisigResult> {
+  const publicClient = createPublicClient({ chain: sepolia, transport: http(RPC) });
+  const chainId = await publicClient.getChainId();
+  if (chainId !== sepolia.id) {
+    throw new Error(`Safe execution requires Sepolia (${sepolia.id}), got chain ${chainId}`);
+  }
   const safeA = await Safe.init({ provider: RPC, signer: ownerAKey, safeAddress });
   const safeB = await Safe.init({ provider: RPC, signer: ownerBKey, safeAddress });
-  const threshold = await safeA.getThreshold();
+  const [threshold, owners, ownerA, ownerB] = await Promise.all([
+    safeA.getThreshold(),
+    safeA.getOwners(),
+    safeA.getSafeProvider().getSignerAddress(),
+    safeB.getSafeProvider().getSignerAddress(),
+  ]);
+  const exactSafe = assertExact2of2({ threshold, owners, ownerA, ownerB });
 
-  let tx = await safeA.createTransaction({ transactions: [{ to, value: '0', data }] });
+  const nonce = await safeA.getNonce();
+  let tx = await safeA.createTransaction({
+    transactions: [{ to, value: '0', data }],
+    options: { nonce },
+  });
   const safeTxHash = await safeA.getTransactionHash(tx);
 
-  tx = await safeA.signTransaction(tx); // owner A's real EIP-712 signature
+  tx = await safeA.signTransaction(tx, 'eth_signTypedData_v4'); // owner A's real EIP-712 signature
   log(`  Safe proposal ${safeTxHash} — owner A signed (1/${threshold})`);
-  tx = await safeB.signTransaction(tx); // owner B's real EIP-712 signature
+  tx = await safeB.signTransaction(tx, 'eth_signTypedData_v4'); // owner B's real EIP-712 signature
   log(`  owner B signed (2/${threshold}) — threshold met`);
+  const confirmations = assertTwoSignatures(tx.signatures.size);
+  const currentNonce = await safeA.getNonce();
+  if (currentNonce !== tx.data.nonce) {
+    throw new Error(`Safe nonce changed while collecting signatures (expected ${tx.data.nonce}, got ${currentNonce})`);
+  }
 
   const exec = await safeB.executeTransaction(tx);
   const executeTxHash = exec.hash as string;
-  const nonce = await safeA.getNonce();
+  const receipt = await publicClient.waitForTransactionReceipt({
+    hash: executeTxHash as `0x${string}`,
+  });
+  if (receipt.status !== 'success') {
+    throw new Error(`Safe execution reverted: ${executeTxHash}`);
+  }
   log(`  executed on-chain (2-of-${threshold}): ${executeTxHash}`);
 
-  return { safeTxHash, executeTxHash, nonce: Number(nonce) - 1, confirmations: tx.signatures.size, threshold };
+  return {
+    safeTxHash,
+    executeTxHash,
+    nonce: tx.data.nonce,
+    confirmations,
+    threshold: exactSafe.threshold,
+  };
 }

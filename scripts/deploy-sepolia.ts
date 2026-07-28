@@ -4,30 +4,21 @@
  * Deploys: TestUSDC -> ConfidentialUSDCWrapper (official ERC-20→7984 wrapper)
  * -> real Safe v1.4.1 via the canonical proxy factory (hard-fails if the
  * canonical Safe contracts are missing — no stand-ins on a real network)
- * -> VeilGuardModule. Then funds the demo role accounts and enables the module.
+ * -> VeilGuardModule. Then funds the demo role accounts and enables the module
+ * through two genuine owner EIP-712 signatures on an exact 2-of-2 Safe.
  *
  * Run: npx hardhat run scripts/deploy-sepolia.ts --network sepolia
  */
 import { network } from 'hardhat';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import {
-  createWalletClient,
   encodeFunctionData,
-  encodePacked,
   formatEther,
-  http,
-  padHex,
   parseEther,
   parseEventLogs,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { sepolia } from 'viem/chains';
-
-const envText = readFileSync(new URL('../.env', import.meta.url), 'utf8');
-const env = (k: string) =>
-  envText.split('\n').find((l) => l.startsWith(`${k}=`))?.slice(k.length + 1).trim();
-
-const RPC = env('SEPOLIA_RPC_URL') ?? 'https://ethereum-sepolia-rpc.publicnode.com';
+import { env, safeExec2of2 } from './safe-lib.js';
 
 // Canonical Safe v1.4.1 deployment (same addresses on all chains).
 const SAFE_FACTORY = '0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67' as const;
@@ -42,19 +33,14 @@ const safeAbi = [
     { name: 'fallbackHandler', type: 'address' }, { name: 'paymentToken', type: 'address' },
     { name: 'payment', type: 'uint256' }, { name: 'paymentReceiver', type: 'address' },
   ], outputs: [] },
-  { type: 'function', name: 'execTransaction', stateMutability: 'payable', inputs: [
-    { name: 'to', type: 'address' }, { name: 'value', type: 'uint256' },
-    { name: 'data', type: 'bytes' }, { name: 'operation', type: 'uint8' },
-    { name: 'safeTxGas', type: 'uint256' }, { name: 'baseGas', type: 'uint256' },
-    { name: 'gasPrice', type: 'uint256' }, { name: 'gasToken', type: 'address' },
-    { name: 'refundReceiver', type: 'address' }, { name: 'signatures', type: 'bytes' },
-  ], outputs: [{ type: 'bool' }] },
   { type: 'function', name: 'enableModule', stateMutability: 'nonpayable',
     inputs: [{ name: 'module', type: 'address' }], outputs: [] },
   { type: 'function', name: 'isModuleEnabled', stateMutability: 'view',
     inputs: [{ name: 'module', type: 'address' }], outputs: [{ type: 'bool' }] },
   { type: 'function', name: 'getOwners', stateMutability: 'view', inputs: [],
     outputs: [{ type: 'address[]' }] },
+  { type: 'function', name: 'getThreshold', stateMutability: 'view', inputs: [],
+    outputs: [{ type: 'uint256' }] },
 ] as const;
 
 const factoryAbi = [
@@ -125,7 +111,7 @@ if (!factoryCode || factoryCode === '0x' || !singleton) {
     abi: safeAbi,
     functionName: 'setup',
     args: [
-      [admin.address, signerB.address], 1n,
+      [admin.address, signerB.address], 2n,
       '0x0000000000000000000000000000000000000000', '0x',
       SAFE_FALLBACK_HANDLER, '0x0000000000000000000000000000000000000000', 0n,
       '0x0000000000000000000000000000000000000000',
@@ -160,34 +146,31 @@ for (const acct of [admin, signerB, delegate, auditor]) {
   await publicClient.waitForTransactionReceipt({ hash: h });
 }
 
-const adminWallet = createWalletClient({ account: admin, chain: sepolia, transport: http(RPC) });
-
-if (safeKind.startsWith('safe')) {
-  // Pre-validated signature: sender is an owner -> r = owner, s = 0, v = 1.
-  const enableData = encodeFunctionData({ abi: safeAbi, functionName: 'enableModule', args: [module_.address] });
-  const sig = encodePacked(
-    ['bytes32', 'bytes32', 'uint8'],
-    [padHex(admin.address, { size: 32 }), padHex('0x00', { size: 32 }), 1],
-  );
-  const h = await adminWallet.writeContract({
-    address: safeAddress, abi: safeAbi, functionName: 'execTransaction',
-    args: [safeAddress, 0n, enableData, 0, 0n, 0n, 0n,
-      '0x0000000000000000000000000000000000000000',
-      '0x0000000000000000000000000000000000000000', sig],
-  });
-  await publicClient.waitForTransactionReceipt({ hash: h });
-  const enabled = await publicClient.readContract({
+const enableData = encodeFunctionData({
+  abi: safeAbi,
+  functionName: 'enableModule',
+  args: [module_.address],
+});
+await safeExec2of2(
+  safeAddress,
+  safeAddress,
+  enableData,
+  { ownerAKey: adminKey, ownerBKey: env('DEMO_SIGNER_B_KEY')! },
+);
+const [enabled, safeOwners, safeThreshold] = await Promise.all([
+  publicClient.readContract({
     address: safeAddress, abi: safeAbi, functionName: 'isModuleEnabled', args: [module_.address],
-  });
-  if (!enabled) throw new Error('module not enabled on Safe');
-} else {
-  const h = await adminWallet.writeContract({
-    address: safeAddress,
-    abi: [{ type: 'function', name: 'enableModule', stateMutability: 'nonpayable',
-      inputs: [{ name: 'module', type: 'address' }], outputs: [] }],
-    functionName: 'enableModule', args: [module_.address],
-  });
-  await publicClient.waitForTransactionReceipt({ hash: h });
+  }),
+  publicClient.readContract({
+    address: safeAddress, abi: safeAbi, functionName: 'getOwners',
+  }),
+  publicClient.readContract({
+    address: safeAddress, abi: safeAbi, functionName: 'getThreshold',
+  }),
+]);
+if (!enabled) throw new Error('module not enabled on Safe');
+if (safeThreshold !== 2n || safeOwners.length !== 2) {
+  throw new Error(`expected exact 2-of-2 Safe after setup, got threshold ${safeThreshold} with ${safeOwners.length} owners`);
 }
 console.log('  module enabled ✓');
 
@@ -204,7 +187,7 @@ const deployments = {
     VeilGuardModule: module_.address,
     NoxCompute: '0x24Ef36Ec5b626D7DCD09a98F3083c2758F0F77bF',
   },
-  safe: { kind: safeKind, owners: [admin.address, signerB.address], threshold: 1 },
+  safe: { kind: safeKind, owners: safeOwners, threshold: Number(safeThreshold) },
   roles: {
     financeAdmin: admin.address,
     signerB: signerB.address,

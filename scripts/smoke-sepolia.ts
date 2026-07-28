@@ -12,20 +12,17 @@
  */
 import { network } from 'hardhat';
 import { readFileSync } from 'node:fs';
-import { createWalletClient, encodeFunctionData, encodePacked, http, padHex } from 'viem';
+import { createWalletClient, encodeFunctionData, http, padHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
 import { createViemHandleClient } from '@iexec-nox/handle';
+import { env, RPC, safeExec2of2 } from './safe-lib.js';
 
-const envText = readFileSync(new URL('../.env', import.meta.url), 'utf8');
-const env = (k: string) =>
-  envText.split('\n').find((l) => l.startsWith(`${k}=`))?.slice(k.length + 1).trim();
 const deployments = JSON.parse(
   readFileSync(new URL('../deployments.json', import.meta.url), 'utf8'),
 );
 const { TestUSDC, ConfidentialUSDC, Safe, VeilGuardModule } = deployments.contracts;
 
-const RPC = env('SEPOLIA_RPC_URL') ?? 'https://ethereum-sepolia-rpc.publicnode.com';
 const GATEWAY = 'https://gateway-testnets.noxprotocol.dev';
 const usdc = (n: number) => BigInt(Math.round(n * 1e6));
 
@@ -42,6 +39,10 @@ const wallet = (key: string) =>
   });
 const admin = wallet('DEMO_ADMIN_KEY');
 const delegate = wallet('DEMO_DELEGATE_KEY');
+const safeKeys = {
+  ownerAKey: env('DEMO_ADMIN_KEY')!,
+  ownerBKey: env('DEMO_SIGNER_B_KEY')!,
+};
 
 /** SDK identity workaround: pin getAddresses to the wallet's own account. */
 const clientFor = async (w: any) =>
@@ -78,13 +79,6 @@ const wrapperAbi = [
   { type: 'function', name: 'wrap', stateMutability: 'nonpayable', inputs: [{ name: 'to', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [{ type: 'bytes32' }] },
   { type: 'function', name: 'confidentialBalanceOf', stateMutability: 'view', inputs: [{ type: 'address' }], outputs: [{ type: 'bytes32' }] },
 ] as const;
-const safeAbi = [
-  { type: 'function', name: 'execTransaction', stateMutability: 'payable', inputs: [
-    { type: 'address' }, { type: 'uint256' }, { type: 'bytes' }, { type: 'uint8' },
-    { type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'address' },
-    { type: 'address' }, { type: 'bytes' }], outputs: [{ type: 'bool' }] },
-] as const;
-
 const moduleArtifact = JSON.parse(
   readFileSync(
     new URL('../artifacts/contracts/VeilGuardModule.sol/VeilGuardModule.json', import.meta.url),
@@ -140,16 +134,7 @@ await send('proposeMandate', admin, {
 const activateData = encodeFunctionData({
   abi: moduleAbi, functionName: 'activateMandate', args: [1n],
 });
-const preValidatedSig = encodePacked(
-  ['bytes32', 'bytes32', 'uint8'],
-  [padHex(admin.account.address, { size: 32 }), padHex('0x00', { size: 32 }), 1],
-);
-await send('Safe.activate', admin, {
-  address: Safe, abi: safeAbi, functionName: 'execTransaction',
-  args: [VeilGuardModule, 0n, activateData, 0, 0n, 0n, 0n,
-    '0x0000000000000000000000000000000000000000',
-    '0x0000000000000000000000000000000000000000', preValidatedSig],
-});
+await safeExec2of2(Safe, VeilGuardModule, activateData, safeKeys);
 
 // 3. Delegate spends 25 — within mandate.
 console.log('[3] delegate requests 25 cUSDC (within mandate)');
