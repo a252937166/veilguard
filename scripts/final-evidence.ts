@@ -21,7 +21,7 @@ import { createWalletClient, encodeFunctionData, http, padHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
 import { createViemHandleClient } from '@iexec-nox/handle';
-import { safeMultisig, env, RPC } from './safe-lib.js';
+import { safeExec2of2, env, RPC } from './safe-lib.js';
 
 const deployments = JSON.parse(readFileSync(new URL('../deployments.json', import.meta.url), 'utf8'));
 const { ConfidentialUSDC, Safe: SAFE, VeilGuardModule: MODULE } = deployments.contracts;
@@ -100,47 +100,28 @@ const evidence: any = {
 console.log('— FINAL EVIDENCE RUN (2-of-2 governance) —');
 const adminClient = await clientFor(admin);
 
-// REUSE_MANDATE / REUSE_ACTIVATION_TX let us reuse a mandate already activated by
-// a real 2-of-2 multisig (saves gas + avoids re-running the proven multisig).
-const reuseId = env('REUSE_MANDATE');
-let mandateId: bigint;
-let proposeTx: string;
-let activation: any;
-
-if (reuseId) {
-  mandateId = BigInt(reuseId);
-  await waitMandateActive(mandateId);
-  proposeTx = env('REUSE_PROPOSE_TX') ?? 'reused';
-  activation = {
-    safeTxHash: env('REUSE_ACTIVATION_SAFETX') ?? 'reused',
-    executeTxHash: env('REUSE_ACTIVATION_TX') ?? 'reused',
-    nonce: 0, confirmations: 2, threshold: 2,
-  };
-  console.log(`[1-2] reusing mandate #${mandateId} (already activated by 2-of-2 ${activation.executeTxHash})`);
-} else {
-  console.log('[1] admin proposes encrypted mandate (40 / 500 / 300)');
-  const [l, b, f] = await Promise.all([
-    adminClient.encryptInput(usdc(40), 'uint256', MODULE),
-    adminClient.encryptInput(usdc(500), 'uint256', MODULE),
-    adminClient.encryptInput(usdc(300), 'uint256', MODULE),
-  ]);
-  const now = BigInt(Math.floor(Date.now() / 1000));
-  proposeTx = await send('proposeMandate', admin, {
-    address: MODULE, abi: moduleAbi, functionName: 'proposeMandate',
-    args: [delegate.account.address, 0n, now + 86_400n * 60n, [deployer.account.address],
-      l.handle, l.handleProof, b.handle, b.handleProof, f.handle, f.handleProof],
-  });
-  mandateId = ((await publicClient.readContract({
-    address: MODULE, abi: moduleAbi, functionName: 'nextMandateId',
-  })) as bigint) - 1n;
-  console.log(`[2] Safe 2-of-2 activates mandate #${mandateId}`);
-  activation = await safeMultisig(
-    SAFE, MODULE,
-    encodeFunctionData({ abi: moduleAbi, functionName: 'activateMandate', args: [mandateId] }),
-    keys,
-  );
-  await waitMandateActive(mandateId);
-}
+console.log('[1] admin proposes encrypted mandate (40 / 500 / 300)');
+const [l, b, f] = await Promise.all([
+  adminClient.encryptInput(usdc(40), 'uint256', MODULE),
+  adminClient.encryptInput(usdc(500), 'uint256', MODULE),
+  adminClient.encryptInput(usdc(300), 'uint256', MODULE),
+]);
+const now = BigInt(Math.floor(Date.now() / 1000));
+const proposeTx = await send('proposeMandate', admin, {
+  address: MODULE, abi: moduleAbi, functionName: 'proposeMandate',
+  args: [delegate.account.address, 0n, now + 86_400n * 60n, [deployer.account.address],
+    l.handle, l.handleProof, b.handle, b.handleProof, f.handle, f.handleProof],
+});
+const mandateId = ((await publicClient.readContract({
+  address: MODULE, abi: moduleAbi, functionName: 'nextMandateId',
+})) as bigint) - 1n;
+console.log(`[2] Safe 2-of-2 activates mandate #${mandateId}`);
+const activation = await safeExec2of2(
+  SAFE, MODULE,
+  encodeFunctionData({ abi: moduleAbi, functionName: 'activateMandate', args: [mandateId] }),
+  keys,
+);
+await waitMandateActive(mandateId);
 
 // helper: request + finalize
 const delegateClient = await clientFor(delegate);
@@ -175,7 +156,7 @@ console.log('[4] delegate 60 → APPROVAL REQUIRED → Safe 2-of-2 approves');
 const escalated = await spend(60, '0xe2');
 if (escalated.decision !== 2) throw new Error(`expected ESCALATE, got ${escalated.decision}`);
 evidence.teeLatencySec.escalated = escalated.tee;
-const approval = await safeMultisig(
+const approval = await safeExec2of2(
   SAFE, MODULE,
   encodeFunctionData({ abi: moduleAbi, functionName: 'executeEscalated', args: [escalated.id] }),
   keys,

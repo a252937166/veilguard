@@ -8,7 +8,7 @@
     "node": "22.x"
   },
   "scripts": {
-    "check": "node scripts/check-runtime.mjs && node scripts/check-deployments.mjs",
+    "check": "node scripts/check-runtime.mjs && node scripts/check-deployments.mjs && node scripts/check-safe-reproduction.mjs",
     "pretest": "npm run check",
     "test": "hardhat test",
     "test:server": "node --test server/test/*.test.mjs",
@@ -16,6 +16,7 @@
     "build": "hardhat build"
   },
   "devDependencies": {
+    "@babel/parser": "^7.29.7",
     "@iexec-nox/nox-hardhat-plugin": "^0.1.0",
     "@nomicfoundation/hardhat-toolbox-viem": "^5.0.7",
     "@types/node": "^26.1.1",
@@ -23,11 +24,11 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
+    "@iexec-nox/handle": "^0.1.0-beta.13",
     "@iexec-nox/nox-confidential-contracts": "^0.2.2",
     "@iexec-nox/nox-protocol-contracts": "^0.2.4",
     "@openzeppelin/contracts": "^5.6.1",
     "@safe-global/api-kit": "^5.0.1",
-    "@safe-global/protocol-kit": "^8.0.4",
-    "@iexec-nox/handle": "^0.1.0-beta.13"
+    "@safe-global/protocol-kit": "^8.0.4"
   }
 }

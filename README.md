@@ -122,14 +122,47 @@ npm test -- "$PWD/test/00-stack.test.ts" \
 > `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock`; Docker CLI context selection
 > alone is not visible to the plugin.
 
-### Deploy & exercise on Sepolia
+### Sepolia reproduction paths
+
+#### Fresh deployment (new contracts and Safe)
 
 ```sh
-# .env needs SEPOLIA_DEPLOYER_KEY (+ optional SEPOLIA_RPC_URL) and the DEMO_* role keys
+# .env needs SEPOLIA_DEPLOYER_KEY, DEMO_ADMIN_KEY, DEMO_SIGNER_B_KEY,
+# DEMO_DELEGATE_KEY and DEMO_AUDITOR_KEY (+ optional SEPOLIA_RPC_URL).
 npx hardhat run scripts/deploy-sepolia.ts --network sepolia
 npx hardhat run scripts/smoke-sepolia.ts  --network sepolia
 npx hardhat run scripts/e2e-sepolia.ts    --network sepolia
 ```
+
+This sequence is only for a **fresh deployment**. It creates a Safe with exactly
+two distinct owners and threshold `2`, then every module enable, mandate
+activation, escalation approval and cancellation is signed by both owners with
+real EIP-712 signatures through the shared `safeExec2of2` helper. A single owner
+cannot complete any of those governance actions.
+
+`deploy-sepolia.ts` intentionally replaces the root `deployments.json`; the smoke
+and E2E scripts then exercise those newly written addresses and leave real
+Sepolia/Nox evidence behind. Run this sequence in a disposable branch or worktree.
+Do **not** start at `smoke-sepolia.ts` or `e2e-sepolia.ts` with the repository's
+checked-in production manifest. If the dApp should target the fresh deployment,
+copy the generated root manifest to `app/src/deployments.json` and run
+`npm run check` before building it; otherwise leave both checked-in production
+manifests untouched.
+
+#### Existing production deployment
+
+The checked-in root and dApp deployment manifests describe the existing public
+2-of-2 Safe and production contracts. They are not inputs for the fresh-deployment
+exercise above. Use the production dApp for ordinary judge flows and the manual
+**Production Release Gate** workflow for a release-bound live Approve/Reject
+acceptance run. That workflow requires explicit production confirmation, pins the
+source and observed UI SHA, serializes real Safe mutations and emits a retained
+release manifest; ordinary CI and read-only production checks never opt into it.
+Do not run the fresh deploy/smoke/E2E scripts or the historical
+`redeploy-module.ts` migration against the current production deployment.
+The Gate does not deploy contracts, the backend or the UI. Deploy the selected
+ref first, confirm that the live footer reports that ref's SHA and require ordinary
+CI to pass before dispatching the production mutation Gate.
 
 ### dApp
 
@@ -287,9 +320,9 @@ restart. The OS temporary-directory default is suitable only for local developme
 
 ### Historical production acceptance
 
-The 2026-07-19 release gate executed both visitor-selectable outcomes as separate
-run-bound requests on the deployed threshold-2 Safe; these are transaction
-receipts, not health-check results or client-side completion flags:
+The 2026-07-19 pre-Gate production acceptance executed both visitor-selectable
+outcomes as separate run-bound requests on the deployed threshold-2 Safe; these
+are transaction receipts, not health-check results or client-side completion flags:
 
 | Path | Request | Terminal proof | Safe transaction |
 | --- | ---: | --- | --- |
@@ -297,9 +330,11 @@ receipts, not health-check results or client-side completion flags:
 | Reject | #37 | state 5 · `cancelEscalated` · `EscalationCancelled` · `origin:user` | [`0x53aaf5…8c75`](https://sepolia.etherscan.io/tx/0x53aaf51e5874ea929740b90781f2609dca259edd6e351cf7365fb8ed6fa28c75) |
 
 Both receipts target the deployed Safe, call the VeilGuard module with operation
-0, and carry 130 signature bytes (two 65-byte owner signatures). They are
-historical acceptance evidence for this PR, not a claim that the new manual Gate
-has already run.
+0, and carry 130 signature bytes (two 65-byte owner signatures). A later manual
+Gate run for source `f48627f` completed successfully with a valid manifest (its
+Approve evidence was safely recovered and its Reject evidence was independently
+executed). This remains historical evidence only: it does not prove any later
+source or production UI SHA.
 
 ### Manual Production Release Gate
 
@@ -318,6 +353,13 @@ final manifest is retained for 90 days. If an assertion fails after broadcast,
 inspect the recovery artifact before any manual rerun instead of blindly creating
 another request.
 
+A fresh release-bound run has no resume inputs:
+
+```bash
+gh workflow run production-release-gate.yml --ref <deployed-ref> \
+  -f confirm_production=true
+```
+
 If Approve succeeds but the independent Reject Job fails, dispatching the Gate
 with `resume_run_id` reuses the prior validated Approve evidence and runs Reject
 only. A `run-started` pointer may start a fresh Reject run only when it contains
@@ -330,9 +372,15 @@ evidence or conflicting action. This prevents both duplicate Safe actions and a
 timeout cancellation being presented as a user's choice.
 
 ```bash
-gh workflow run production-release-gate.yml --ref main \
+gh workflow run production-release-gate.yml --ref <deployed-ref> \
   -f confirm_production=true -f resume_run_id=<failed-run-id> -f resume_run_attempt=1
 ```
+
+An uploaded manifest is not by itself a pass because the manifest Job runs with
+`if: always()`. Release acceptance requires all three conditions: the workflow
+concludes `success`, `release-manifest.json` has `passed: true`, and its full
+`sourceCommit` equals the full commit SHA resolved from the selected ref. The
+deployed UI footer must show that commit's expected short SHA prefix.
 
 Ordinary desktop/mobile Playwright never collects the live file. It runs only
 against the local app and includes deterministic dark/reduced-motion visual
