@@ -650,6 +650,7 @@ export async function handleClientFor() {
 }
 export async function handlesResolved() { return true; }
 export async function waitResolved() {}
+export async function retryNoxRead(_label, operation) { return operation(); }
 ${original.slice(sourceMapStart)}`;
       await route.fulfill({ response, body: mocked });
       return;
