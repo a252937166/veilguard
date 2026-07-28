@@ -18,10 +18,18 @@ async function dismissTransientGuidance(page: Page) {
   const dismissResume = resumeDialog.getByRole('button', { name: /close resume dialog/i });
   const resumeAppeared = await dismissResume.waitFor({ state: 'visible', timeout: 2_000 })
     .then(() => true, () => false);
-  if (resumeAppeared) await dismissResume.click();
+  if (resumeAppeared) {
+    // The startup reconciliation effect can remove this transient dialog
+    // between the visibility probe and the click. Keep dismissal bounded so a
+    // stale locator cannot consume the full 45-second test timeout.
+    await dismissResume.click({ timeout: 2_000 }).catch(() => undefined);
+    await expect(resumeDialog).toBeHidden({ timeout: 2_000 }).catch(() => undefined);
+  }
 
   const closeMission = page.getByRole('button', { name: /close mission drawer/i });
-  if (await closeMission.isVisible().catch(() => false)) await closeMission.click();
+  if (await closeMission.isVisible().catch(() => false)) {
+    await closeMission.click({ timeout: 2_000 }).catch(() => undefined);
+  }
 }
 
 test.describe('narrow task-surface reflow', () => {
