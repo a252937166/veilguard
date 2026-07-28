@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { DECISION_LABEL, MANDATE_STATES, REQUEST_STATES, fmt } from './config';
-import { handleClientFor, waitResolved } from './nox';
+import { handleClientFor, retryNoxRead, waitResolved } from './nox';
 import { useApp } from './App';
 
 export function MandatePill({ state }: { state: number }) {
@@ -42,7 +42,10 @@ export function Decrypt({ handle, unit = 'cUSDC', label = 'Decrypt', format }: {
         try {
           const client = await handleClientFor(account);
           await waitResolved([handle]);
-          const { value: v, solidityType } = await client.decrypt(handle as any);
+          const { value: v, solidityType } = await retryNoxRead(
+            'ciphertext decrypt',
+            () => client.decrypt(handle as any),
+          );
           setValue(format ? format(v) : solidityType === 'uint256' ? fmt(v as bigint) : String(v));
         } catch (e: any) {
           toast(`Decrypt refused: ${e?.message ?? e}`.slice(0, 300), true);

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { keccak256, parseEventLogs, stringToBytes } from 'viem';
-import { ADDR, PROVISION_API, moduleAbi, parseUsdc, scanTx, short, vendorName } from '../config';
-import { handleClientFor, publicClient } from '../nox';
+import { ADDR, moduleAbi, parseUsdc, scanTx, short, vendorName } from '../config';
+import { handleClientFor, publicClient, retryNoxRead, waitResolved } from '../nox';
 import { walletWrite } from '../walletTx';
 import { fetchRequestTxs, type RequestTxs } from '../txlog';
 import { useApp, type SpendRequest } from '../App';
@@ -31,6 +31,7 @@ import {
   loadPaymentTrack as loadTrack,
   savePaymentTrack as saveTrack,
 } from '../payment-track';
+import { ProvisionMe } from '../components/ProvisionMe';
 
 const REASONS: Record<number, string> = {
   1: 'over the delegated budget',
@@ -545,6 +546,7 @@ export function DelegateView({
                 ? demoMemoHash(runId, mission as DemoScenarioKey, mandateId, who)
                 : keccak256(stringToBytes(memo || 'veilguard'))],
             onHint: (message) => setFlow('broadcasting', message), injected: !local,
+            noxPropagation: true,
           });
         } catch (e: any) {
           if (e?.code === 4001 || /User rejected|denied/i.test(`${e?.message}`)) throw new Error('you rejected the transaction in the wallet');
@@ -907,7 +909,11 @@ export function DelegateView({
     setReasonBusy(true);
     try {
       const client = await handleClientFor(request.delegate);
-      const { value } = await client.decrypt(request.blockedReason as any);
+      await waitResolved([request.blockedReason]);
+      const { value } = await retryNoxRead(
+        'blocked reason decrypt',
+        () => client.decrypt(request.blockedReason as any),
+      );
       const n = Number(value);
       setReasonVal(`${n} · ${REASONS[n] ?? 'unknown'}`);
       setReasonRequestId(String(request.id));
@@ -1533,61 +1539,6 @@ export function DelegateView({
           </p>
         </div>
       </aside>
-    </div>
-  );
-}
-
-/**
- * Sponsored onboarding: a connected wallet asks the server-side provisioner
- * (which holds the admin + Safe-owner keys, never the browser) to propose and
- * 2-of-2 activate a small capped mandate for THIS address. Afterwards the user
- * submits requestSpend with their own wallet and gas.
- */
-function ProvisionMe({ account }: { account: `0x${string}` }) {
-  const { refresh, toast, startDemo, openRolePicker } = useApp();
-  const [busy, setBusy] = useState(false);
-
-  const provision = async () => {
-    setBusy(true);
-    try {
-      const res = await fetch(PROVISION_API, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ address: account }),
-        signal: AbortSignal.timeout(120_000),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'provisioning failed');
-      toast(`✓ Your wallet is now a delegate on mandate #${data.mandateId}. Submit an encrypted request below — you'll need a little Sepolia ETH for gas (see 💧 Get test funds).`);
-      setTimeout(refresh, 2500);
-    } catch (e: any) {
-      toast(`Provisioning failed: ${e?.message ?? e}`, true);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="norole">
-      <h3>Use your own wallet as a delegate</h3>
-      <p className="muted" style={{ fontSize: 13.5, maxWidth: 660 }}>
-        The module only accepts the delegate address fixed in a mandate — so to act as a delegate with{' '}
-        <b>your own wallet</b> (<span className="mono">{short(account)}</span>), the treasury has to grant it one.
-        Click below and the sponsored provisioner will propose an encrypted mandate for your address and activate
-        it with a <b>real 2-of-2 Safe multisig</b> (two distinct owner signatures, threshold 2 — produced here by the demo's own keys, not a multi-party approval queue). Then you submit
-        requests yourself, signing with your own wallet.
-      </p>
-      <div className="row" style={{ marginTop: 14 }}>
-        <button className="btn primary" disabled={busy} onClick={provision}>
-          {busy ? <><span className="spin" /> Provisioning (2-of-2 activation, ~30s)…</> : '🔑 Provision my wallet as a delegate'}
-        </button>
-        <button className="btn" onClick={() => startDemo('delegate')}>or use the shared demo delegate</button>
-      </div>
-      <p className="muted" style={{ fontSize: 12, marginTop: 10 }}>
-        Onboarding is sponsored (the treasury pays the two governance txs); you then sign requests with your own wallet and gas. The capped demo policy remains encrypted; only its terminal outcomes are public ·
-        one per address per hour. You'll need a little Sepolia ETH to submit requests —{' '}
-        <button className="btn small ghost" onClick={openRolePicker} style={{ display: 'none' }}>x</button>
-        grab some from 💧 Get test funds.
-      </p>
     </div>
   );
 }

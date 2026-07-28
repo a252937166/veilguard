@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { encodeAbiParameters, keccak256 } from 'viem';
 import { Workbench, WorkbenchDetail, WorkbenchList, WorkbenchTabs } from '../components/workbench';
 import { ADDR, CHAIN_ID, fmt, moduleAbi, scan, scanTx, short } from '../config';
-import { handleClientFor, publicClient, waitResolved } from '../nox';
+import { handleClientFor, publicClient, retryNoxRead, waitResolved } from '../nox';
 import { fetchRequestTxs, type RequestTxs } from '../txlog';
 import { useApp } from '../App';
 import { completeMission } from '../missions';
@@ -310,7 +310,10 @@ export function AuditorView() {
   const decryptHandle = async (handle: `0x${string}`) => {
     const client = await handleClientFor(account);
     await waitResolved([handle]);
-    const decrypted = await client.decrypt(handle as any);
+    const decrypted = await retryNoxRead(
+      'audit snapshot decrypt',
+      () => client.decrypt(handle as any),
+    );
     const value = rawValue(decrypted.value);
     setValues((current) => ({ ...current, [handle]: value }));
     return value;
@@ -325,7 +328,10 @@ export function AuditorView() {
       await waitResolved(packet.snapshotHandles);
       for (const handle of packet.snapshotHandles) {
         if (values[handle] === undefined) {
-          const decrypted = await client.decrypt(handle as any);
+          const decrypted = await retryNoxRead(
+            'audit snapshot decrypt',
+            () => client.decrypt(handle as any),
+          );
           setValues((current) => ({ ...current, [handle]: rawValue(decrypted.value) }));
         }
         setBulkDone((done) => done + 1);

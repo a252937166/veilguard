@@ -40,6 +40,68 @@ describe('wallet network guard', () => {
     ]);
   });
 
+  test('waits for a successful switch whose chain id becomes visible asynchronously', async () => {
+    let switchResolved = false;
+    let postSwitchReads = 0;
+    const request = vi.fn(async ({ method }: { method: string }) => {
+      if (method === 'eth_chainId') {
+        if (!switchResolved) return '0x1';
+        postSwitchReads += 1;
+        return postSwitchReads >= 3 ? SEPOLIA_CHAIN_HEX : '0x1';
+      }
+      if (method === 'wallet_switchEthereumChain') {
+        switchResolved = true;
+        return null;
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+
+    await expect(ensureSepoliaNetwork(provider(request), {
+      settleTimeoutMs: 25,
+      settlePollIntervalMs: 1,
+    })).resolves.toBe(11155111);
+    expect(request.mock.calls.filter(([args]) => args.method === 'wallet_switchEthereumChain')).toHaveLength(1);
+    expect(postSwitchReads).toBeGreaterThanOrEqual(3);
+  });
+
+  test('recovers with canonical add then one switch when a wallet silently ignores direct switch', async () => {
+    let chainId = '0x1';
+    let switchCalls = 0;
+    const request = vi.fn(async ({ method, params }: { method: string; params?: any[] }) => {
+      if (method === 'eth_chainId') return chainId;
+      if (method === 'wallet_switchEthereumChain') {
+        switchCalls += 1;
+        if (switchCalls === 2) chainId = SEPOLIA_CHAIN_HEX;
+        return null;
+      }
+      if (method === 'wallet_addEthereumChain') {
+        expect(params?.[0]).toEqual({
+          chainId: SEPOLIA_CHAIN_HEX,
+          chainName: 'Ethereum Sepolia',
+          nativeCurrency: { name: 'Sepolia ETH', symbol: 'ETH', decimals: 18 },
+          rpcUrls: BROWSER_RPC_URLS,
+          blockExplorerUrls: ['https://sepolia.etherscan.io'],
+        });
+        return null;
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+
+    await expect(ensureSepoliaNetwork(provider(request), {
+      settleTimeoutMs: 0,
+      settlePollIntervalMs: 1,
+    })).resolves.toBe(11155111);
+    expect(switchCalls).toBe(2);
+    expect(request.mock.calls.map(([args]) => args.method)).toEqual([
+      'eth_chainId',
+      'wallet_switchEthereumChain',
+      'eth_chainId',
+      'wallet_addEthereumChain',
+      'wallet_switchEthereumChain',
+      'eth_chainId',
+    ]);
+  });
+
   test('adds an unknown Sepolia chain, explicitly switches, then verifies it', async () => {
     let chainId = '0x1';
     let switchCalls = 0;
@@ -143,16 +205,44 @@ describe('wallet network guard', () => {
     expect(request).toHaveBeenCalledTimes(3);
   });
 
-  test('fails closed when the wallet claims success but remains on another chain', async () => {
+  test('fails closed after one add-then-switch recovery when the wallet remains on another chain', async () => {
     const request = vi.fn(async ({ method }: { method: string }) => {
       if (method === 'eth_chainId') return '0x1';
       if (method === 'wallet_switchEthereumChain') return null;
+      if (method === 'wallet_addEthereumChain') return null;
       throw new Error(`unexpected method ${method}`);
     });
 
-    await expect(ensureSepoliaNetwork(provider(request))).rejects.toMatchObject({
+    await expect(ensureSepoliaNetwork(provider(request), {
+      settleTimeoutMs: 0,
+      settlePollIntervalMs: 1,
+    })).rejects.toMatchObject({
       issue: 'still-wrong-network',
     });
+    expect(request.mock.calls.filter(([args]) => args.method === 'wallet_switchEthereumChain')).toHaveLength(2);
+    expect(request.mock.calls.filter(([args]) => args.method === 'wallet_addEthereumChain')).toHaveLength(1);
+  });
+
+  test.each([
+    [4001, 'add-rejected'],
+    [-32002, 'request-pending'],
+    [1234, 'add-failed'],
+  ])('maps recovery add error %s without another switch', async (code, issue) => {
+    const request = vi.fn(async ({ method }: { method: string }) => {
+      if (method === 'eth_chainId') return '0x1';
+      if (method === 'wallet_switchEthereumChain') return null;
+      if (method === 'wallet_addEthereumChain') {
+        throw Object.assign(new Error('recovery add failed'), { code });
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+
+    await expect(ensureSepoliaNetwork(provider(request), {
+      settleTimeoutMs: 0,
+      settlePollIntervalMs: 1,
+    })).rejects.toMatchObject({ issue, providerCode: code });
+    expect(request.mock.calls.filter(([args]) => args.method === 'wallet_switchEthereumChain')).toHaveLength(1);
+    expect(request.mock.calls.filter(([args]) => args.method === 'wallet_addEthereumChain')).toHaveLength(1);
   });
 
   test('times out a wallet request that never settles', async () => {

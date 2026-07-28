@@ -61,6 +61,22 @@ Collected honestly as they happened, newest at the bottom.
    suite imports `@iexec-nox/handle` directly. Passing an **absolute** test
    file path is a reliable workaround. Likely a tsx/parent-URL interaction in
    the plugin's test override rather than Nox logic. (2026-07-17)
+9. **`resolved=true` is a computation signal, not a strong global-readiness
+   barrier.** During a fresh Sepolia reproduction we observed a handle reach
+   the status API's resolved state while an immediate exact contract
+   simulation or decrypt path could still reject it during downstream
+   propagation. Applications therefore need two additional read-only barriers:
+   retry the exact `estimateContractGas`/simulation before opening a wallet or
+   broadcasting, and retry `decrypt`/`publicDecrypt` after resolution. An
+   SDK-level `waitUntilUsable` primitive—or separate “computed” and “globally
+   consumable” statuses—would remove duplicated application logic. VeilGuard's
+   Fresh checkpoint and final evidence now record both time-to-resolution and
+   `resolved → first successful consumption` latency without persisting handle
+   values or underlying RPC errors. In the 2026-07-28 clean
+   Deploy → Smoke → E2E run, four decision samples first reported resolved in
+   1.6–13.9s, then needed another 3.5–7.2s before the exact decrypt path first
+   succeeded; the 11-handle audit snapshot batch needed a further 21.9s. These
+   are single-run observations, not percentiles. (2026-07-28)
 
 ## Resolved during development (answers other builders will want)
 

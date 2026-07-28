@@ -129,13 +129,72 @@ npm test -- "$PWD/test/00-stack.test.ts" \
 ```sh
 # .env needs SEPOLIA_DEPLOYER_KEY, DEMO_ADMIN_KEY, DEMO_SIGNER_B_KEY,
 # DEMO_DELEGATE_KEY and DEMO_AUDITOR_KEY (+ optional SEPOLIA_RPC_URL).
+# Optional per-role targets: FRESH_ADMIN_TARGET_ETH,
+# FRESH_SIGNER_B_TARGET_ETH, FRESH_DELEGATE_TARGET_ETH and
+# FRESH_AUDITOR_TARGET_ETH.
 npx hardhat run scripts/deploy-sepolia.ts --network sepolia
 npx hardhat run scripts/smoke-sepolia.ts  --network sepolia
 npx hardhat run scripts/e2e-sepolia.ts    --network sepolia
 ```
 
+To generate the four disposable roles without printing their keys, prepare a
+private environment and checkpoint before copying the source into a disposable
+worktree:
+
+```sh
+node scripts/create-fresh-env.mjs \
+  --source .env \
+  --output /absolute/private/path/fresh.env \
+  --checkpoint /absolute/private/path/fresh-run.json
+
+# Activate every generated value without echoing it. The exported values take
+# precedence over the repository .env for Hardhat and all Fresh scripts.
+set -a
+. /absolute/private/path/fresh.env
+set +a
+
+npx hardhat run scripts/deploy-sepolia.ts --network sepolia
+npx hardhat run scripts/smoke-sepolia.ts  --network sepolia
+npx hardhat run scripts/e2e-sepolia.ts    --network sepolia
+```
+
+The helper retains only the source Deployer identity, generates four new role
+keys, writes the environment as mode `0600`, refuses existing output/checkpoint
+paths and places `FRESH_RUN_CHECKPOINT_PATH` in that environment. The three
+Fresh entrypoints and Hardhat itself use exported process variables before the
+repository `.env`; sourcing the generated file as shown is therefore required
+unless it is explicitly installed as the active `.env`.
+
 All four `DEMO_*` role keys must be brand-new test-only identities; the deploy
 preflight refuses any role that reuses a checked-in Safe owner or deployment role.
+
+Fresh role funding uses **target balances**, not a fixed transfer. Defaults are
+Admin `0.012 ETH`, signer B `0.010 ETH`, Delegate `0.012 ETH` and Auditor
+`0.001 ETH`, based on a complete Deploy → Smoke → E2E run with extra testnet-gas
+margin. Before the first chain write, the deploy script reads every role balance,
+adds only the missing top-ups, and requires the Deployer to cover that dynamic
+total plus a separate `0.02 ETH` deployment-gas reserve. For four zero-balance
+roles, the default gate is therefore `0.055 ETH`; existing role balances reduce
+it. Each transfer is recalculated from the latest balance and followed by an
+independent balance read that must meet the configured target. Raise an individual
+`FRESH_*_TARGET_ETH` value if Sepolia gas prices increase. These overrides may
+raise a target but cannot lower its empirical default floor; an undercut is
+rejected during the read-only preflight.
+
+The deploy step initializes a mode-`0600`, deployment-bound Fresh checkpoint
+(`.fresh-run-checkpoint.json`, or `FRESH_RUN_CHECKPOINT_PATH`). Smoke and E2E
+persist each broadcast hash before receipt polling and derive every Mandate,
+Request and Audit Packet ID from that transaction's event. A restart follows
+the same hash and ID; a mismatched deployment or an ambiguous stage without a
+hash fails closed instead of submitting a replacement transaction. Use a new,
+isolated checkpoint path for every new Fresh deployment—existing recovery
+evidence is never overwritten.
+
+Fresh Nox inputs are broadcast only after the exact contract gas-estimation
+path can consume them. Status resolution and downstream
+`decrypt`/`publicDecrypt` are separate retry barriers, and the checkpoint
+records their `resolved → usable` lag. The flow uses bounded read-only retries;
+it does not rely on operator sleeps or repeated wallet submissions.
 
 This sequence is only for a **fresh deployment**. It creates a Safe with exactly
 two distinct owners and threshold `2`, then every module enable, mandate
@@ -336,11 +395,20 @@ through 2-of-2 governance. Finance Admin rotation remains a managed Safe/deploym
 operation outside the public automatic co-sign allowlist.
 
 Every Safe operation shares one serialized nonce boundary from state revalidation
-through receipt. The self-service `/api/provision` path remains idempotent per
-address, daily-capped, protected by `PROVISION_ENABLED`, and CORS-locked to the app
-origin. Finance-admin and both current Safe-owner secrets are never shipped in the
-browser bundle; only intentionally low-power Delegate and snapshot-Auditor testnet
-keys are public.
+through receipt. In this source candidate the self-service `/api/provision` path
+is disabled by default, requires an address-bound EIP-712 challenge when enabled,
+and consumes restart-persistent per-address/global quota before any sponsored
+write. It also remains idempotent per address and CORS-locked to the app origin.
+Finance-admin and both current Safe-owner secrets are never shipped in the
+browser bundle; only intentionally low-power Delegate and snapshot-Auditor
+testnet keys are public. See [`server/OPERATIONS.md`](server/OPERATIONS.md) for
+the required persistent paths, treasury gate and RPC broadcast policy.
+
+These controls are not considered deployed merely because this checkout passes.
+After release, acceptance must re-read `/api/health` and require the structured
+`provision`, `treasury` and `rpc` sections described in the operations guide.
+If those fields are absent, production is still running an older backend and
+self-service provisioning must not be represented as using this hardened path.
 
 In production, set `DEMO_DECISION_JOURNAL_PATH` to a writable persistent volume.
 The journal stores the first observed approval timestamp plus terminal decision

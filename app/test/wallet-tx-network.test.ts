@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   ensureAccountOnSepolia: vi.fn(),
   estimateContractGas: vi.fn(),
   writeContract: vi.fn(),
+  waitUntilSimulatable: vi.fn((_label: string, operation: () => Promise<unknown>) => operation()),
 }));
 
 vi.mock('../src/nox', () => ({
@@ -16,6 +17,7 @@ vi.mock('../src/nox', () => ({
     chain: { id: 11155111 },
     writeContract: mocks.writeContract,
   }),
+  waitUntilSimulatable: mocks.waitUntilSimulatable,
 }));
 
 import { walletWrite } from '../src/walletTx';
@@ -28,6 +30,7 @@ beforeEach(() => {
   mocks.ensureAccountOnSepolia.mockResolvedValue(11155111);
   mocks.estimateContractGas.mockResolvedValue(100_000n);
   mocks.writeContract.mockResolvedValue(`0x${'a'.repeat(64)}`);
+  mocks.waitUntilSimulatable.mockImplementation((_label, operation) => operation());
 });
 
 test('network failure blocks gas estimation, wallet opening and recovery markers', async () => {
@@ -69,4 +72,25 @@ test('opens the wallet only after the live account passes the Sepolia guard', as
     .toBeLessThan(mocks.estimateContractGas.mock.invocationCallOrder[0]);
   expect(mocks.estimateContractGas.mock.invocationCallOrder[0])
     .toBeLessThan(onRequestStarted.mock.invocationCallOrder[0]);
+});
+
+test('a fresh Nox input is preflighted through the propagation barrier before one wallet write', async () => {
+  await expect(walletWrite({
+    account,
+    address: contract,
+    abi: [],
+    functionName: 'requestSpend',
+    args: [],
+    noxPropagation: true,
+  })).resolves.toBe(`0x${'a'.repeat(64)}`);
+
+  expect(mocks.waitUntilSimulatable).toHaveBeenCalledWith(
+    'requestSpend Nox input propagation',
+    expect.any(Function),
+    expect.objectContaining({ onRetry: expect.any(Function) }),
+  );
+  expect(mocks.estimateContractGas).toHaveBeenCalledTimes(1);
+  expect(mocks.writeContract).toHaveBeenCalledTimes(1);
+  expect(mocks.waitUntilSimulatable.mock.invocationCallOrder[0])
+    .toBeLessThan(mocks.writeContract.mock.invocationCallOrder[0]);
 });

@@ -1,5 +1,10 @@
 import type { Abi } from 'viem';
-import { ensureAccountOnSepolia, makeWalletClient, publicClient } from './nox';
+import {
+  ensureAccountOnSepolia,
+  makeWalletClient,
+  publicClient,
+  waitUntilSimulatable,
+} from './nox';
 
 /**
  * Robust wallet write for injected wallets (MetaMask & co).
@@ -33,10 +38,16 @@ export async function walletWrite(opts: {
    * unresolved injected-wallet request must keep its global wallet lease.
    */
   timeoutMs?: number;
+  /**
+   * A fresh Nox external-input handle may need several seconds after creation
+   * before the exact contract preflight can consume it. Enabling this retries
+   * only gas estimation; the wallet write is still opened exactly once.
+   */
+  noxPropagation?: boolean;
 }): Promise<`0x${string}`> {
   const {
     account, address, abi, functionName, args, onHint, onRequestStarted,
-    injected = true, timeoutMs = 150_000,
+    injected = true, timeoutMs = 150_000, noxPropagation = false,
   } = opts;
 
   // Never let a stale or manually changed wallet network reach a signature or
@@ -45,9 +56,16 @@ export async function walletWrite(opts: {
   await ensureAccountOnSepolia(account);
 
   // 1) pre-flight on our RPC: early revert detection + a gas limit for the wallet
-  const gas = await publicClient.estimateContractGas({
+  const estimate = () => publicClient.estimateContractGas({
     account, address, abi: abi as Abi, functionName: functionName as any, args: args as any,
   });
+  const gas = noxPropagation
+    ? await waitUntilSimulatable(`${functionName} Nox input propagation`, estimate, {
+        onRetry: ({ attempt }) => onHint?.(
+          `Encrypted input is still propagating through Nox · read-only preflight ${attempt} will retry before any transaction is opened.`,
+        ),
+      })
+    : await estimate();
 
   const wallet = makeWalletClient(account);
   const t0 = Date.now();

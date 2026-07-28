@@ -854,7 +854,8 @@ export function App() {
         <Icon name="wallet" /> Connect my wallet
       </button>
       <p className="muted" style={{ fontSize: 12, marginTop: 8, textAlign: 'center' }}>
-        MetaMask, OKX, Rabby, Coinbase… — you'll be able to get your wallet provisioned as a delegate and sign with it yourself.
+        MetaMask, OKX, Rabby, Coinbase… — if the live wallet-verified onboarding service is enabled,
+        you can provision this wallet as a delegate; the shared demo remains available when it is closed.
       </p>
     </ModalDialog>
   );

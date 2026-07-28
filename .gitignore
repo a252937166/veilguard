@@ -5,6 +5,7 @@ coverage/
 dist/
 .env
 .env.*
+!.env.example
 *.log
 .DS_Store
 .playwright-cli/
@@ -13,3 +14,5 @@ server/dist/
 app/test-results/
 app/playwright-report/
 app/src/demo-evidence.recovery.json
+.fresh-run-checkpoint.json
+.fresh-run-checkpoint.json.tmp

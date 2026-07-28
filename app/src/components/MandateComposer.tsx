@@ -86,6 +86,7 @@ export function MandateComposer({ source, onCancel, onComplete }: Props) {
             floor.handleProof,
           ],
           onHint: setPhase,
+          noxPropagation: true,
         });
         setPhase('Proposal broadcast · waiting for confirmation…');
         const receipt = await publicClient.waitForTransactionReceipt({ hash });

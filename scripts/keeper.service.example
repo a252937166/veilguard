@@ -4,6 +4,13 @@
 # proof determines the outcome. Losing the keeper only delays finalization —
 # users can always finalize from the dApp themselves.
 #
+# RPC reads fail over across the configured endpoints. A signed transaction is
+# broadcast to exactly one chain-id-checked endpoint and is never automatically
+# replayed on another provider after an ambiguous response.
+#
+# Nox finalize waits for status resolution, retries only publicDecrypt and the
+# exact read-only gas estimate, then opens one signed broadcast attempt.
+#
 # Install:
 #   cp scripts/keeper.service.example /etc/systemd/system/veilguard-keeper.service
 #   # edit WorkingDirectory + env below
@@ -22,6 +29,9 @@ Type=simple
 WorkingDirectory=/opt/veilguard
 Environment=KEEPER_LOOP=1
 Environment=KEEPER_INTERVAL_MS=20000
+# Optional comma-separated fallback RPCs. Keep at least one independent
+# provider here; the built-in chain default remains the final fallback.
+# Environment=SEPOLIA_RPC_FALLBACK_URLS=https://rpc-2.example,https://rpc-3.example
 # Optional dedicated keeper key (else falls back to SEPOLIA_DEPLOYER_KEY in .env):
 # Environment=KEEPER_KEY=0x...
 ExecStart=/usr/local/bin/npx hardhat run scripts/keeper.ts --network sepolia

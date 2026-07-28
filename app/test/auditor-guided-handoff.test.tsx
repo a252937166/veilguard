@@ -21,6 +21,7 @@ vi.mock('../src/nox', () => ({
   publicClient: { readContract },
   handleClientFor: async () => ({ decrypt }),
   waitResolved: vi.fn(async () => undefined),
+  retryNoxRead: (_label: string, operation: () => Promise<unknown>) => operation(),
 }));
 
 import { createDemoSession } from '../src/demo-session';
