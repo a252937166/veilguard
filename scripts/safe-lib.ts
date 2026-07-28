@@ -45,6 +45,7 @@ export async function safeExec2of2(
   data: string,
   { ownerAKey, ownerBKey }: { ownerAKey: string; ownerBKey: string },
   log: (m: string) => void = console.log,
+  onBroadcast: (hash: `0x${string}`) => void = () => {},
 ): Promise<MultisigResult> {
   const publicClient = createPublicClient({ chain: sepolia, transport: http(RPC) });
   const chainId = await publicClient.getChainId();
@@ -79,9 +80,10 @@ export async function safeExec2of2(
   }
 
   const exec = await safeB.executeTransaction(tx);
-  const executeTxHash = exec.hash as string;
+  const executeTxHash = exec.hash as `0x${string}`;
+  onBroadcast(executeTxHash);
   const receipt = await publicClient.waitForTransactionReceipt({
-    hash: executeTxHash as `0x${string}`,
+    hash: executeTxHash,
   });
   if (receipt.status !== 'success') {
     throw new Error(`Safe execution reverted: ${executeTxHash}`);

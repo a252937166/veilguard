@@ -5,6 +5,7 @@ export const RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com';
 export const GATEWAY = 'https://gateway-testnets.noxprotocol.dev';
 export const CHAIN_ID = 11155111;
 export const PROVISION_API = '/api/provision';
+export const PROVISION_CHALLENGE_API = '/api/provision-challenge';
 export const FINALIZE_API = '/api/finalize';
 
 export const ADDR = deployments.contracts as {

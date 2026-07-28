@@ -109,9 +109,113 @@ async function requestSwitch(provider: Eip1193Provider, timeoutMs: number): Prom
   );
 }
 
+async function requestAddSepolia(provider: Eip1193Provider, timeoutMs: number): Promise<void> {
+  try {
+    await walletRequest(
+      provider,
+      {
+        method: 'wallet_addEthereumChain',
+        params: [{
+          chainId: SEPOLIA_CHAIN_HEX,
+          chainName: 'Ethereum Sepolia',
+          nativeCurrency: { name: 'Sepolia ETH', symbol: 'ETH', decimals: 18 },
+          rpcUrls: [...BROWSER_RPC_URLS],
+          blockExplorerUrls: ['https://sepolia.etherscan.io'],
+        }],
+      },
+      timeoutMs,
+      'Adding Ethereum Sepolia',
+    );
+  } catch (error) {
+    if (error instanceof WalletNetworkError) throw error;
+    const code = providerCode(error);
+    throw new WalletNetworkError(
+      code === 4001 ? 'add-rejected' : code === -32002 ? 'request-pending' : 'add-failed',
+      code === 4001
+        ? 'Adding Ethereum Sepolia was cancelled in the wallet. Write actions stay blocked.'
+        : code === -32002
+          ? 'A wallet network request is already pending. Open the wallet, resolve that request, then retry.'
+          : `The wallet could not add Ethereum Sepolia: ${providerMessage(error)}`,
+      { cause: error, providerCode: code },
+    );
+  }
+}
+
+async function requestSwitchAfterAdd(provider: Eip1193Provider, timeoutMs: number): Promise<void> {
+  try {
+    await requestSwitch(provider, timeoutMs);
+  } catch (error) {
+    if (error instanceof WalletNetworkError) throw error;
+    const code = providerCode(error);
+    throw new WalletNetworkError(
+      code === 4001 ? 'switch-rejected' : code === -32002 ? 'request-pending' : 'switch-failed',
+      code === 4001
+        ? 'The Sepolia network switch was cancelled in the wallet. Write actions stay blocked.'
+        : code === -32002
+          ? 'A wallet network request is already pending. Open the wallet, resolve that request, then retry.'
+          : `Ethereum Sepolia was added, but the wallet could not select it: ${providerMessage(error)}`,
+      { cause: error, providerCode: code },
+    );
+  }
+}
+
+type WalletNetworkOptions = {
+  timeoutMs?: number;
+  /**
+   * Maximum time to observe the post-switch chain id. The first successful
+   * switch gets a short grace period; the add-then-switch recovery gets the
+   * full period. Set to zero only for deterministic callers/tests that want
+   * an immediate postcondition check.
+   */
+  settleTimeoutMs?: number;
+  settlePollIntervalMs?: number;
+};
+
+const delay = (ms: number) => (
+  ms > 0 ? new Promise<void>((resolve) => setTimeout(resolve, ms)) : Promise.resolve()
+);
+
+async function waitForSepoliaSettlement(
+  provider: Eip1193Provider,
+  {
+    settleTimeoutMs,
+    settlePollIntervalMs,
+    readTimeoutMs,
+  }: {
+    settleTimeoutMs: number;
+    settlePollIntervalMs: number;
+    readTimeoutMs: number;
+  },
+): Promise<{ selected?: number; lastReadError?: unknown }> {
+  const deadline = Date.now() + settleTimeoutMs;
+  let selected: number | undefined;
+  let lastReadError: unknown;
+
+  // EIP-3326 and EIP-1193 do not guarantee that the request Promise, the
+  // chainChanged event and eth_chainId visibility settle in the same turn.
+  // Poll the authoritative chain id instead of trusting response/event order.
+  do {
+    try {
+      selected = await readWalletChainId(provider, Math.min(readTimeoutMs, 2_000));
+      lastReadError = undefined;
+      if (selected === CHAIN_ID) return { selected };
+    } catch (error) {
+      // A provider can transiently reject eth_chainId while its network client
+      // is being replaced. Keep the last error and fail closed after the bound.
+      lastReadError = error;
+    }
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    await delay(Math.min(settlePollIntervalMs, remainingMs));
+  } while (true);
+
+  return { selected, lastReadError };
+}
+
 async function ensureSepoliaNetworkOnce(
   provider: Eip1193Provider | undefined,
-  options: { timeoutMs?: number } = {},
+  options: WalletNetworkOptions = {},
 ): Promise<number> {
   if (!provider) {
     throw new WalletNetworkError(
@@ -121,9 +225,18 @@ async function ensureSepoliaNetworkOnce(
   }
 
   const timeoutMs = options.timeoutMs ?? 60_000;
+  const settleTimeoutMs = options.settleTimeoutMs ?? 10_000;
+  const settlePollIntervalMs = options.settlePollIntervalMs ?? 250;
+  if (!Number.isFinite(settleTimeoutMs) || settleTimeoutMs < 0) {
+    throw new Error('Wallet network settlement timeout must be non-negative.');
+  }
+  if (!Number.isFinite(settlePollIntervalMs) || settlePollIntervalMs <= 0) {
+    throw new Error('Wallet network settlement poll interval must be positive.');
+  }
   const current = await readWalletChainId(provider, Math.min(timeoutMs, 10_000));
   if (current === CHAIN_ID) return current;
 
+  let addedBeforeSuccessfulSwitch = false;
   try {
     await requestSwitch(provider, timeoutMs);
   } catch (error) {
@@ -151,67 +264,58 @@ async function ensureSepoliaNetworkOnce(
       );
     }
 
-    try {
-      await walletRequest(
-        provider,
-        {
-          method: 'wallet_addEthereumChain',
-          params: [{
-            chainId: SEPOLIA_CHAIN_HEX,
-            chainName: 'Ethereum Sepolia',
-            nativeCurrency: { name: 'Sepolia ETH', symbol: 'ETH', decimals: 18 },
-            rpcUrls: [...BROWSER_RPC_URLS],
-            blockExplorerUrls: ['https://sepolia.etherscan.io'],
-          }],
-        },
-        timeoutMs,
-        'Adding Ethereum Sepolia',
-      );
-    } catch (addError) {
-      if (addError instanceof WalletNetworkError) throw addError;
-      const addCode = providerCode(addError);
-      throw new WalletNetworkError(
-        addCode === 4001 ? 'add-rejected' : addCode === -32002 ? 'request-pending' : 'add-failed',
-        addCode === 4001
-          ? 'Adding Ethereum Sepolia was cancelled in the wallet. Write actions stay blocked.'
-          : addCode === -32002
-            ? 'A wallet network request is already pending. Open the wallet, resolve that request, then retry.'
-          : `The wallet could not add Ethereum Sepolia: ${providerMessage(addError)}`,
-        { cause: addError, providerCode: addCode },
-      );
-    }
-
+    await requestAddSepolia(provider, timeoutMs);
+    addedBeforeSuccessfulSwitch = true;
     // EIP-3085 does not require a wallet to select a newly added chain.
-    try {
-      await requestSwitch(provider, timeoutMs);
-    } catch (switchAfterAddError) {
-      if (switchAfterAddError instanceof WalletNetworkError) throw switchAfterAddError;
-      const switchCode = providerCode(switchAfterAddError);
-      throw new WalletNetworkError(
-        switchCode === 4001 ? 'switch-rejected' : switchCode === -32002 ? 'request-pending' : 'switch-failed',
-        switchCode === 4001
-          ? 'The Sepolia network switch was cancelled in the wallet. Write actions stay blocked.'
-          : switchCode === -32002
-            ? 'A wallet network request is already pending. Open the wallet, resolve that request, then retry.'
-            : `Ethereum Sepolia was added, but the wallet could not select it: ${providerMessage(switchAfterAddError)}`,
-        { cause: switchAfterAddError, providerCode: switchCode },
-      );
-    }
+    await requestSwitchAfterAdd(provider, timeoutMs);
   }
 
-  const selected = await readWalletChainId(provider, Math.min(timeoutMs, 10_000));
-  if (selected !== CHAIN_ID) {
+  const settlement = await waitForSepoliaSettlement(provider, {
+    // A switch after EIP-3085 recovery gets the full confirmation window. A
+    // direct successful switch gets a short grace window before recovery.
+    settleTimeoutMs: addedBeforeSuccessfulSwitch
+      ? settleTimeoutMs
+      : Math.min(settleTimeoutMs, 2_000),
+    settlePollIntervalMs,
+    readTimeoutMs: Math.min(timeoutMs, 10_000),
+  });
+  if (settlement.selected === CHAIN_ID) return settlement.selected;
+
+  if (addedBeforeSuccessfulSwitch) {
     throw new WalletNetworkError(
       'still-wrong-network',
-      'The wallet did not switch to Ethereum Sepolia. Select Sepolia in the wallet and retry.',
+      settlement.lastReadError
+        ? 'Ethereum Sepolia was added, but the wallet network could not be verified. Reopen the wallet, select Sepolia, and retry.'
+        : 'Ethereum Sepolia was added, but the wallet remained on another network. Select Sepolia in the wallet and retry.',
     );
   }
-  return selected;
+
+  // Live OKX evidence shows that a direct switch can resolve successfully yet
+  // remain unapplied, including after repeating switch. A single canonical
+  // EIP-3085 add request is the standards-safe recovery: it opens the wallet's
+  // approval path, after which EIP-3085 still requires one explicit switch.
+  // There are no loops and explicit add/switch failures are never retried.
+  await requestAddSepolia(provider, timeoutMs);
+  await requestSwitchAfterAdd(provider, timeoutMs);
+
+  const finalSettlement = await waitForSepoliaSettlement(provider, {
+    settleTimeoutMs,
+    settlePollIntervalMs,
+    readTimeoutMs: Math.min(timeoutMs, 10_000),
+  });
+  if (finalSettlement.selected === CHAIN_ID) return finalSettlement.selected;
+
+  throw new WalletNetworkError(
+    'still-wrong-network',
+    finalSettlement.lastReadError
+      ? 'Ethereum Sepolia was added and selected, but the wallet network could not be verified. Reopen the wallet and retry.'
+      : 'Ethereum Sepolia was added, but the wallet remained on another network after selection. Select Sepolia in the wallet and retry.',
+  );
 }
 
 export function ensureSepoliaNetwork(
   provider: Eip1193Provider | undefined,
-  options: { timeoutMs?: number } = {},
+  options: WalletNetworkOptions = {},
 ): Promise<number> {
   if (!provider) return ensureSepoliaNetworkOnce(provider, options);
   const existing = pendingChecks.get(provider);

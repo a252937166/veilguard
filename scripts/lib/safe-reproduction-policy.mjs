@@ -6,6 +6,15 @@ const EXPECTED_ACTIONS = {
   e2e: ['cancelEscalated', 'executeEscalated'],
   evidence: ['activateMandate', 'executeEscalated'],
 };
+const REVIEWED_REPRODUCTION_IMPORTS = new Set([
+  './safe-lib.js',
+  './lib/audit-packet.mjs',
+  './lib/fresh-checkpoint.mjs',
+  './lib/fresh-funding.mjs',
+  './lib/fresh-run.js',
+  './lib/module-events.js',
+  './lib/nox-consistency.js',
+]);
 
 function parseTypeScript(source, fileName) {
   try {
@@ -477,6 +486,46 @@ export function auditSafeScriptSource(source, kind, fileName = `${kind}.ts`) {
       && isDirectProgramExecution(variableDeclaration, parents);
   };
 
+  const checkpointedSafeExecution = (call) => {
+    let execute;
+    const directParent = parents.get(call);
+    if (
+      directParent?.type === 'ArrowFunctionExpression'
+      && unwrap(directParent.body) === call
+    ) {
+      execute = directParent;
+    } else {
+      const returned = directParent;
+      if (returned?.type !== 'ReturnStatement') return undefined;
+      const block = parents.get(returned);
+      if (block?.type !== 'BlockStatement' || block.body.at(-1) !== returned) {
+        return undefined;
+      }
+      execute = parents.get(block);
+    }
+    if (execute?.type !== 'ArrowFunctionExpression') return undefined;
+    const executeProperty = parents.get(execute);
+    if (
+      executeProperty?.type !== 'ObjectProperty'
+      || keyName(executeProperty.key) !== 'execute'
+    ) {
+      return undefined;
+    }
+    const options = parents.get(executeProperty);
+    const outerCall = parents.get(options);
+    if (
+      options?.type !== 'ObjectExpression'
+      || outerCall?.type !== 'CallExpression'
+      || callName(outerCall.callee) !== 'safeAction'
+      || !isDirectProgramExecution(outerCall, parents)
+    ) {
+      return undefined;
+    }
+    return {
+      awaited: parents.get(outerCall)?.type === 'AwaitExpression',
+    };
+  };
+
   const hasExactSafeShapeGuard = () => {
     let found = false;
     walk(ast, (node) => {
@@ -500,7 +549,10 @@ export function auditSafeScriptSource(source, kind, fileName = `${kind}.ts`) {
   walk(ast, (node, parent) => {
     if (node.type === 'ImportDeclaration') {
       const importPath = String(node.source.value);
-      if (importPath.startsWith('.') && importPath !== './safe-lib.js') {
+      if (
+        importPath.startsWith('.')
+        && !REVIEWED_REPRODUCTION_IMPORTS.has(importPath)
+      ) {
         addViolation(
           violations,
           'relative-executor-import',
@@ -767,9 +819,12 @@ export function auditSafeScriptSource(source, kind, fileName = `${kind}.ts`) {
       if (name === 'encodeFunctionData') inspectSetup(node);
 
       if (name === 'safeExec2of2' && callee?.type === 'Identifier') {
+        const checkpointed = kind === 'smoke'
+          ? checkpointedSafeExecution(node)
+          : undefined;
         const validLocation = kind === 'e2e'
           ? isE2eWrapperCall(node)
-          : isDirectProgramExecution(node, parents);
+          : isDirectProgramExecution(node, parents) || Boolean(checkpointed);
         if (!validLocation) {
           addViolation(
             violations,
@@ -777,7 +832,14 @@ export function auditSafeScriptSource(source, kind, fileName = `${kind}.ts`) {
             `${fileName} must execute safeExec2of2 directly at program level`,
           );
         } else {
-          if (kind !== 'e2e' && parents.get(node)?.type !== 'AwaitExpression') {
+          if (
+            kind !== 'e2e'
+            && (
+              checkpointed
+                ? !checkpointed.awaited
+                : parents.get(node)?.type !== 'AwaitExpression'
+            )
+          ) {
             addViolation(
               violations,
               'safe-helper-call-not-awaited',
@@ -829,14 +891,19 @@ export function auditSafeScriptSource(source, kind, fileName = `${kind}.ts`) {
         evidenceReuseInput = true;
       }
 
-      if (name === 'safeCall' && isDirectProgramExecution(node, parents)) {
-        if (parents.get(node)?.type !== 'AwaitExpression') {
+      if (name === 'safeCall') {
+        const direct = isDirectProgramExecution(node, parents);
+        const checkpointed = kind === 'e2e'
+          ? checkpointedSafeExecution(node)
+          : undefined;
+        if ((direct && parents.get(node)?.type !== 'AwaitExpression')
+          || (checkpointed && !checkpointed.awaited)) {
           addViolation(
             violations,
             'e2e-safe-call-not-awaited',
             'E2E must await each Safe wrapper execution before reporting success',
           );
-        } else {
+        } else if (direct || checkpointed) {
           const target = stringValue(node.arguments[0]);
           if (target) safeCallTargets.add(target);
         }

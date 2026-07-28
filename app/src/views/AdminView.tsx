@@ -84,7 +84,7 @@ export function AdminView() {
         account: account!, address: ADDR.VeilGuardModule, abi: moduleAbi, functionName: 'proposeMandate',
         args: [delegate as `0x${string}`, 0n, now + BigInt(Number(days)) * 86_400n,
           recips as `0x${string}`[], l.handle, l.handleProof, b.handle, b.handleProof, f.handle, f.handleProof],
-        onHint: (m) => toast(m),
+        onHint: (m) => toast(m), noxPropagation: true,
       });
       await publicClient.waitForTransactionReceipt({ hash });
       rememberName();

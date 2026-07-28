@@ -19,16 +19,21 @@ import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import {
   createWalletClient,
-  encodeAbiParameters,
   encodeFunctionData,
   http,
-  keccak256,
   padHex,
-  parseEventLogs,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
 import { createViemHandleClient } from '@iexec-nox/handle';
+import { assertAuditPacketBinding } from './lib/audit-packet.mjs';
+import { requireSingleModuleEvent } from './lib/module-events.js';
+import {
+  retryNoxRead,
+  waitForHandlesResolved,
+  waitUntilSimulatable,
+  type NoxUsabilityTiming,
+} from './lib/nox-consistency.js';
 import { safeExec2of2, env, RPC } from './safe-lib.js';
 
 const deployments = JSON.parse(readFileSync(new URL('../deployments.json', import.meta.url), 'utf8'));
@@ -53,24 +58,8 @@ const moduleAbi = JSON.parse(readFileSync(
   new URL('../artifacts/contracts/VeilGuardModule.sol/VeilGuardModule.json', import.meta.url), 'utf8',
 )).abi;
 
-const waitResolved = async (handles: string[], timeoutMs = 300_000) => {
-  const t0 = Date.now();
-  while (Date.now() - t0 < timeoutMs) {
-    try {
-      const res = await fetch(`${GATEWAY}/v0/public/handles/status`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ handles }),
-      });
-      if (res.ok) {
-        const d = await res.json();
-        const m = new Map(d.payload.statuses.map((s: any) => [s.handle.toLowerCase(), s.resolved]));
-        if (handles.every((h) => m.get(h.toLowerCase()) === true)) return (Date.now() - t0) / 1000;
-      }
-    } catch {}
-    await new Promise((r) => setTimeout(r, 3000));
-  }
-  throw new Error('TEE resolution timeout');
-};
+const waitResolved = (handles: readonly string[]) =>
+  waitForHandlesResolved(`${GATEWAY}/v0/public/handles/status`, handles);
 
 const send = async (label: string, w: any, tx: any) => {
   const hash = await w.writeContract(tx);
@@ -78,6 +67,19 @@ const send = async (label: string, w: any, tx: any) => {
   if (receipt.status !== 'success') throw new Error(`${label} reverted: ${hash}`);
   console.log(`  ${label}: ${hash}`);
   return { hash: hash as `0x${string}`, receipt };
+};
+const sendAfterExactPreflight = async (label: string, w: any, tx: any) => {
+  // The exact call about to be broadcast must first consume any newly-created
+  // Nox input/proof through a read-only path. A status-only signal is not
+  // sufficient, so retry estimation and open the write path exactly once.
+  const estimatedGas = await waitUntilSimulatable<bigint>(
+    `${label} external-input propagation`,
+    () => publicClient.estimateContractGas({ ...tx, account: w.account }) as Promise<bigint>,
+  );
+  return send(label, w, {
+    ...tx,
+    gas: estimatedGas * 125n / 100n,
+  });
 };
 const getRequest = async (id: bigint) => (await publicClient.readContract({
   address: MODULE, abi: moduleAbi, functionName: 'getRequest', args: [id],
@@ -110,25 +112,6 @@ const assertHexEqual = (label: string, actual: string, expected: string) => {
     throw new Error(`${label} mismatch: expected ${expected}, got ${actual}`);
   }
 };
-type ModuleEventName = 'MandateProposed' | 'SpendRequested' | 'AuditPacketCreated';
-const requireSingleModuleEvent = (
-  label: string,
-  receipt: Awaited<ReturnType<typeof publicClient.waitForTransactionReceipt>>,
-  eventName: ModuleEventName,
-) => {
-  const events = parseEventLogs({
-    abi: moduleAbi,
-    logs: receipt.logs,
-    eventName,
-    strict: true,
-  });
-  if (events.length !== 1) {
-    throw new Error(`${label} expected exactly one ${eventName} event, got ${events.length}`);
-  }
-  const event = events[0] as any;
-  assertAddressEqual(`${eventName} event address`, String(event.address), MODULE);
-  return event;
-};
 
 /** Guard against public-RPC read-after-write lag: poll until the mandate is Active. */
 const waitMandateActive = async (id: bigint, timeoutMs = 60_000) => {
@@ -150,6 +133,7 @@ const evidence: any = {
   generatedAt: new Date().toISOString(),
   commit: execSync('git rev-parse --short HEAD').toString().trim(),
   teeLatencySec: {},
+  resolvedToUsableMs: {},
 };
 
 console.log('— FINAL EVIDENCE RUN (2-of-2 governance) —');
@@ -162,15 +146,19 @@ const [l, b, f] = await Promise.all([
   adminClient.encryptInput(usdc(300), 'uint256', MODULE),
 ]);
 const now = BigInt(Math.floor(Date.now() / 1000));
-const { hash: proposeTx, receipt: proposeReceipt } = await send('proposeMandate', admin, {
+const { hash: proposeTx, receipt: proposeReceipt } = await sendAfterExactPreflight('proposeMandate', admin, {
   address: MODULE, abi: moduleAbi, functionName: 'proposeMandate',
   args: [delegate.account.address, 0n, now + 86_400n * 60n, [deployer.account.address],
     l.handle, l.handleProof, b.handle, b.handleProof, f.handle, f.handleProof],
 });
 const mandateProposedEvent = requireSingleModuleEvent(
-  'proposeMandate receipt',
-  proposeReceipt,
-  'MandateProposed',
+  {
+    abi: moduleAbi,
+    module: MODULE,
+    receipt: proposeReceipt,
+    eventName: 'MandateProposed',
+    label: 'proposeMandate receipt',
+  },
 );
 const mandateId = BigInt(mandateProposedEvent.args.mandateId);
 if (mandateId <= 0n) throw new Error(`MandateProposed emitted invalid mandateId ${mandateId}`);
@@ -192,15 +180,19 @@ await waitMandateActive(mandateId);
 const delegateClient = await clientFor(delegate);
 const spend = async (n: number, memo: string) => {
   const enc = await delegateClient.encryptInput(usdc(n), 'uint256', MODULE);
-  const { hash: requestTx, receipt: requestReceipt } = await send(`requestSpend ${n}`, delegate, {
+  const { hash: requestTx, receipt: requestReceipt } = await sendAfterExactPreflight(`requestSpend ${n}`, delegate, {
     address: MODULE, abi: moduleAbi, functionName: 'requestSpend',
     args: [mandateId, deployer.account.address, enc.handle, enc.handleProof,
       padHex(memo as `0x${string}`, { size: 32 })],
   });
   const spendRequestedEvent = requireSingleModuleEvent(
-    `requestSpend ${n} receipt`,
-    requestReceipt,
-    'SpendRequested',
+    {
+      abi: moduleAbi,
+      module: MODULE,
+      receipt: requestReceipt,
+      eventName: 'SpendRequested',
+      label: `requestSpend ${n} receipt`,
+    },
   );
   const id = BigInt(spendRequestedEvent.args.requestId);
   if (id <= 0n) throw new Error(`SpendRequested emitted invalid requestId ${id}`);
@@ -224,13 +216,23 @@ const spend = async (n: number, memo: string) => {
     String(spendRequestedEvent.args.decisionHandle),
     String(r[7]),
   );
-  const tee = await waitResolved([r[7]]);
-  const { value: decision, decryptionProof } = await delegateClient.publicDecrypt(r[7]);
-  const { hash: finalizeTx } = await send('finalize', deployer, {
+  const resolution = await waitResolved([r[7]]);
+  let usability: NoxUsabilityTiming | undefined;
+  const { value: decision, decryptionProof } = await retryNoxRead(
+    `requestSpend ${n} decision public decrypt`,
+    () => delegateClient.publicDecrypt(r[7]),
+    {
+      resolvedAt: resolution.resolvedAt,
+      onUsable: (timing) => { usability = timing; },
+    },
+  );
+  const { hash: finalizeTx } = await sendAfterExactPreflight('finalize', deployer, {
     address: MODULE, abi: moduleAbi, functionName: 'finalize', args: [id, decryptionProof],
   });
+  const tee = resolution.elapsedMs / 1000;
+  const resolvedToUsableMs = usability?.resolvedToUsableMs ?? 0;
   console.log(`  request #${id}: decision=${decision} (TEE ${tee.toFixed(1)}s)`);
-  return { id, decision: Number(decision), requestTx, finalizeTx, tee };
+  return { id, decision: Number(decision), requestTx, finalizeTx, tee, resolvedToUsableMs };
 };
 
 // 3. within
@@ -238,12 +240,14 @@ console.log('[3] delegate 25 → WITHIN MANDATE');
 const within = await spend(25, '0xe1');
 if (within.decision !== 1) throw new Error(`expected EXECUTE, got ${within.decision}`);
 evidence.teeLatencySec.within = within.tee;
+evidence.resolvedToUsableMs.within = within.resolvedToUsableMs;
 
 // 4. escalate + 2-of-2 execution
 console.log('[4] delegate 60 → APPROVAL REQUIRED → Safe 2-of-2 approves');
 const escalated = await spend(60, '0xe2');
 if (escalated.decision !== 2) throw new Error(`expected ESCALATE, got ${escalated.decision}`);
 evidence.teeLatencySec.escalated = escalated.tee;
+evidence.resolvedToUsableMs.escalated = escalated.resolvedToUsableMs;
 const approval = await safeExec2of2(
   SAFE, MODULE,
   encodeFunctionData({ abi: moduleAbi, functionName: 'executeEscalated', args: [escalated.id] }),
@@ -262,6 +266,7 @@ console.log('[5] delegate 600 → BLOCKED (over budget)');
 const blocked = await spend(600, '0xe3');
 if (blocked.decision !== 3) throw new Error(`expected BLOCKED, got ${blocked.decision}`);
 evidence.teeLatencySec.blocked = blocked.tee;
+evidence.resolvedToUsableMs.blocked = blocked.resolvedToUsableMs;
 
 // 6. selective disclosure packet
 console.log('[6] selective-disclosure packet for the auditor');
@@ -269,24 +274,21 @@ const auditor = wallet('DEMO_AUDITOR_KEY');
 const auditorAddress = auditor.account.address;
 const auditorClient = await clientFor(auditor);
 const expectedRequestIds = [within.id, escalated.id, blocked.id] as const;
-const { hash: packetTx, receipt: packetReceipt } = await send('createAuditPacket', admin, {
+const { hash: packetTx, receipt: packetReceipt } = await sendAfterExactPreflight('createAuditPacket', admin, {
   address: MODULE, abi: moduleAbi, functionName: 'createAuditPacket',
   args: [auditorAddress, mandateId, expectedRequestIds],
 });
 const auditPacketCreatedEvent = requireSingleModuleEvent(
-  'createAuditPacket receipt',
-  packetReceipt,
-  'AuditPacketCreated',
+  {
+    abi: moduleAbi,
+    module: MODULE,
+    receipt: packetReceipt,
+    eventName: 'AuditPacketCreated',
+    label: 'createAuditPacket receipt',
+  },
 );
 const packetId = BigInt(auditPacketCreatedEvent.args.packetId);
 if (packetId <= 0n) throw new Error(`AuditPacketCreated emitted invalid packetId ${packetId}`);
-assertAddressEqual(
-  'AuditPacketCreated.auditor',
-  String(auditPacketCreatedEvent.args.auditor),
-  auditorAddress,
-);
-assertBigIntEqual('AuditPacketCreated.mandateId', auditPacketCreatedEvent.args.mandateId, mandateId);
-const eventManifestHash = String(auditPacketCreatedEvent.args.manifestHash);
 const packet = (await publicClient.readContract({
   address: MODULE, abi: moduleAbi, functionName: 'getAuditPacket', args: [packetId],
 })) as any[];
@@ -294,45 +296,44 @@ const mandate = (await publicClient.readContract({
   address: MODULE, abi: moduleAbi, functionName: 'getMandate', args: [mandateId],
 })) as any[];
 const policyVersion = Number(mandate[3]);
-const packetRequestIds = packet[5] as readonly bigint[];
-const snaps = [...(packet[6] as readonly `0x${string}`[])];
+const auditBinding = assertAuditPacketBinding({
+  module: MODULE,
+  event: auditPacketCreatedEvent,
+  packet,
+  auditor: auditorAddress,
+  mandateId,
+  policyVersion,
+  requestIds: expectedRequestIds,
+});
+const eventManifestHash = auditBinding.manifestHash;
+const snaps = [...auditBinding.snapshots];
 
 // Fail closed on every public packet binding before attempting disclosure or
 // writing demo-evidence.json. The request-state checks also ensure the IDs bound
 // by this run's SpendRequested receipts still identify the expected terminal requests.
-assertAddressEqual('packet auditor', String(packet[0]), auditorAddress);
-assertBigIntEqual('packet mandateId', packet[1], mandateId);
-assertBigIntEqual('packet policyVersion', packet[2], BigInt(policyVersion));
-assertBigIntSequence('packet requestIds', packetRequestIds, expectedRequestIds);
-assertHexEqual('packet manifest vs AuditPacketCreated', String(packet[3]), eventManifestHash);
-if (snaps.length !== 3 + expectedRequestIds.length * 2) {
-  throw new Error(`snapshot handle count mismatch: expected 9, got ${snaps.length}`);
-}
 for (const [index, expectedState] of [2n, 2n, 4n].entries()) {
   const request = await getRequest(expectedRequestIds[index]);
   assertBigIntEqual(`request[${index}].mandateId`, request[0], mandateId);
   assertBigIntEqual(`request[${index}].state`, request[5], expectedState);
 }
 
-// Solidity computes keccak256(abi.encode(address,uint256,uint32,uint256[],bytes32[])).
-// viem's standard ABI encoder is byte-for-byte equivalent to abi.encode here.
-const expectedManifestHash = keccak256(encodeAbiParameters(
-  [
-    { name: 'auditor', type: 'address' },
-    { name: 'mandateId', type: 'uint256' },
-    { name: 'policyVersion', type: 'uint32' },
-    { name: 'requestIds', type: 'uint256[]' },
-    { name: 'snapshotHandles', type: 'bytes32[]' },
-  ],
-  [auditorAddress, mandateId, policyVersion, expectedRequestIds, snaps],
-));
-if (eventManifestHash.toLowerCase() !== expectedManifestHash.toLowerCase()) {
-  throw new Error(`packet manifest mismatch: expected ${expectedManifestHash}, got ${eventManifestHash}`);
-}
-
-await waitResolved(snaps);
-const vals: bigint[] = [];
-for (const s of snaps) vals.push(BigInt((await auditorClient.decrypt(s)).value));
+const auditResolution = await waitResolved(snaps);
+const auditUsability: NoxUsabilityTiming[] = [];
+const vals = await Promise.all(snaps.map(async (snapshot, index) => {
+  const decrypted = await retryNoxRead(
+    `audit snapshot ${index + 1} decrypt`,
+    () => auditorClient.decrypt(snapshot),
+    {
+      resolvedAt: auditResolution.resolvedAt,
+      onUsable: (timing) => { auditUsability[index] = timing; },
+    },
+  );
+  return BigInt(decrypted.value);
+}));
+evidence.teeLatencySec.auditPacket = auditResolution.elapsedMs / 1000;
+evidence.resolvedToUsableMs.auditSnapshots = snaps.map(
+  (_, index) => auditUsability[index]?.resolvedToUsableMs ?? 0,
+);
 const expectedSnapshotValues = [
   usdc(40),
   usdc(500) - usdc(25) - usdc(60),

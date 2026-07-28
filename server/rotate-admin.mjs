@@ -10,21 +10,30 @@
  *
  * Usage: NEW_ADMIN_KEY=0x… node rotate-admin.bundle.mjs   (plus the normal .env)
  */
-import { createPublicClient, createWalletClient, http as viemHttp, encodeFunctionData, parseSignature } from 'viem';
+import { createPublicClient, createWalletClient, encodeFunctionData, parseSignature } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
+import { createGuardedRpcFallback, parseRpcUrls } from './lib/rpc-fallback.mjs';
 
-const { ADMIN_KEY, SIGNER_B_KEY, MODULE, SAFE, NEW_ADMIN_KEY, RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com' } = process.env;
+const {
+  ADMIN_KEY, SIGNER_B_KEY, MODULE, SAFE, NEW_ADMIN_KEY,
+  RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com',
+  RPC_FALLBACK_URLS = '',
+} = process.env;
 if (!ADMIN_KEY || !SIGNER_B_KEY || !MODULE || !SAFE || !NEW_ADMIN_KEY) throw new Error('missing env');
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 const SENTINEL = '0x0000000000000000000000000000000000000001';
-const pub = createPublicClient({ chain: sepolia, transport: viemHttp(RPC_URL) });
+const rpc = createGuardedRpcFallback({
+  urls: parseRpcUrls(RPC_URL, RPC_FALLBACK_URLS, sepolia.rpcUrls.default.http),
+  chainId: sepolia.id,
+});
+const pub = createPublicClient({ chain: sepolia, transport: rpc.transport });
 const oldAdmin = privateKeyToAccount(ADMIN_KEY);
 const signerB = privateKeyToAccount(SIGNER_B_KEY);
 const newAdmin = privateKeyToAccount(NEW_ADMIN_KEY);
-const oldWallet = createWalletClient({ account: oldAdmin, chain: sepolia, transport: viemHttp(RPC_URL) });
-const bWallet = createWalletClient({ account: signerB, chain: sepolia, transport: viemHttp(RPC_URL) });
+const oldWallet = createWalletClient({ account: oldAdmin, chain: sepolia, transport: rpc.transport });
+const bWallet = createWalletClient({ account: signerB, chain: sepolia, transport: rpc.transport });
 
 const safeAbi = [
   { type: 'function', name: 'nonce', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },

@@ -10,7 +10,7 @@
  * Run: npx hardhat run scripts/deploy-sepolia.ts --network sepolia
  */
 import { network } from 'hardhat';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import {
   encodeFunctionData,
   formatEther,
@@ -19,6 +19,17 @@ import {
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
+import {
+  createFundingPlan,
+  fundRoleToTarget,
+  resolveRoleTargets,
+} from './lib/fresh-funding.mjs';
+import {
+  checkpointPath,
+  markCheckpointStage,
+  newFreshCheckpoint,
+  saveFreshCheckpoint,
+} from './lib/fresh-checkpoint.mjs';
 import { env, safeExec2of2 } from './safe-lib.js';
 
 // Canonical Safe v1.4.1 deployment (same addresses on all chains).
@@ -26,12 +37,10 @@ const SAFE_FACTORY = '0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67' as const;
 const SAFE_SINGLETON_L1 = '0x41675C099F32341bf84BFc5382aF534df5C7461a' as const;
 const SAFE_SINGLETON_L2 = '0x29fcB43b46531BcA003ddC8FCB67FFE91900C762' as const;
 const SAFE_FALLBACK_HANDLER = '0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99' as const;
-// Four roles receive 0.004 ETH each (0.016 total); keep a separate 0.02 ETH
-// reserve so role funding cannot consume the deployment gas budget.
-const DEMO_ROLE_FUNDING = parseEther('0.004');
-const ROLE_FUNDING_TOTAL = DEMO_ROLE_FUNDING * 4n;
+// Role top-ups are calculated from their live balances. Keep a separate
+// deployer reserve so target funding cannot consume the contract-deployment
+// and Safe-setup gas budget.
 const DEPLOY_GAS_RESERVE = parseEther('0.02');
-const MIN_DEPLOYER_BALANCE = ROLE_FUNDING_TOTAL + DEPLOY_GAS_RESERVE;
 
 const safeAbi = [
   { type: 'function', name: 'setup', stateMutability: 'nonpayable', inputs: [
@@ -71,12 +80,20 @@ const admin = privateKeyToAccount(adminKey);
 const signerB = privateKeyToAccount(env('DEMO_SIGNER_B_KEY')! as `0x${string}`);
 const delegate = privateKeyToAccount(env('DEMO_DELEGATE_KEY')! as `0x${string}`);
 const auditor = privateKeyToAccount(env('DEMO_AUDITOR_KEY')! as `0x${string}`);
+const roleTargetBalances = resolveRoleTargets(env);
+const roleFundingTargets = [
+  { role: 'admin', address: admin.address, targetBalance: roleTargetBalances.admin },
+  { role: 'signerB', address: signerB.address, targetBalance: roleTargetBalances.signerB },
+  { role: 'delegate', address: delegate.address, targetBalance: roleTargetBalances.delegate },
+  { role: 'auditor', address: auditor.address, targetBalance: roleTargetBalances.auditor },
+] as const;
 const checkedInDeployments = JSON.parse(
   readFileSync(new URL('../deployments.json', import.meta.url), 'utf8'),
 ) as {
   safe?: { owners?: unknown[] };
   roles?: Record<string, unknown>;
 };
+const freshCheckpointPath = checkpointPath(env('FRESH_RUN_CHECKPOINT_PATH'));
 
 // ------------------------------------------------------------ read-only preflight
 
@@ -119,6 +136,12 @@ const checkedInIdentities = new Set(
 if (demoRoleAddresses.some((address) => checkedInIdentities.has(address))) {
   throw new Error('fresh deployment demo roles must not reuse checked-in deployment identities');
 }
+if (existsSync(freshCheckpointPath)) {
+  throw new Error(
+    'fresh deployment checkpoint path already exists; use an isolated '
+    + 'FRESH_RUN_CHECKPOINT_PATH and do not overwrite recovery evidence',
+  );
+}
 
 // Safe is the integration target, so prove that its canonical factory and at
 // least one supported singleton exist before deploying even the first token.
@@ -136,13 +159,27 @@ if (!factoryCode || factoryCode === '0x' || !singleton) {
 }
 
 console.log(`deployer: ${deployer.account.address}`);
-const balance = await publicClient.getBalance({ address: deployer.account.address });
+const [balance, fundingPlan] = await Promise.all([
+  publicClient.getBalance({ address: deployer.account.address }),
+  createFundingPlan(
+    [...roleFundingTargets],
+    (address) => publicClient.getBalance({ address }),
+  ),
+]);
+const minimumDeployerBalance = fundingPlan.totalTopUp + DEPLOY_GAS_RESERVE;
 console.log(`balance:  ${formatEther(balance)} ETH`);
+for (const role of fundingPlan.roles) {
+  console.log(
+    `  ${role.role} target ${formatEther(role.targetBalance)} ETH; `
+    + `current ${formatEther(role.currentBalance)} ETH; `
+    + `top-up ${formatEther(role.plannedTopUp)} ETH`,
+  );
+}
 
-if (balance < MIN_DEPLOYER_BALANCE) {
+if (balance < minimumDeployerBalance) {
   throw new Error(
-    `not enough Sepolia ETH: need at least ${formatEther(MIN_DEPLOYER_BALANCE)} ETH; `
-      + `${formatEther(ROLE_FUNDING_TOTAL)} ETH is transferred to four demo roles `
+    `not enough Sepolia ETH: need at least ${formatEther(minimumDeployerBalance)} ETH; `
+      + `${formatEther(fundingPlan.totalTopUp)} ETH is the current total role top-up `
       + `and ${formatEther(DEPLOY_GAS_RESERVE)} ETH is retained as deployment gas reserve`,
   );
 }
@@ -198,9 +235,21 @@ console.log(`  VeilGuardModule: ${module_.address}`);
 // ---------------------------------------------------------------- roles & enable
 
 console.log('[5/5] Funding demo roles + enabling module…');
-for (const acct of [admin, signerB, delegate, auditor]) {
-  const h = await deployer.sendTransaction({ to: acct.address, value: DEMO_ROLE_FUNDING });
-  await publicClient.waitForTransactionReceipt({ hash: h });
+for (const role of fundingPlan.roles) {
+  const funded = await fundRoleToTarget(role, {
+    getBalance: (address) => publicClient.getBalance({ address }),
+    sendTopUp: async (address, value) => {
+      const hash = await deployer.sendTransaction({ to: address, value });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status !== 'success') {
+        throw new Error(`${role.role} funding transaction reverted`);
+      }
+    },
+  });
+  console.log(
+    `  ${role.role}: transferred ${formatEther(funded.transferred)} ETH; `
+    + `verified ${formatEther(funded.finalBalance)} ETH`,
+  );
 }
 
 const enableData = encodeFunctionData({
@@ -254,6 +303,20 @@ const deployments = {
   },
 };
 writeFileSync(new URL('../deployments.json', import.meta.url), JSON.stringify(deployments, null, 2));
+const deploymentCheckpoint = markCheckpointStage(
+  newFreshCheckpoint({
+    chainId,
+    module: module_.address,
+    safe: safeAddress,
+  }),
+  'deploy.complete',
+  {
+    status: 'verified',
+    deployedAt: deployments.deployedAt,
+  },
+);
+saveFreshCheckpoint(freshCheckpointPath, deploymentCheckpoint);
 console.log('\n✅ deployments.json written');
+console.log('✅ deployment-bound Fresh checkpoint initialized');
 console.log(JSON.stringify(deployments.contracts, null, 2));
 process.exit(0);

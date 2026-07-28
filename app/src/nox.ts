@@ -12,6 +12,14 @@ import { demoWalletByAddress } from './demo';
 import { sepoliaReadTransport } from './rpc';
 import type { Eip1193Provider } from './wallet';
 import { ensureSepoliaNetwork } from './wallet-network';
+import {
+  retryNoxRead as retryNoxReadShared,
+  waitForHandlesResolved,
+  waitUntilSimulatable,
+  type NoxRetryOptions,
+} from '../../scripts/lib/nox-consistency.js';
+
+export { waitUntilSimulatable };
 
 /** The injected provider chosen at connect time (EIP-6963), or the legacy default. */
 let activeProvider: Eip1193Provider | undefined;
@@ -97,10 +105,24 @@ export async function handlesResolved(handles: string[]): Promise<boolean> {
 }
 
 export async function waitResolved(handles: string[], timeoutMs = 180_000): Promise<void> {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    if (await handlesResolved(handles)) return;
-    await new Promise((r) => setTimeout(r, 2500));
-  }
-  throw new Error('TEE did not resolve the handles in time');
+  await waitForHandlesResolved(`${GATEWAY}/v0/public/handles/status`, handles, {
+    timeoutMs,
+    intervalMs: 2_500,
+  });
+}
+
+/** Browser-safe Nox read retry: wallet denial is terminal; propagation is not. */
+export function retryNoxRead<T>(
+  label: string,
+  operation: () => Promise<T>,
+  options: NoxRetryOptions = {},
+): Promise<T> {
+  return retryNoxReadShared(label, operation, {
+    shouldRetry: (error) => {
+      const candidate = error as { code?: unknown; message?: unknown } | null;
+      return candidate?.code !== 4001
+        && !/user rejected|user denied|request rejected/i.test(String(candidate?.message ?? ''));
+    },
+    ...options,
+  });
 }

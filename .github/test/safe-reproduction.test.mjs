@@ -79,8 +79,10 @@ test('fresh deploy completes every read-only safety preflight before its first c
     'const factoryCode = await publicClient.getCode({ address: SAFE_FACTORY })',
     'for (const candidate of [SAFE_SINGLETON_L1, SAFE_SINGLETON_L2])',
     "throw new Error('canonical Safe v1.4.1 factory/singleton not found on Sepolia",
-    'const balance = await publicClient.getBalance(',
-    'if (balance < MIN_DEPLOYER_BALANCE) {',
+    'const [balance, fundingPlan] = await Promise.all([',
+    'createFundingPlan(',
+    'const minimumDeployerBalance = fundingPlan.totalTopUp + DEPLOY_GAS_RESERVE;',
+    'if (balance < minimumDeployerBalance) {',
   ]) {
     const position = sources.deploy.indexOf(requiredPreflight);
     assert.ok(position >= 0, `missing deploy preflight: ${requiredPreflight}`);
@@ -102,7 +104,7 @@ test('fresh deploy completes every read-only safety preflight before its first c
   );
   assert.match(
     preflight,
-    /if \(balance < MIN_DEPLOYER_BALANCE\) {\s*throw new Error/,
+    /if \(balance < minimumDeployerBalance\) {\s*throw new Error/,
   );
   assert.doesNotMatch(
     preflight,
@@ -110,22 +112,11 @@ test('fresh deploy completes every read-only safety preflight before its first c
     'contract addresses are not identities and must not block a fresh reproduction',
   );
 
-  assert.match(
-    sources.deploy,
-    /const DEMO_ROLE_FUNDING = parseEther\('0\.004'\);\s*const ROLE_FUNDING_TOTAL = DEMO_ROLE_FUNDING \* 4n;\s*const DEPLOY_GAS_RESERVE = parseEther\('0\.02'\);\s*const MIN_DEPLOYER_BALANCE = ROLE_FUNDING_TOTAL \+ DEPLOY_GAS_RESERVE;/,
-  );
-  assert.match(
-    sources.deploy,
-    /value: DEMO_ROLE_FUNDING/,
-    'the funding loop and preflight total must use the same per-role amount',
-  );
-  assert.match(sources.deploy, /ROLE_FUNDING_TOTAL.*four demo roles/s);
-  assert.match(sources.deploy, /DEPLOY_GAS_RESERVE.*deployment gas reserve/s);
-  assert.doesNotMatch(
-    sources.deploy,
-    /balance < parseEther\('0\.02'\)/,
-    '0.02 ETH cannot cover both 0.016 ETH role funding and a safe gas reserve',
-  );
+  assert.match(sources.deploy, /const roleTargetBalances = resolveRoleTargets\(env\);/);
+  assert.match(sources.deploy, /for \(const role of fundingPlan\.roles\) {/);
+  assert.match(sources.deploy, /await fundRoleToTarget\(role,/);
+  assert.match(sources.deploy, /receipt\.status !== 'success'/);
+  assert.doesNotMatch(sources.deploy, /0\.004|DEMO_ROLE_FUNDING|ROLE_FUNDING_TOTAL/);
 });
 
 test('Safe reproduction policy detects threshold, direct-exec and duplicate-signer regressions', () => {
@@ -253,9 +244,10 @@ function decoyGuard(chainId, currentNonce, tx, receipt) {
   );
 
   const unrelatedReceipt = sources.helper.replace(
-    'hash: executeTxHash as `0x${string}`',
-    `hash: '${`0x${'1'.repeat(64)}`}' as \`0x\${string}\``,
+    /hash: executeTxHash(?: as `0x\$\{string\}`)?,/,
+    `hash: '${`0x${'1'.repeat(64)}`}' as \`0x\${string}\`,`,
   );
+  assert.notEqual(unrelatedReceipt, sources.helper);
   assert.ok(
     auditSafeHelperSource(unrelatedReceipt).some(
       (violation) => violation.code === 'helper-receipt-hash-source',
@@ -303,10 +295,11 @@ await send('unsafe activation', admin, {
   );
 
   const earlySuccess = sources.smoke.replace(
-    'await safeExec2of2(Safe, VeilGuardModule, activateData, safeKeys);',
+    'await run.safeAction({',
     `process.exit(0);
-await safeExec2of2(Safe, VeilGuardModule, activateData, safeKeys);`,
+await run.safeAction({`,
   );
+  assert.notEqual(earlySuccess, sources.smoke);
   assert.ok(
     auditSafeScriptSource(earlySuccess, 'smoke').some(
       (violation) => violation.code === 'script-early-success-exit',
@@ -314,9 +307,10 @@ await safeExec2of2(Safe, VeilGuardModule, activateData, safeKeys);`,
   );
 
   const unawaitedSmoke = sources.smoke.replace(
-    'await safeExec2of2(Safe, VeilGuardModule, activateData, safeKeys);',
-    'safeExec2of2(Safe, VeilGuardModule, activateData, safeKeys);',
+    'await run.safeAction({',
+    'run.safeAction({',
   );
+  assert.notEqual(unawaitedSmoke, sources.smoke);
   assert.ok(
     auditSafeScriptSource(unawaitedSmoke, 'smoke').some(
       (violation) => violation.code === 'safe-helper-call-not-awaited',
@@ -324,9 +318,10 @@ await safeExec2of2(Safe, VeilGuardModule, activateData, safeKeys);`,
   );
 
   const unawaitedE2e = sources.e2e.replace(
-    "await safeCall('cancelEscalated', [a.id]);",
-    "safeCall('cancelEscalated', [a.id]);",
+    'await run.safeAction({',
+    'run.safeAction({',
   );
+  assert.notEqual(unawaitedE2e, sources.e2e);
   assert.ok(
     auditSafeScriptSource(unawaitedE2e, 'e2e').some(
       (violation) => violation.code === 'e2e-safe-call-not-awaited',
@@ -376,9 +371,10 @@ Object.assign(deployments.safe, { owners: [admin.address] });`;
   );
 
   const conditionalHelper = sources.smoke.replace(
-    'await safeExec2of2(Safe, VeilGuardModule, activateData, safeKeys);',
-    'if (false) await safeExec2of2(Safe, VeilGuardModule, activateData, safeKeys);',
+    'await run.safeAction({',
+    'if (false) await run.safeAction({',
   );
+  assert.notEqual(conditionalHelper, sources.smoke);
   assert.ok(
     auditSafeScriptSource(conditionalHelper, 'smoke').some(
       (violation) => violation.code === 'nested-safe-helper-call',
@@ -447,15 +443,15 @@ test('final evidence derives the auditor key and verifies the complete audit pac
   const evidenceWrite = sources.evidence.lastIndexOf('writeFileSync(');
   assert.ok(evidenceWrite > 0, 'final evidence must write only after verification');
   for (const requiredCheck of [
-    "assertAddressEqual('packet auditor'",
-    "assertBigIntEqual('packet mandateId'",
-    "assertBigIntEqual('packet policyVersion'",
-    "assertBigIntSequence('packet requestIds'",
-    'snapshot handle count mismatch',
+    'const auditBinding = assertAuditPacketBinding({',
+    'event: auditPacketCreatedEvent',
+    'packet,',
+    'auditor: auditorAddress',
+    'mandateId,',
+    'policyVersion,',
+    'requestIds: expectedRequestIds',
     'request[${index}].mandateId',
     'request[${index}].state',
-    'const expectedManifestHash = keccak256(encodeAbiParameters(',
-    'packet manifest mismatch',
     "assertBigIntSequence('decrypted packet snapshots'",
   ]) {
     const checkPosition = sources.evidence.indexOf(requiredCheck);
@@ -466,15 +462,12 @@ test('final evidence derives the auditor key and verifies the complete audit pac
     );
   }
 
-  assert.match(
-    sources.evidence,
-    /\{ name: 'auditor', type: 'address' \}[\s\S]*\{ name: 'mandateId', type: 'uint256' \}[\s\S]*\{ name: 'policyVersion', type: 'uint32' \}[\s\S]*\{ name: 'requestIds', type: 'uint256\[\]' \}[\s\S]*\{ name: 'snapshotHandles', type: 'bytes32\[\]' \}/,
-  );
+  assert.match(sources.evidence, /import \{ assertAuditPacketBinding \} from '\.\/lib\/audit-packet\.mjs';/);
   assert.match(
     sources.evidence,
     /const expectedSnapshotValues = \[\s*usdc\(40\),\s*usdc\(500\) - usdc\(25\) - usdc\(60\),\s*usdc\(300\),\s*usdc\(25\), 0n,\s*usdc\(60\), 0n,\s*usdc\(600\), 1n,/,
   );
-  assert.match(sources.evidence, /parseEventLogs\(\{[\s\S]*strict: true,/);
+  assert.match(sources.evidence, /import \{ requireSingleModuleEvent \} from '\.\/lib\/module-events\.js';/);
   for (const eventName of ['MandateProposed', 'SpendRequested', 'AuditPacketCreated']) {
     assert.match(
       sources.evidence,
@@ -482,10 +475,7 @@ test('final evidence derives the auditor key and verifies the complete audit pac
       `final evidence must bind ${eventName} to its transaction receipt`,
     );
   }
-  assert.match(
-    sources.evidence,
-    /assertHexEqual\('packet manifest vs AuditPacketCreated', String\(packet\[3\]\), eventManifestHash\)/,
-  );
+  assert.match(sources.evidence, /const eventManifestHash = auditBinding\.manifestHash;/);
   assert.doesNotMatch(sources.evidence, /next(?:Mandate|Request|Packet)Id/);
 });
 
@@ -494,14 +484,14 @@ test('fresh E2E validates all eleven audit snapshot slots as raw bigint values',
     ['policy.autoLimit', 'usdc(40)'],
     ['policy.budgetLeft', 'usdc(15)'],
     ['policy.reserveFloor', 'usdc(500)'],
-    ['request#1.amount', 'usdc(25)'],
-    ['request#1.blockedReason', '0n'],
-    ['request#${a.id}.amount', 'usdc(60)'],
-    ['request#${a.id}.blockedReason', '0n'],
-    ['request#${b.id}.amount', 'usdc(60)'],
-    ['request#${b.id}.blockedReason', '0n'],
-    ['request#${c.id}.amount', 'usdc(500)'],
-    ['request#${c.id}.blockedReason', '1n'],
+    ['request#${smokeRequestId}.amount', 'usdc(25)'],
+    ['request#${smokeRequestId}.blockedReason', '0n'],
+    ['request#${cancelled.id}.amount', 'usdc(60)'],
+    ['request#${cancelled.id}.blockedReason', '0n'],
+    ['request#${executed.id}.amount', 'usdc(60)'],
+    ['request#${executed.id}.blockedReason', '0n'],
+    ['request#${blocked.id}.amount', 'usdc(500)'],
+    ['request#${blocked.id}.blockedReason', '1n'],
   ]) {
     assert.match(
       sources.e2e,
@@ -509,8 +499,11 @@ test('fresh E2E validates all eleven audit snapshot slots as raw bigint values',
       `missing raw snapshot assertion for ${label}`,
     );
   }
-  assert.match(sources.e2e, /snaps\.length !== expectedSnapshots\.length/);
-  assert.match(sources.e2e, /const values: bigint\[\] = \[\];/);
+  assert.match(sources.e2e, /expectedSnapshotCount: 11/);
+  assert.match(sources.e2e, /snapshotValues\.length !== expectedSnapshots\.length/);
+  assert.match(sources.e2e, /const snapshotValues: bigint\[\] = \[\];/);
+  assert.match(sources.e2e, /assertAuditPacketBinding\(\{/);
+  assert.doesNotMatch(sources.e2e, /nextRequestId[\s\S]*-\s*1n/);
   assert.doesNotMatch(
     sources.e2e,
     /auditorClient\.decrypt\(s\)\)\.value\)\s*\/\s*1e6/,

@@ -5,6 +5,12 @@ import noxPlugin from '@iexec-nox/nox-hardhat-plugin';
 
 // Load .env manually (no dotenv dependency).
 function env(name: string): string | undefined {
+  // An explicitly activated Fresh environment must override the repository's
+  // fallback .env. Check definition rather than truthiness so precedence is
+  // deterministic even when an operator deliberately exports an empty value.
+  if (process.env[name] !== undefined) {
+    return process.env[name];
+  }
   try {
     const line = readFileSync(new URL('./.env', import.meta.url), 'utf8')
       .split('\n')

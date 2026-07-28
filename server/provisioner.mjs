@@ -8,20 +8,21 @@
  * delegate in production. The visitor then submits requestSpend from their own
  * wallet (their own signature, their own gas).
  *
- * POST /api/provision { address } -> { mandateId, proposeTx, activateTx }
+ * POST /api/provision-challenge { address } -> EIP-712 ownership challenge
+ * POST /api/provision { address, challengeId, signature } -> mandate result
  * POST /api/demo-decision { runId, requestId, action }
  * POST /api/demo-audit-packet { runId, requestIds }
  * POST /api/governance-execute { to, data, nonce, signer, signature }
  * GET  /api/health
  *
- * Env (see provisioner.env): ADMIN_KEY, SIGNER_B_KEY, MODULE, SAFE, RPC_URL,
- * GATEWAY_URL, PORT.
+ * Env (see server/OPERATIONS.md): ADMIN_KEY, SIGNER_B_KEY, MODULE, SAFE,
+ * RPC_URL, RPC_FALLBACK_URLS, GATEWAY_URL and PORT.
  */
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  createPublicClient, createWalletClient, http as viemHttp,
+  createPublicClient, createWalletClient,
   decodeFunctionData, encodeAbiParameters, encodeFunctionData, isAddress,
   keccak256, parseAbi, parseSignature, recoverTypedDataAddress, stringToBytes,
 } from 'viem';
@@ -39,21 +40,43 @@ import {
 } from './lib/demo-decision.mjs';
 import { createSerialExecutor, recentRequestIds, sameAddressList } from './lib/demo-security.mjs';
 import { createSingleFlight } from './lib/single-flight.mjs';
+import { createProvisionChallengeService } from './lib/provision-security.mjs';
+import { createGuardedRpcFallback, parseRpcUrls } from './lib/rpc-fallback.mjs';
+import { createTreasuryReadinessJournal } from './lib/treasury-readiness.mjs';
+import {
+  areNoxHandlesResolved,
+  resolveThenRetryNoxRead,
+  waitUntilNoxSimulatable,
+} from './lib/nox-production.mjs';
+import { requireSingleReceiptEvent } from './lib/receipt-events.mjs';
+import { createSponsoredRateLimitJournal } from './lib/sponsored-rate-limit.mjs';
 
 const {
   ADMIN_KEY, SIGNER_B_KEY, MODULE, SAFE,
   RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com',
+  RPC_FALLBACK_URLS = '',
   GATEWAY_URL = 'https://gateway-testnets.noxprotocol.dev',
   NOX_COMPUTE = '0x24ef36ec5b626d7dcd09a98f3083c2758f0f77bf',
   SUBGRAPH_URL = 'https://thegraph.ethereum-sepolia-testnet.noxprotocol.io/api/subgraphs/id/9CsccKwvgYFo72zZeU4k4wj2NEBLdWhVE3EUandgmzgo',
   PORT = '4041',
-  PROVISION_ENABLED = 'true',                       // emergency kill switch
+  PROVISION_ENABLED = 'false',                      // opt-in; wallet challenge is mandatory
+  PROVISION_CHALLENGE_TTL_MS = '300000',
   ALLOWED_ORIGIN = 'https://veilguard.axiqo.xyz',   // CORS lock
   MAX_PER_DAY = '20',                               // global daily mandate cap
   MAX_DEMO_AUDIT_PER_DAY = '20',                    // sponsored packet gas cap
+  DEMO_TREASURY_TOPUP_ENABLED = 'false',
+  DEMO_TREASURY_TOPUP_USDC = '400',
+  TEST_USDC,
+  CONFIDENTIAL_USDC,
 } = process.env;
 
-const enabled = PROVISION_ENABLED !== 'false';
+function strictFlag(name, value) {
+  if (value !== 'true' && value !== 'false') throw new Error(`${name} must be exactly true or false`);
+  return value === 'true';
+}
+
+const enabled = strictFlag('PROVISION_ENABLED', PROVISION_ENABLED);
+const treasuryTopupEnabled = strictFlag('DEMO_TREASURY_TOPUP_ENABLED', DEMO_TREASURY_TOPUP_ENABLED);
 const dayCap = Number(MAX_PER_DAY);
 const auditDayCap = Number(MAX_DEMO_AUDIT_PER_DAY);
 if (!Number.isInteger(dayCap) || dayCap < 1 || !Number.isInteger(auditDayCap) || auditDayCap < 1) {
@@ -62,15 +85,61 @@ if (!Number.isInteger(dayCap) || dayCap < 1 || !Number.isInteger(auditDayCap) ||
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 const CHAIN_ID = 11155111n;
+const HOUR = 3_600_000;
 const usdc = (n) => BigInt(Math.round(n * 1e6));
 // Sponsored demo policy: auto-execute ≤ 40, budget 300, reserve floor 100.
 const POLICY = { autoLimit: usdc(40), budget: usdc(300), reserve: usdc(100), days: 30n };
 
-const pub = createPublicClient({ chain: sepolia, transport: viemHttp(RPC_URL) });
+function parseUsdcAmount(name, value) {
+  if (!/^\d+(?:\.\d{1,6})?$/.test(value)) throw new Error(`${name} must be a non-negative USDC amount`);
+  const [whole, fraction = ''] = value.split('.');
+  return BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, '0'));
+}
+
+const treasuryTopupRaw = parseUsdcAmount('DEMO_TREASURY_TOPUP_USDC', DEMO_TREASURY_TOPUP_USDC);
+const minimumTreasuryTopupRaw = POLICY.budget + POLICY.reserve;
+if (treasuryTopupEnabled) {
+  if (!isAddress(TEST_USDC) || !isAddress(CONFIDENTIAL_USDC)) {
+    throw new Error('TEST_USDC and CONFIDENTIAL_USDC are required when demo treasury top-up is enabled');
+  }
+  if (treasuryTopupRaw < minimumTreasuryTopupRaw) {
+    throw new Error('DEMO_TREASURY_TOPUP_USDC must cover the full demo budget plus reserve floor');
+  }
+}
+
+const rpcUrls = parseRpcUrls(
+  RPC_URL,
+  RPC_FALLBACK_URLS,
+  sepolia.rpcUrls.default.http,
+);
+const rpc = createGuardedRpcFallback({ urls: rpcUrls, chainId: CHAIN_ID });
+const pub = createPublicClient({ chain: sepolia, transport: rpc.transport });
 const admin = privateKeyToAccount(ADMIN_KEY);
 const signerB = privateKeyToAccount(SIGNER_B_KEY);
-const adminWallet = createWalletClient({ account: admin, chain: sepolia, transport: viemHttp(RPC_URL) });
-const signerBWallet = createWalletClient({ account: signerB, chain: sepolia, transport: viemHttp(RPC_URL) });
+const adminWallet = createWalletClient({ account: admin, chain: sepolia, transport: rpc.transport });
+const signerBWallet = createWalletClient({ account: signerB, chain: sepolia, transport: rpc.transport });
+
+const challengeTtlMs = Number(PROVISION_CHALLENGE_TTL_MS);
+const provisionChallenges = createProvisionChallengeService({
+  chainId: CHAIN_ID,
+  module: MODULE,
+  ttlMs: challengeTtlMs,
+});
+const provisionRateLimits = createSponsoredRateLimitJournal({
+  filePath: process.env.PROVISION_RATE_JOURNAL_PATH
+    ?? join(tmpdir(), `veilguard-provision-rate-${MODULE.toLowerCase()}.json`),
+  domain: { kind: 'provision', chainId: CHAIN_ID, module: MODULE, safe: SAFE },
+  dailyCap: dayCap,
+  subjectWindowMs: HOUR,
+});
+await provisionRateLimits.load();
+const auditRateLimits = createSponsoredRateLimitJournal({
+  filePath: process.env.DEMO_AUDIT_RATE_JOURNAL_PATH
+    ?? join(tmpdir(), `veilguard-audit-rate-${MODULE.toLowerCase()}.json`),
+  domain: { kind: 'audit-packet', chainId: CHAIN_ID, module: MODULE, safe: SAFE },
+  dailyCap: auditDayCap,
+});
+await auditRateLimits.load();
 
 const safeAbi = [
   { type: 'function', name: 'nonce', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
@@ -94,6 +163,10 @@ const MODULE_RUNTIME_ABI = parseAbi([
   'function nextPacketId() view returns (uint256)',
   'function getAuditPacket(uint256 packetId) view returns (address auditor,uint256 mandateId,uint32 policyVersion,bytes32 manifestHash,uint64 createdAt,uint256[] requestIds,bytes32[] snapshotHandles)',
   'function createAuditPacket(address auditor,uint256 mandateId,uint256[] requestIds) returns (uint256 packetId)',
+]);
+const MODULE_EVENT_ABI = parseAbi([
+  'event MandateProposed(uint256 indexed mandateId,address indexed delegate,uint32 version)',
+  'event AuditPacketCreated(uint256 indexed packetId,address indexed auditor,uint256 indexed mandateId,bytes32 manifestHash)',
 ]);
 
 // Every Safe action shares one critical section. The nonce read, state
@@ -230,19 +303,40 @@ async function governanceExecute({ to, data, nonce, signer, signature }) {
 // watchdog all sign with the same account; without a lock they race on nonces.
 const withAdminLock = createSerialExecutor();
 const adminWrite = (params) => withAdminLock(async () => {
-  const hash = await adminWallet.writeContract(params);
+  const estimatedGas = await waitUntilNoxSimulatable(
+    'finalize proof exact estimate',
+    () => pub.estimateContractGas({ ...params, account: admin }),
+  );
+  const hash = await adminWallet.writeContract({ ...params, gas: estimatedGas * 125n / 100n });
   const rc = await pub.waitForTransactionReceipt({ hash });
   if (rc.status !== 'success') throw new Error('admin transaction reverted');
   return hash;
 });
 const adminProposeMandate = (params) => withAdminLock(async () => {
-  // Capture the contract-assigned id inside the same account nonce boundary;
-  // reading nextMandateId after releasing the lock can attribute another
-  // concurrent proposal to this caller.
-  const mandateId = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'nextMandateId' });
-  const hash = await adminWallet.writeContract(params);
+  // Retry only the exact read-only estimate while fresh Nox external inputs
+  // propagate. The write is opened exactly once after this barrier succeeds.
+  const estimatedGas = await waitUntilNoxSimulatable(
+    'proposeMandate external-input exact estimate',
+    () => pub.estimateContractGas({ ...params, account: admin }),
+  );
+  const hash = await adminWallet.writeContract({ ...params, gas: estimatedGas * 125n / 100n });
   const rc = await pub.waitForTransactionReceipt({ hash });
   if (rc.status !== 'success') throw new Error('mandate proposal reverted');
+  const event = requireSingleReceiptEvent({
+    abi: MODULE_EVENT_ABI,
+    contract: MODULE,
+    receipt: rc,
+    eventName: 'MandateProposed',
+    label: 'mandate proposal receipt',
+  });
+  const mandateId = BigInt(event.args.mandateId);
+  if (
+    mandateId < 1n
+    || String(event.args.delegate).toLowerCase() !== String(params.args[0]).toLowerCase()
+    || BigInt(event.args.version) !== mandateId
+  ) {
+    throw new Error('MandateProposed event does not match the submitted proposal');
+  }
   return { hash, mandateId };
 });
 
@@ -264,18 +358,21 @@ async function getHandleClient() {
 const SWEEP_ENABLED = process.env.SWEEP_ENABLED !== 'false';
 const SWEEP_MS = Number(process.env.SWEEP_MS ?? 15_000);
 const finalizingIds = new Set();
+const NOX_STATUS_URL = `${GATEWAY_URL}/v0/public/handles/status`;
 
-async function decisionResolved(handle) {
-  try {
-    const r = await fetch(`${GATEWAY_URL}/v0/public/handles/status`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ handles: [handle] }),
-      signal: AbortSignal.timeout(6_000),
-    });
-    if (!r.ok) return false;
-    const d = await r.json();
-    return d?.payload?.statuses?.[0]?.resolved === true;
-  } catch { return false; }
+async function decryptNoxHandle(label, handle) {
+  const hc = await getHandleClient();
+  return resolveThenRetryNoxRead({
+    statusUrl: NOX_STATUS_URL,
+    handles: [handle],
+    label,
+    operation: () => hc.decrypt(handle),
+    usability: {
+      shouldRetry: (error) => !/not authorized|does not exist|permission/i.test(
+        `${error?.shortMessage ?? error?.message ?? error}`,
+      ),
+    },
+  });
 }
 
 /** Finalize one request if it is still pending and its decision is provable. */
@@ -291,9 +388,16 @@ async function finalizeRequest(id) {
     const r = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getRequest', args: [id] });
     if (Number(r[5]) !== 1) return { skipped: 'not-pending', state: Number(r[5]) };
     const decisionHandle = r[7];
-    if (!(await decisionResolved(decisionHandle))) return { skipped: 'tee-not-ready' };
+    if (!(await areNoxHandlesResolved(NOX_STATUS_URL, [decisionHandle]))) {
+      return { skipped: 'tee-not-ready' };
+    }
     const hc = await getHandleClient();
-    const { decryptionProof } = await hc.publicDecrypt(decisionHandle);
+    const { decryptionProof } = await resolveThenRetryNoxRead({
+      statusUrl: NOX_STATUS_URL,
+      handles: [decisionHandle],
+      label: 'provisioner decision public decrypt',
+      operation: () => hc.publicDecrypt(decisionHandle),
+    });
     const hash = await adminWrite({
       address: MODULE, abi: MODULE_ABI, functionName: 'finalize', args: [id, decryptionProof],
     });
@@ -325,7 +429,7 @@ async function sweepFinalize() {
       const r = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getRequest', args: [i] });
       const state = Number(r[5]);
       if (state === 1) {
-        if (!(await decisionResolved(r[7]))) continue;
+        if (!(await areNoxHandlesResolved(NOX_STATUS_URL, [r[7]]))) continue;
         try { await finalizeRequest(i); console.log(`[sweep] finalized #${i}`); }
         catch (e) { console.log(`[sweep] #${i} finalize failed: ${e?.shortMessage ?? e?.message}`); }
       } else if (state === 3) {
@@ -376,6 +480,71 @@ const REFRESH_MIN_BUDGET = usdc(150);
 const REFRESH_CHECK_MS = Number(process.env.REFRESH_CHECK_MS ?? 2 * 60_000);
 const GAS_FLOOR = 3n * 10n ** 15n;   // 0.003 ETH
 const GAS_TOPUP = 10n * 10n ** 15n;  // 0.01 ETH
+const treasuryReadinessPath = process.env.TREASURY_READINESS_JOURNAL_PATH
+  ?? join(tmpdir(), `veilguard-treasury-readiness-${MODULE.toLowerCase()}.json`);
+const treasuryReadiness = createTreasuryReadinessJournal({
+  filePath: treasuryReadinessPath,
+  module: MODULE,
+  safe: SAFE,
+});
+await treasuryReadiness.load();
+let lastTreasuryError = null;
+let lastTreasuryTopupAt = null;
+
+const testUsdcAbi = [
+  {
+    type: 'function', name: 'faucet', stateMutability: 'nonpayable',
+    inputs: [{ name: 'amount', type: 'uint256' }], outputs: [],
+  },
+  {
+    type: 'function', name: 'approve', stateMutability: 'nonpayable',
+    inputs: [{ name: 'spender', type: 'address' }, { name: 'amount', type: 'uint256' }],
+    outputs: [{ type: 'bool' }],
+  },
+];
+const confidentialUsdcAbi = [{
+  type: 'function', name: 'wrap', stateMutability: 'nonpayable',
+  inputs: [{ name: 'to', type: 'address' }, { name: 'amount', type: 'uint256' }],
+  outputs: [{ type: 'bytes32' }],
+}];
+
+async function fundDemoTreasury() {
+  if (!treasuryTopupEnabled) {
+    throw new HttpError(
+      503,
+      'demo treasury top-up is disabled; refusing to refresh a policy budget without backing assets',
+    );
+  }
+  try {
+    const result = await withAdminLock(async () => {
+      const send = async (params, label) => {
+        const hash = await adminWallet.writeContract(params);
+        const receipt = await pub.waitForTransactionReceipt({ hash });
+        if (receipt.status !== 'success') throw new Error(`${label} reverted`);
+        return hash;
+      };
+      await send({
+        address: TEST_USDC, abi: testUsdcAbi, functionName: 'faucet',
+        args: [treasuryTopupRaw],
+      }, 'treasury faucet');
+      await send({
+        address: TEST_USDC, abi: testUsdcAbi, functionName: 'approve',
+        args: [CONFIDENTIAL_USDC, treasuryTopupRaw],
+      }, 'treasury wrapper approval');
+      await send({
+        address: CONFIDENTIAL_USDC, abi: confidentialUsdcAbi, functionName: 'wrap',
+        args: [SAFE, treasuryTopupRaw],
+      }, 'treasury wrap');
+      return { fundedAt: new Date().toISOString(), topupRaw: treasuryTopupRaw };
+    });
+    lastTreasuryTopupAt = result.fundedAt;
+    lastTreasuryError = null;
+    return result;
+  } catch (error) {
+    lastTreasuryError = error?.shortMessage ?? error?.message ?? 'treasury top-up failed';
+    throw error;
+  }
+}
 
 const adminSend = (to, value) => withAdminLock(async () => {
   const hash = await adminWallet.sendTransaction({ to, value });
@@ -410,15 +579,20 @@ async function refreshDemoMandateIfDrained() {
               needsFresh = true;
               console.log(`[demo] ${delegate} mandate #${id} recipient schema is stale — refreshing`);
             }
-            const hc = await getHandleClient();
-            const budget = BigInt((await hc.decrypt(m[6])).value);
+            const budget = BigInt((await decryptNoxHandle(
+              'watchdog mandate budget decrypt',
+              m[6],
+            )).value);
             if (budget < REFRESH_MIN_BUDGET) {
               needsFresh = true;
               console.log(`[demo] ${delegate} mandate #${id} budget ${budget} below floor — refreshing`);
             }
           } catch (e) {
             const msg = `${e?.shortMessage ?? e?.message ?? e}`;
-            if (/not authorized|does not exist/i.test(msg)) {
+            if (
+              /not authorized|does not exist/i.test(msg)
+              || e?.code === 'NOX_OPERATION_NOT_RETRYABLE'
+            ) {
               // pre-rotation mandate: its handles are granted to the RETIRED admin.
               // Replace it so the new admin can monitor the budget again.
               needsFresh = true;
@@ -427,6 +601,16 @@ async function refreshDemoMandateIfDrained() {
           }
         } else {
           console.log(`[demo] ${delegate} has no active mandate — provisioning`);
+        }
+        if (
+          !needsFresh
+          && (
+            !treasuryTopupEnabled
+            || !treasuryReadiness.isReady(delegate, id, minimumTreasuryTopupRaw)
+          )
+        ) {
+          needsFresh = true;
+          console.log(`[demo] ${delegate} mandate #${id} lacks treasury funding evidence — refreshing fail-closed`);
         }
         if (!needsFresh) continue;
         // an in-flight request occupies the slot; activation would revert — retry next cycle
@@ -437,6 +621,11 @@ async function refreshDemoMandateIfDrained() {
           if ([1, 3].includes(Number(r[5])) && r[1].toLowerCase() === delegate.toLowerCase()) { busySlot = true; break; }
         }
         if (busySlot) continue;
+        // Never reset a confidential policy budget unless backing test assets
+        // were explicitly added to the Safe first. This top-up is intentionally
+        // separate from the encrypted policy values and cannot alter a decision
+        // by loosening its limit, budget or reserve floor.
+        const funding = await fundDemoTreasury();
         const hc = await getHandleClient();
         const [l, b, f] = await Promise.all([
           hc.encryptInput(POLICY.autoLimit, 'uint256', MODULE),
@@ -450,6 +639,12 @@ async function refreshDemoMandateIfDrained() {
             l.handle, l.handleProof, b.handle, b.handleProof, f.handle, f.handleProof],
         });
         await safeExec2of2(MODULE, encodeFunctionData({ abi: MODULE_ABI, functionName: 'activateMandate', args: [mandateId] }));
+        await treasuryReadiness.record({
+          delegate,
+          mandateId,
+          topupRaw: funding.topupRaw,
+          fundedAt: funding.fundedAt,
+        });
         console.log(`[demo] fresh mandate #${mandateId} activated for ${delegate} (2-of-2)`);
       } catch (e) {
         console.log(`[demo] ${delegate} refresh failed: ${e?.shortMessage ?? e?.message}`);
@@ -459,11 +654,7 @@ async function refreshDemoMandateIfDrained() {
 }
 
 // ------- rate limiting -------
-const lastByAddr = new Map();
-const HOUR = 3600_000;
 let inFlight = false;
-let dayStart = 0;        // stamped lazily (Date.now unavailable pre-request in cron, fine here)
-let dayCount = 0;
 
 const moduleReadAbi = MODULE_ABI;
 
@@ -474,6 +665,7 @@ async function existingActiveMandate(address) {
 }
 
 async function provision(address) {
+  const funding = await fundDemoTreasury();
   const hc = await getHandleClient();
   const [l, b, f] = await Promise.all([
     hc.encryptInput(POLICY.autoLimit, 'uint256', MODULE),
@@ -490,6 +682,12 @@ async function provision(address) {
 
   const activateData = encodeFunctionData({ abi: MODULE_ABI, functionName: 'activateMandate', args: [mandateId] });
   const activateTx = await safeExec2of2(MODULE, activateData);
+  await treasuryReadiness.record({
+    delegate: address,
+    mandateId,
+    topupRaw: funding.topupRaw,
+    fundedAt: funding.fundedAt,
+  });
 
   return { mandateId: Number(mandateId), proposeTx, activateTx };
 }
@@ -503,12 +701,18 @@ async function delegateBudget(delegate, mandateId) {
   const c = budgetCache.get(delegate);
   if (c && Date.now() - c.at < 60_000) return c.budget;
   const m = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getMandate', args: [mandateId] });
-  const hc = await getHandleClient();
-  const budget = BigInt((await hc.decrypt(m[6])).value);
+  const budget = BigInt((await decryptNoxHandle(
+    'demo readiness mandate budget decrypt',
+    m[6],
+  )).value);
   budgetCache.set(delegate, { at: Date.now(), budget });
   return budget;
 }
-function kickRefresh() { lastBudgetCheck = 0; refreshDemoMandateIfDrained(); }
+function kickRefresh() {
+  lastBudgetCheck = 0;
+  void refreshDemoMandateIfDrained()
+    .catch((error) => console.log(`[demo] refresh failed: ${error?.shortMessage ?? error?.message}`));
+}
 
 async function demoReady(delegate) {
   if (!isDemoDelegate(delegate)) return { ready: false, reason: 'not a demo delegate' };
@@ -518,6 +722,18 @@ async function demoReady(delegate) {
   if (!sameAddressList(mandate[8], DEMO_RECIPIENT_LIST)) {
     kickRefresh();
     return { ready: false, reason: 'demo recipient policy is being refreshed — ready in ~2 min' };
+  }
+  if (
+    !treasuryTopupEnabled
+    || !treasuryReadiness.isReady(delegate, mandateId, minimumTreasuryTopupRaw)
+  ) {
+    kickRefresh();
+    return {
+      ready: false,
+      reason: treasuryTopupEnabled
+        ? 'demo treasury funding evidence is being refreshed — ready in ~2 min'
+        : 'demo treasury top-up is disabled — policy budget will not be refreshed without backing assets',
+    };
   }
   const cool = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'cooldownUntil', args: [delegate] });
   const coolLeft = Number(cool) - Math.floor(Date.now() / 1000);
@@ -587,8 +803,7 @@ async function decryptAndVerifyAmount(r, spec) {
     spec,
     assertFinanceAdmin,
     decryptAmount: async (handle) => {
-      const hc = await getHandleClient();
-      return (await hc.decrypt(handle)).value;
+      return (await decryptNoxHandle('demo request amount decrypt', handle)).value;
     },
   });
 }
@@ -669,19 +884,44 @@ async function createOrReuseAuditPacket(mandateId, requestIds) {
   return withAdminLock(async () => {
     const existing = await findAuditPacket(mandateId, requestIds);
     if (existing) return existing;
-    const now = Date.now();
-    if (now - auditDayStart > 24 * HOUR) { auditDayStart = now; auditDayCount = 0; }
-    if (auditDayCount >= auditDayCap) throw new HttpError(429, 'daily sponsored audit packet cap reached');
     await assertFinanceAdmin();
-    const packetId = await pub.readContract({ address: MODULE, abi: MODULE_RUNTIME_ABI, functionName: 'nextPacketId' });
-    const hash = await adminWallet.writeContract({
+    // Consume persistent sponsored quota before any estimate or broadcast.
+    await auditRateLimits.consume('audit-packet');
+    const params = {
       address: MODULE, abi: MODULE_RUNTIME_ABI, functionName: 'createAuditPacket',
       args: [DEMO_AUDITOR, mandateId, requestIds],
-    });
+    };
+    const estimatedGas = await waitUntilNoxSimulatable(
+      'createAuditPacket exact estimate',
+      () => pub.estimateContractGas({ ...params, account: admin }),
+    );
+    const hash = await adminWallet.writeContract({ ...params, gas: estimatedGas * 125n / 100n });
     const rc = await pub.waitForTransactionReceipt({ hash });
     if (rc.status !== 'success') throw new Error('audit packet transaction reverted');
-    auditDayCount++;
+    const event = requireSingleReceiptEvent({
+      abi: MODULE_EVENT_ABI,
+      contract: MODULE,
+      receipt: rc,
+      eventName: 'AuditPacketCreated',
+      label: 'audit packet receipt',
+    });
+    const packetId = BigInt(event.args.packetId);
+    if (
+      packetId < 1n
+      || String(event.args.auditor).toLowerCase() !== DEMO_AUDITOR.toLowerCase()
+      || BigInt(event.args.mandateId) !== BigInt(mandateId)
+    ) {
+      throw new Error('AuditPacketCreated event does not match the submitted packet');
+    }
     const packet = await pub.readContract({ address: MODULE, abi: MODULE_RUNTIME_ABI, functionName: 'getAuditPacket', args: [packetId] });
+    if (
+      packet[0].toLowerCase() !== DEMO_AUDITOR.toLowerCase()
+      || BigInt(packet[1]) !== BigInt(mandateId)
+      || !sameIds(packet[5], requestIds)
+      || String(packet[3]).toLowerCase() !== String(event.args.manifestHash).toLowerCase()
+    ) {
+      throw new Error('stored audit packet does not match its receipt event');
+    }
     return { packetId, manifestHash: packet[3], hash, reused: false };
   });
 }
@@ -728,8 +968,6 @@ async function performDemoAuditPacket({ runId, requestIds }) {
 // and continues server-owned; polls of the same scope key pick up the cached
 // terminal result (success stays redeliverable, an error is delivered once).
 const auditFlights = createSingleFlight();
-let auditDayStart = 0;
-let auditDayCount = 0;
 function startDemoAuditPacket(input) {
   assertRunId(input.runId);
   if (!Array.isArray(input.requestIds)) throw new HttpError(400, 'requestIds must be an array');
@@ -761,13 +999,40 @@ const parseJsonObject = (body) => {
 
 http.createServer((req, res) => {
   if (req.method === 'OPTIONS') return json(res, 204, {});
-  if (req.url === '/api/health') return json(res, 200, {
-    ok: true, enabled, module: MODULE, safe: SAFE, dayCount, dayCap,
-    sweep: SWEEP_ENABLED, finalizing: finalizingIds.size,
-    decisions: demoDecisionService.processingCount, auditJobs: auditFlights.inFlight,
-    auditDayCount, auditDayCap,
-    demoDecisionWindowSeconds: Math.floor(DEMO_DECISION_WINDOW_MS / 1000),
-  });
+  if (req.url === '/api/health') {
+    const treasuryStatus = treasuryReadiness.status();
+    const provisionRateStatus = provisionRateLimits.status();
+    const auditRateStatus = auditRateLimits.status();
+    return json(res, 200, {
+      ok: true, enabled, module: MODULE, safe: SAFE,
+      dayCount: provisionRateStatus.dailyCount, dayCap,
+      provision: {
+        enabled,
+        operational: enabled
+          && treasuryTopupEnabled
+          && provisionRateStatus.healthy
+          && provisionRateStatus.remainingToday > 0,
+        defaultEnabled: false,
+        rateLimit: provisionRateStatus,
+        ...provisionChallenges.status(),
+      },
+      treasury: {
+        topupEnabled: treasuryTopupEnabled,
+        policyRefreshGuarded: true,
+        configuredTopupRaw: String(treasuryTopupRaw),
+        requiredTopupRaw: String(minimumTreasuryTopupRaw),
+        lastTopupAt: lastTreasuryTopupAt,
+        lastTopupFailed: lastTreasuryError !== null,
+        ...treasuryStatus,
+      },
+      rpc: rpc.status(),
+      sweep: SWEEP_ENABLED, finalizing: finalizingIds.size,
+      decisions: demoDecisionService.processingCount, auditJobs: auditFlights.inFlight,
+      auditDayCount: auditRateStatus.dailyCount, auditDayCap,
+      auditRateLimit: auditRateStatus,
+      demoDecisionWindowSeconds: Math.floor(DEMO_DECISION_WINDOW_MS / 1000),
+    });
+  }
   if (req.method === 'POST' && req.url === '/api/cosign') {
     return json(res, 410, { error: 'legacy co-sign endpoint removed; use /api/governance-execute' });
   }
@@ -867,39 +1132,70 @@ http.createServer((req, res) => {
     });
     return;
   }
+  if (req.method === 'POST' && req.url === '/api/provision-challenge') {
+    if (!enabled) {
+      return json(res, 503, {
+        error: 'self-service provisioning is currently disabled — use the shared demo Delegate/Auditor instead',
+      });
+    }
+    if (!treasuryTopupEnabled) {
+      return json(res, 503, {
+        error: 'self-service provisioning is unavailable until treasury top-up is configured',
+      });
+    }
+    const rateStatus = provisionRateLimits.status();
+    if (!rateStatus.healthy) {
+      return json(res, 503, {
+        error: 'self-service provisioning is unavailable while persistent rate accounting is unhealthy',
+      });
+    }
+    if (rateStatus.remainingToday <= 0) {
+      return json(res, 429, {
+        error: 'daily demo provisioning cap reached — use the shared demo Delegate/Auditor for now',
+      });
+    }
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 500) req.destroy(); });
+    req.on('end', () => {
+      try {
+        const { address } = parseJsonObject(body);
+        json(res, 200, { ok: true, ...provisionChallenges.issue(address) });
+      } catch (e) {
+        json(res, e?.status ?? 500, { error: e?.message ?? 'challenge creation failed' });
+      }
+    });
+    return;
+  }
   if (req.method === 'POST' && req.url === '/api/provision') {
     if (!enabled) return json(res, 503, { error: 'self-service provisioning is currently disabled — use the shared demo Delegate/Auditor instead' });
+    if (!treasuryTopupEnabled) {
+      return json(res, 503, {
+        error: 'self-service provisioning is unavailable until treasury top-up is configured',
+      });
+    }
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 1000) req.destroy(); });
     req.on('end', async () => {
       try {
-        const { address } = JSON.parse(body || '{}');
+        const { address, challengeId, signature } = parseJsonObject(body);
         if (!isAddress(address)) return json(res, 400, { error: 'invalid address' });
-        const key = address.toLowerCase();
-
+        await provisionChallenges.verify({ address, challengeId, signature });
         // idempotent: reuse an already-active mandate instead of creating spam
         const existing = await existingActiveMandate(address);
         if (existing) return json(res, 200, { ok: true, mandateId: existing, reused: true });
 
-        const prev = lastByAddr.get(key);
-        if (prev && Date.now() - prev < HOUR) return json(res, 429, { error: 'already provisioned recently — one provision per address per hour' });
-
-        // global daily cap (anti gas-drain / mandate-spam)
-        const now = Date.now();
-        if (now - dayStart > 24 * HOUR) { dayStart = now; dayCount = 0; }
-        if (dayCount >= dayCap) return json(res, 429, { error: 'daily demo provisioning cap reached — please use the shared demo Delegate/Auditor for now' });
-
         if (inFlight) return json(res, 503, { error: 'another provisioning is in progress — try again in a few seconds' });
         inFlight = true;
         try {
+          // Persist quota consumption before treasury funding, proof creation or
+          // any broadcast. A crash/ambiguous response cannot reopen the budget.
+          await provisionRateLimits.consume(address);
           const result = await provision(address);
-          lastByAddr.set(key, Date.now());
-          dayCount++;
           json(res, 200, { ok: true, ...result });
         } finally { inFlight = false; }
       } catch (e) {
         console.error('provision error:', e?.shortMessage ?? e?.message ?? e);
-        json(res, 500, { error: e?.shortMessage ?? e?.message ?? 'provisioning failed' });
+        json(res, e?.status ?? 500, { error: e?.shortMessage ?? e?.message ?? 'provisioning failed' });
       }
     });
     return;
