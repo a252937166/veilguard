@@ -1,5 +1,5 @@
 import type { Abi } from 'viem';
-import { makeWalletClient, publicClient } from './nox';
+import { ensureAccountOnSepolia, makeWalletClient, publicClient } from './nox';
 
 /**
  * Robust wallet write for injected wallets (MetaMask & co).
@@ -38,6 +38,11 @@ export async function walletWrite(opts: {
     account, address, abi, functionName, args, onHint, onRequestStarted,
     injected = true, timeoutMs = 150_000,
   } = opts;
+
+  // Never let a stale or manually changed wallet network reach a signature or
+  // transaction prompt. Demo wallets sign locally and are already pinned to
+  // Sepolia, so only injected providers need this guard.
+  await ensureAccountOnSepolia(account);
 
   // 1) pre-flight on our RPC: early revert detection + a gas limit for the wallet
   const gas = await publicClient.estimateContractGas({

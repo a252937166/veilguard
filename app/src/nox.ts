@@ -11,6 +11,7 @@ import { GATEWAY } from './config';
 import { demoWalletByAddress } from './demo';
 import { sepoliaReadTransport } from './rpc';
 import type { Eip1193Provider } from './wallet';
+import { ensureSepoliaNetwork } from './wallet-network';
 
 /** The injected provider chosen at connect time (EIP-6963), or the legacy default. */
 let activeProvider: Eip1193Provider | undefined;
@@ -21,6 +22,11 @@ export function setActiveProvider(p: Eip1193Provider | undefined) {
 }
 export function getActiveProvider(): Eip1193Provider | undefined {
   return activeProvider ?? (window as any).ethereum;
+}
+
+export async function ensureAccountOnSepolia(account: `0x${string}`): Promise<number> {
+  if (demoWalletByAddress(account)) return sepolia.id;
+  return ensureSepoliaNetwork(getActiveProvider());
 }
 
 export const publicClient: PublicClient = createPublicClient({
@@ -52,8 +58,9 @@ export function makeWalletClient(account: `0x${string}`): WalletClient {
  * account so encrypt-proof identity and decrypt signatures always agree
  * (workaround for the SDK deriving identity from `getAddresses()[0]`).
  */
-export function handleClientFor(account: `0x${string}`): Promise<HandleClient> {
+export async function handleClientFor(account: `0x${string}`): Promise<HandleClient> {
   const key = account.toLowerCase();
+  await ensureAccountOnSepolia(account);
   let cached = clientCache.get(key);
   if (!cached) {
     const wallet = makeWalletClient(account);

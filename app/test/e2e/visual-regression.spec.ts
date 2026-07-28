@@ -30,7 +30,10 @@ test.describe('deterministic operations desk visual baselines', () => {
       await page.goto(visualCase.route, { waitUntil: 'domcontentloaded' });
       const resumeDialog = page.getByRole('dialog', { name: /continue the unfinished launch day shift/i });
       const dismissResume = resumeDialog.getByRole('button', { name: /close resume dialog/i });
-      if (await dismissResume.isVisible().catch(() => false)) {
+      const resumeAppeared = visualCase.surface !== 'landing'
+        && await dismissResume.waitFor({ state: 'visible', timeout: 2_000 })
+          .then(() => true, () => false);
+      if (resumeAppeared) {
         // The visual fixture already carries the recovered run state. Dismiss
         // the startup choice without activating the guided drawer, whose
         // responsive reflow and browser scroll anchoring are outside the page

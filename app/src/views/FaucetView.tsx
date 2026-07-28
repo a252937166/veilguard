@@ -12,7 +12,7 @@ const ETH_FAUCETS = [
 ];
 
 export function FaucetView() {
-  const { account, run, busy, toast, demoRole } = useApp();
+  const { account, run, busy, toast, demoRole, chainOk = true } = useApp();
   const [balance, setBalance] = useState<bigint>();
   const [balanceChecking, setBalanceChecking] = useState(false);
   const [balanceUnavailable, setBalanceUnavailable] = useState(false);
@@ -143,18 +143,19 @@ export function FaucetView() {
             <label htmlFor="faucet-amount">Amount</label>
             <input id="faucet-amount" type="number" value={amount} onChange={(e) => setAmount(e.target.value)} min="1" max="10000" />
           </div>
-          <button className="btn primary" disabled={!account || !!busy} onClick={claim}><Icon name="funds" /> Claim TestUSDC</button>
+          <button className="btn primary" disabled={!account || !!busy || !chainOk} onClick={claim}><Icon name="funds" /> Claim TestUSDC</button>
         </div>
         <p className="muted" style={{ marginTop: 10, fontSize: 12.5 }}>
           Cap 10,000 per claim · token <a href={scan(ADDR.TestUSDC)} target="_blank" rel="noopener" className="mono">{short(ADDR.TestUSDC)}</a>.
           {!account && ' Connect a wallet first.'}
+          {account && !chainOk && ' Switch the connected wallet to Ethereum Sepolia first.'}
         </p>
       </div>
 
       <div className="card">
         <h2>3 · Optional — fund the treasury <small>wrap TestUSDC 1:1 into confidential cUSDC held by the Safe</small></h2>
         <div className="row">
-          <button className="btn" disabled={!account || !!busy} onClick={wrapToTreasury}><Icon name="payments" /> Wrap {amount} → Safe treasury</button>
+          <button className="btn" disabled={!account || !!busy || !chainOk} onClick={wrapToTreasury}><Icon name="payments" /> Wrap {amount} → Safe treasury</button>
           <span className="muted" style={{ fontSize: 12.5 }}>needs TestUSDC balance ≥ amount; the treasury is already funded for the demo</span>
         </div>
         <p className="muted" style={{ marginTop: 10, fontSize: 12.5 }}>

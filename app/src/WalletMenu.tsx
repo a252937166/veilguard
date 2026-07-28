@@ -7,14 +7,16 @@ import { Icon } from './icons';
 
 export function WalletMenu({
   account, roleChips, chainOk, wallet, isDemo, onConnect, onSwitchChain, onSwitchAccount, onDisconnect,
+  switchingChain = false,
 }: {
   account?: `0x${string}`;
   roleChips: string[];
   chainOk: boolean;
   wallet?: WalletInfo | null;
   isDemo?: boolean;
+  switchingChain?: boolean;
   onConnect: () => void;
-  onSwitchChain: () => void;
+  onSwitchChain: () => void | Promise<void>;
   onSwitchAccount: () => void;
   onDisconnect: () => void;
 }) {
@@ -71,7 +73,18 @@ export function WalletMenu({
 
   return (
     <div className="wallet" ref={ref}>
-      {!chainOk && <button className="btn small wrongnet" onClick={onSwitchChain}>⚠ Wrong network — switch to Sepolia</button>}
+      {!chainOk && (
+        <button
+          className="btn small wrongnet"
+          disabled={switchingChain}
+          aria-busy={switchingChain}
+          onClick={() => void onSwitchChain()}
+        >
+          {switchingChain
+            ? <><span className="spin" aria-hidden="true" /> Switching to Sepolia…</>
+            : '⚠ Wrong network — switch to Sepolia'}
+        </button>
+      )}
       <button
         ref={triggerRef}
         className={`wallet-btn ${open ? 'open' : ''}`}
