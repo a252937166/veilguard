@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   app: { current: {} as any },
   walletWrite: vi.fn(),
   readContract: vi.fn(async () => 0n),
+  handleClientFor: vi.fn(),
 }));
 
 vi.mock('../src/App', () => ({ useApp: () => mocks.app.current }));
@@ -21,7 +22,7 @@ vi.mock('../src/nox', () => ({
     readContract: mocks.readContract,
     waitForTransactionReceipt: vi.fn(),
   },
-  handleClientFor: vi.fn(),
+  handleClientFor: mocks.handleClientFor,
 }));
 
 import { DelegateView } from '../src/views/DelegateView';
@@ -34,6 +35,51 @@ afterEach(() => {
   sessionStorage.clear();
   mocks.walletWrite.mockReset();
   mocks.readContract.mockClear();
+  mocks.handleClientFor.mockReset();
+});
+
+test('non-demo confidential payment submit stays disabled off Sepolia', async () => {
+  const ownWallet = '0x1111111111111111111111111111111111111111' as const;
+  mocks.app.current = {
+    account: ownWallet,
+    mandates: [{
+      id: 12n,
+      delegate: ownWallet,
+      validFrom: 1_700_000_000n,
+      validUntil: 1_900_000_000n,
+      version: 4,
+      state: 2,
+      autoLimit: handle,
+      budgetLeft: handle,
+      reserveFloor: handle,
+      recipients: [DEMO_RECIPIENTS.cloudNode],
+    }],
+    requests: [],
+    run: vi.fn(),
+    busy: null,
+    refresh: vi.fn(async () => ({ status: 'unchanged', checkedAt: Date.now(), changedRequestIds: [] })),
+    toast: vi.fn(),
+    goTab: vi.fn(),
+    startDemo: vi.fn(),
+    requestDemoRestart: vi.fn(),
+    demoRole: undefined,
+    chainOk: false,
+    lastUpdated: Date.now(),
+    loadError: false,
+  };
+
+  const router = createMemoryRouter([{ path: '*', element: <DelegateView /> }], {
+    initialEntries: ['/payments'],
+  });
+  render(<RouterProvider router={router} />);
+
+  const guidedSubmit = (await screen.findAllByRole('button', { name: 'Submit confidential payment' }))
+    .find((button) => button.getAttribute('data-guided-action') === 'mission-routine');
+  expect(guidedSubmit).toBeDefined();
+  expect(guidedSubmit).toBeDisabled();
+  expect(screen.getAllByText(/Switch the connected wallet to Ethereum Sepolia before signing/i).length).toBeGreaterThan(0);
+  expect(mocks.handleClientFor).not.toHaveBeenCalled();
+  expect(mocks.walletWrite).not.toHaveBeenCalled();
 });
 
 test('completed invoice CTA opens its frozen request with zero wallet writes', async () => {

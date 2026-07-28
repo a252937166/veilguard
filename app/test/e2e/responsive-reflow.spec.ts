@@ -16,7 +16,9 @@ const narrowWidths = [292, 320] as const;
 async function dismissTransientGuidance(page: Page) {
   const resumeDialog = page.getByRole('dialog', { name: /continue the unfinished launch day shift/i });
   const dismissResume = resumeDialog.getByRole('button', { name: /close resume dialog/i });
-  if (await dismissResume.isVisible().catch(() => false)) await dismissResume.click();
+  const resumeAppeared = await dismissResume.waitFor({ state: 'visible', timeout: 2_000 })
+    .then(() => true, () => false);
+  if (resumeAppeared) await dismissResume.click();
 
   const closeMission = page.getByRole('button', { name: /close mission drawer/i });
   if (await closeMission.isVisible().catch(() => false)) await closeMission.click();

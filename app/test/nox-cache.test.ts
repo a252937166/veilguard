@@ -3,6 +3,8 @@ import { beforeEach, expect, test, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   createHandleClient: vi.fn(),
   createWalletClient: vi.fn(() => ({ transport: 'wallet' })),
+  demoWalletByAddress: vi.fn(() => undefined as any),
+  ensureSepoliaNetwork: vi.fn(),
 }));
 
 vi.mock('viem', () => ({
@@ -12,8 +14,9 @@ vi.mock('viem', () => ({
 }));
 vi.mock('viem/chains', () => ({ sepolia: { id: 11155111 } }));
 vi.mock('@iexec-nox/handle', () => ({ createViemHandleClient: mocks.createHandleClient }));
-vi.mock('../src/demo', () => ({ demoWalletByAddress: vi.fn(() => undefined) }));
+vi.mock('../src/demo', () => ({ demoWalletByAddress: mocks.demoWalletByAddress }));
 vi.mock('../src/rpc', () => ({ sepoliaReadTransport: 'read-fallback' }));
+vi.mock('../src/wallet-network', () => ({ ensureSepoliaNetwork: mocks.ensureSepoliaNetwork }));
 
 import { handleClientFor, setActiveProvider } from '../src/nox';
 
@@ -22,6 +25,10 @@ const account = '0x1111111111111111111111111111111111111111' as const;
 beforeEach(() => {
   mocks.createHandleClient.mockReset();
   mocks.createWalletClient.mockClear();
+  mocks.demoWalletByAddress.mockReset();
+  mocks.demoWalletByAddress.mockReturnValue(undefined);
+  mocks.ensureSepoliaNetwork.mockReset();
+  mocks.ensureSepoliaNetwork.mockResolvedValue(11155111);
   setActiveProvider({ request: vi.fn() });
 });
 
@@ -48,4 +55,21 @@ test('switching the injected provider invalidates account-bound handle clients',
   await expect(handleClientFor(account)).resolves.toEqual({ id: 'provider-b' });
 
   expect(mocks.createHandleClient).toHaveBeenCalledTimes(2);
+});
+
+test('network failure prevents injected Nox signatures and client creation', async () => {
+  mocks.ensureSepoliaNetwork.mockRejectedValueOnce(new Error('wrong wallet network'));
+
+  await expect(handleClientFor(account)).rejects.toThrow('wrong wallet network');
+  expect(mocks.createHandleClient).not.toHaveBeenCalled();
+  expect(mocks.createWalletClient).not.toHaveBeenCalled();
+});
+
+test('demo accounts bypass the injected provider network guard', async () => {
+  mocks.demoWalletByAddress.mockReturnValue({ transport: 'demo-wallet' });
+  mocks.createHandleClient.mockResolvedValueOnce({ id: 'demo' });
+
+  await expect(handleClientFor(account)).resolves.toEqual({ id: 'demo' });
+  expect(mocks.ensureSepoliaNetwork).not.toHaveBeenCalled();
+  expect(mocks.createWalletClient).not.toHaveBeenCalled();
 });

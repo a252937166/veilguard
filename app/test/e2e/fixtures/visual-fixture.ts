@@ -629,7 +629,10 @@ export async function installVisualFixture(
     if (surface === 'audit-review' && url.pathname === '/src/nox.ts') {
       const response = await route.fetch();
       const original = await response.text();
-      const mockStart = original.indexOf('export function handleClientFor(account)');
+      const mockStart = [
+        original.indexOf('export async function handleClientFor(account)'),
+        original.indexOf('export function handleClientFor(account)'),
+      ].find((index) => index >= 0) ?? -1;
       const sourceMapStart = original.indexOf('//# sourceMappingURL=');
       if (mockStart < 0 || sourceMapStart < 0) {
         unexpectedNetwork.push('Unable to install the test-only Nox decrypt adapter.');

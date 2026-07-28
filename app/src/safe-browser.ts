@@ -1,6 +1,6 @@
 import { encodeFunctionData, type WalletClient } from 'viem';
 import { ADDR, moduleAbi } from './config';
-import { publicClient } from './nox';
+import { ensureAccountOnSepolia, publicClient } from './nox';
 
 const ZERO = '0x0000000000000000000000000000000000000000' as const;
 
@@ -31,6 +31,7 @@ export async function governance2of2(
   args: unknown[],
   onStep?: (s: string) => void,
 ): Promise<`0x${string}`> {
+  await ensureAccountOnSepolia(ownerA.account!.address);
   const to = ADDR.VeilGuardModule;
   const data = encodeFunctionData({ abi: moduleAbi, functionName: fn, args }) as `0x${string}`;
   const nonce = (await publicClient.readContract({ address: ADDR.Safe, abi: safeAbi, functionName: 'nonce' })) as bigint;

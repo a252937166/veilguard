@@ -88,7 +88,7 @@ export function DelegateView({
 }: { detailRequestId?: string; guidedScenarioKey?: DemoScenarioKey } = {}) {
   const {
     account, mandates, requests, run, busy, refresh, toast, goTab, startDemo,
-    requestDemoRestart, demoRole, lastUpdated, loadError,
+    requestDemoRestart, demoRole, lastUpdated, loadError, chainOk = true,
   } = useApp();
   const location = useLocation();
   const navigate = useNavigate();
@@ -1381,7 +1381,7 @@ export function DelegateView({
                   data-guided-action={`mission-${selectedStory.key}`}
                   data-guided-instruction={`Click “${selectedInvoiceAction.label}”`}
                   disabled={selectedActionIsRecovering || (selectedActionIsSubmission
-                    && (!!busy || submissionLock.current || !!flow
+                    && (!chainOk || !!busy || submissionLock.current || !!flow
                       || (!!blockingRequest && selectedStory.key !== 'violation')))}
                   aria-busy={selectedActionIsRecovering || (!!flow && activeOperationKey === selectedStory.key)}
                   onClick={() => handleGuidedInvoiceAction(selectedStory.key, selectedInvoiceAction)}
@@ -1396,9 +1396,11 @@ export function DelegateView({
               {selectedInvoiceAction.kind === 'open' && selectedInvoiceAction.label === 'Open completed request' && (
                 <button type="button" className="btn ghost" onClick={requestDemoRestart}>Start a new demo run</button>
               )}
-              <span className="muted">{selectedInvoiceAction.kind === 'retry'
-                ? 'The prior attempt is explicitly expired or timed out; retry creates the next bound attempt.'
-                : 'Review first, then submit. The policy never reveals its thresholds.'}</span>
+              <span className="muted">{!chainOk && selectedActionIsSubmission
+                ? 'Switch the connected wallet to Ethereum Sepolia before signing.'
+                : selectedInvoiceAction.kind === 'retry'
+                  ? 'The prior attempt is explicitly expired or timed out; retry creates the next bound attempt.'
+                  : 'Review first, then submit. The policy never reveals its thresholds.'}</span>
             </div>
             {selectedStory.key === 'violation' && isDemo && violationCoolLeft > 0 && (
               <div className="inline-alert">The isolated stress-test delegate is cooling down. A verified recent block can be reviewed now; a fresh run is available in {mmss(violationCoolLeft)}.</div>
@@ -1440,12 +1442,13 @@ export function DelegateView({
           <div style={{ marginTop: 14 }}>
             <button
               className={`btn primary ${flow && activeOperationKey === 'free' ? 'is-busy' : ''}`}
-              disabled={!!busy || submissionLock.current || !!flow || !amount || (isDemo ? (!!freeplayBlocking || freeplayCoolLeft > 0) : (!!blockingRequest || mainCoolLeft > 0))}
+              disabled={!chainOk || !!busy || submissionLock.current || !!flow || !amount || (isDemo ? (!!freeplayBlocking || freeplayCoolLeft > 0) : (!!blockingRequest || mainCoolLeft > 0))}
               aria-busy={!!flow && activeOperationKey === 'free'}
               onClick={() => void runFreePlay()}
             >
               {flow && activeOperationKey === 'free' ? <><span className="spin" aria-hidden="true" /> Payment in progress…</> : 'Submit confidential payment'}
             </button>
+            {!chainOk && <p className="muted" style={{ fontSize: 12, marginTop: 7 }}>Switch the connected wallet to Ethereum Sepolia before signing.</p>}
             {(isDemo ? freeplayBlocking : blockingRequest) && <p className="muted" style={{ fontSize: 12, marginTop: 7 }}>A payment is in flight — it clears automatically in under a minute.</p>}
           </div>
         </details>

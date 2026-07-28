@@ -16,7 +16,8 @@ import { WaveField } from './WaveField';
 import { ConnectModal } from './ConnectModal';
 import { DEMO_ROLES, demoAddress, type DemoRole } from './demo';
 import { getActiveProvider, setActiveProvider } from './nox';
-import { listWallets, onWalletsChanged, type WalletInfo } from './wallet';
+import { listWallets, onWalletsChanged, type Eip1193Provider, type WalletInfo } from './wallet';
+import { ensureSepoliaNetwork, readWalletChainId } from './wallet-network';
 import evidence from './demo-evidence.json';
 import {
   createDemoSession,
@@ -47,7 +48,6 @@ import { reconcileRunBoundMissionEvidence } from './mission-recovery';
 import { OperationCoordinator, type OperationSpec } from './operation-lock';
 import { chainSnapshotFingerprint, changedRequestIds as diffChangedRequestIds, requestStateSnapshot } from './chain-refresh';
 import { loadPaymentTrack, savePaymentTrack, unresolvedRunBroadcast } from './payment-track';
-import { BROWSER_RPC_URLS } from './rpc';
 
 const EVIDENCE_COMMIT = evidence.commit;
 
@@ -119,6 +119,7 @@ export function App() {
   const [tryOpen, setTryOpen] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   const [walletInfo, setWalletInfo] = useState<WalletInfo | null>(null);
+  const [networkSwitching, setNetworkSwitching] = useState(false);
   const [demoSession, setDemoSession] = useState<DemoSessionV2 | null>(() => loadDemoSession());
   const [resumeOpen, setResumeOpen] = useState(false);
   const [restartBusy, setRestartBusy] = useState(false);
@@ -199,6 +200,12 @@ export function App() {
   }, [demoSession?.runId, demoSession?.tour.active, demoSession?.tour.paused]);
 
   const enterDemo = useCallback((role: DemoRole) => {
+    walletConnectionEpoch.current += 1;
+    networkSwitchRequest.current = null;
+    setNetworkSwitching(false);
+    setActiveProvider(undefined);
+    setWalletInfo(null);
+    setChainId(undefined);
     setDemoRole(role);
     setAccount(demoAddress(role));
     setTryOpen(false);
@@ -207,6 +214,12 @@ export function App() {
   }, [demoSession, dispatchDemo]);
 
   const exitDemo = useCallback(() => {
+    walletConnectionEpoch.current += 1;
+    networkSwitchRequest.current = null;
+    setNetworkSwitching(false);
+    setActiveProvider(undefined);
+    setWalletInfo(null);
+    setChainId(undefined);
     setDemoRole(null);
     setAccount(undefined);
     try { sessionStorage.removeItem('vg_demo'); } catch { /* ignore */ }
@@ -267,6 +280,11 @@ export function App() {
   const [loadError, setLoadError] = useState(false);
   const toastTimer = useRef<any>(null);
   const operationCoordinator = useRef(new OperationCoordinator());
+  const walletConnectionEpoch = useRef(0);
+  const networkSwitchRequest = useRef<{
+    provider: Eip1193Provider | undefined;
+    promise: Promise<number>;
+  } | null>(null);
   const lastToast = useRef<{ msg: string; at: number } | null>(null);
   const chainRefresh = useRef<(() => Promise<ChainRefreshResult>) | null>(null);
 
@@ -322,33 +340,94 @@ export function App() {
     }
   }, [account, refresh, toast]);
 
+  const requestSepolia = useCallback((provider: Eip1193Provider | undefined): Promise<number> => {
+    const activeRequest = networkSwitchRequest.current;
+    if (activeRequest && activeRequest.provider === provider) {
+      return activeRequest.promise;
+    }
+    setNetworkSwitching(true);
+    const pending = ensureSepoliaNetwork(provider);
+    networkSwitchRequest.current = { provider, promise: pending };
+    void pending.finally(() => {
+      if (networkSwitchRequest.current?.promise === pending) {
+        networkSwitchRequest.current = null;
+        setNetworkSwitching(false);
+      }
+    }).catch(() => {
+      // The original promise remains rejected for the caller. This catch only
+      // prevents the cleanup branch created by finally() from becoming unhandled.
+    });
+    return pending;
+  }, []);
+
   // wallet — open the picker (EIP-6963 multi-wallet)
   const connect = useCallback(() => {
+    walletConnectionEpoch.current += 1;
     if (!listWallets().length) { setTryOpen(true); return; } // no wallet → offer demo mode
     setConnectOpen(true);
   }, []);
 
   // connect to a SPECIFIC detected wallet
   const connectWallet = useCallback(async (w: WalletInfo, silent = false) => {
+    const connectionEpoch = silent
+      ? walletConnectionEpoch.current
+      : ++walletConnectionEpoch.current;
     try {
+      const accts = (await w.provider.request({ method: silent ? 'eth_accounts' : 'eth_requestAccounts' })) as string[];
+      if (connectionEpoch !== walletConnectionEpoch.current) return false;
+      if (!accts?.[0]) return false;
       setActiveProvider(w.provider);
       setDemoRole(null);
-      const accts = (await w.provider.request({ method: silent ? 'eth_accounts' : 'eth_requestAccounts' })) as string[];
-      if (!accts?.[0]) return false;
       setAccount(accts[0] as `0x${string}`);
-      setChainId(Number(await w.provider.request({ method: 'eth_chainId' })));
       setWalletInfo(w);
       setConnectOpen(false);
-      try { localStorage.setItem('vg_wallet', w.rdns ?? w.uuid); } catch { /* ignore */ }
+      try {
+        sessionStorage.removeItem('vg_demo');
+        localStorage.setItem('vg_wallet', w.rdns ?? w.uuid);
+      } catch { /* ignore */ }
+
+      let detectedChain: number | undefined;
+      try {
+        detectedChain = await readWalletChainId(w.provider);
+        if (connectionEpoch !== walletConnectionEpoch.current) return false;
+        setChainId(detectedChain);
+      } catch (networkError: any) {
+        if (connectionEpoch !== walletConnectionEpoch.current) return false;
+        setChainId(undefined);
+        if (!silent) toast(`Wallet connected, but ${networkError?.message ?? networkError}`, true);
+        return true;
+      }
+
+      if (!silent && detectedChain !== CHAIN_ID) {
+        try {
+          const selectedChain = await requestSepolia(w.provider);
+          if (connectionEpoch !== walletConnectionEpoch.current) return false;
+          setChainId(selectedChain);
+          toast('Wallet connected and switched to Ethereum Sepolia.');
+        } catch (networkError: any) {
+          if (connectionEpoch !== walletConnectionEpoch.current) return false;
+          try {
+            const currentChain = await readWalletChainId(w.provider);
+            if (connectionEpoch !== walletConnectionEpoch.current) return false;
+            setChainId(currentChain);
+          } catch { /* keep the last known chain */ }
+          if (connectionEpoch !== walletConnectionEpoch.current) return false;
+          toast(`Wallet connected, but ${networkError?.message ?? networkError}`, true);
+        }
+      } else if (!silent) {
+        toast('Wallet connected on Ethereum Sepolia.');
+      }
       return true;
     } catch (e: any) {
+      if (connectionEpoch !== walletConnectionEpoch.current) return false;
       if (!silent && e?.code !== 4001) toast(`Connect failed: ${e?.shortMessage ?? e?.message ?? e}`, true);
       return false;
     }
-  }, [toast]);
+  }, [requestSepolia, toast]);
 
   // restore a demo role for this tab, else reconnect the previously-used wallet
   useEffect(() => {
+    const restoreEpoch = walletConnectionEpoch.current;
     try {
       const demo = sessionStorage.getItem('vg_demo');
       if (demo && demo in DEMO_ROLES) { enterDemo(demo as DemoRole); return; }
@@ -359,6 +438,7 @@ export function App() {
     let done = false;
     const tryReconnect = async () => {
       if (done) return;
+      if (walletConnectionEpoch.current !== restoreEpoch) { done = true; return; }
       const w = listWallets().find((x) => (x.rdns ?? x.uuid) === saved);
       if (!w) return;
       done = true;
@@ -372,43 +452,73 @@ export function App() {
 
   const switchChain = useCallback(async () => {
     const eth = getActiveProvider();
-    if (!eth) return;
+    const operationEpoch = walletConnectionEpoch.current;
     try {
-      await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0xaa36a7' }] });
-    } catch (e: any) {
-      if (e?.code === 4902) {
-        await eth.request({ method: 'wallet_addEthereumChain', params: [{
-          chainId: '0xaa36a7', chainName: 'Sepolia',
-          nativeCurrency: { name: 'Sepolia ETH', symbol: 'ETH', decimals: 18 },
-          rpcUrls: [...BROWSER_RPC_URLS],
-          blockExplorerUrls: ['https://sepolia.etherscan.io'],
-        }] });
+      const selectedChain = await requestSepolia(eth);
+      if (operationEpoch !== walletConnectionEpoch.current) return;
+      setChainId(selectedChain);
+      toast('Wallet switched to Ethereum Sepolia.');
+    } catch (error: any) {
+      if (operationEpoch !== walletConnectionEpoch.current) return;
+      if (eth) {
+        try {
+          const currentChain = await readWalletChainId(eth);
+          if (operationEpoch !== walletConnectionEpoch.current) return;
+          setChainId(currentChain);
+        } catch { /* preserve the last known chain */ }
       }
+      if (operationEpoch !== walletConnectionEpoch.current) return;
+      toast(error?.message ?? String(error), true);
     }
-    setChainId(Number(await eth.request({ method: 'eth_chainId' })));
-  }, []);
+  }, [requestSepolia, toast]);
 
   const switchAccount = useCallback(async () => {
     const eth = getActiveProvider();
     if (!eth) return;
+    const operationEpoch = ++walletConnectionEpoch.current;
     try {
       await eth.request({ method: 'wallet_requestPermissions', params: [{ eth_accounts: {} }] });
+      if (operationEpoch !== walletConnectionEpoch.current) return;
       const accts = (await eth.request({ method: 'eth_requestAccounts' })) as string[];
+      if (operationEpoch !== walletConnectionEpoch.current) return;
       setAccount(accts[0] as `0x${string}`);
+      if (accts[0]) {
+        try {
+          const selectedChain = await requestSepolia(eth);
+          if (operationEpoch !== walletConnectionEpoch.current) return;
+          setChainId(selectedChain);
+        } catch (networkError: any) {
+          if (operationEpoch !== walletConnectionEpoch.current) return;
+          try {
+            const currentChain = await readWalletChainId(eth);
+            if (operationEpoch !== walletConnectionEpoch.current) return;
+            setChainId(currentChain);
+          } catch { /* preserve the last known chain */ }
+          if (operationEpoch !== walletConnectionEpoch.current) return;
+          toast(`Account switched, but ${networkError?.message ?? networkError}`, true);
+        }
+      }
     } catch (e: any) {
+      if (operationEpoch !== walletConnectionEpoch.current) return;
       if (e?.code !== 4001) toast(`Switch account failed: ${e?.message ?? e}`, true);
     }
-  }, [toast]);
+  }, [requestSepolia, toast]);
 
   const disconnect = useCallback(async () => {
+    const operationEpoch = ++walletConnectionEpoch.current;
+    networkSwitchRequest.current = null;
+    setNetworkSwitching(false);
     const eth = getActiveProvider();
-    try { await eth?.request({ method: 'wallet_revokePermissions', params: [{ eth_accounts: {} }] }); }
-    catch { /* not all wallets support revoke — clearing local state still disconnects the UI */ }
     setAccount(undefined);
+    setChainId(undefined);
     setWalletInfo(null);
     setActiveProvider(undefined);
     try { localStorage.removeItem('vg_wallet'); } catch { /* ignore */ }
-    toast('Wallet disconnected from VeilGuard.');
+    try { await eth?.request({ method: 'wallet_revokePermissions', params: [{ eth_accounts: {} }] }); }
+    catch { /* not all wallets support revoke — clearing local state still disconnects the UI */ }
+    if (operationEpoch === walletConnectionEpoch.current) {
+      toast('Wallet disconnected from VeilGuard.');
+    }
   }, [toast]);
 
   // re-render wallet picker as wallets announce themselves
@@ -867,6 +977,7 @@ export function App() {
                 isDemo={!!demoRole}
                 onConnect={connect}
                 onSwitchChain={switchChain}
+                switchingChain={networkSwitching}
                 onSwitchAccount={demoRole ? () => setTryOpen(true) : switchAccount}
                 onDisconnect={demoRole ? exitDemo : disconnect}
               />

@@ -14,7 +14,7 @@ const loadBook = (): Record<string, string> => {
 const saveBook = (b: Record<string, string>) => { try { localStorage.setItem('vg_addrbook', JSON.stringify(b)); } catch { /* ignore */ } };
 
 export function AdminView() {
-  const { account, mandates, requests, run, busy, paused, toast } = useApp();
+  const { account, mandates, requests, run, busy, paused, toast, chainOk = true } = useApp();
   const [step, setStep] = useState(0);
   const [book, setBook] = useState<Record<string, string>>(loadBook);
   const [delegate, setDelegate] = useState<string>(ROLES.delegate);
@@ -231,7 +231,7 @@ export function AdminView() {
             </p>
             <div className="wiz-nav">
               <button className="btn ghost" onClick={() => setStep(1)}>← Back</button>
-              <button className="btn primary" disabled={!!busy} onClick={propose}>🔒 Encrypt &amp; propose</button>
+              <button className="btn primary" disabled={!chainOk || !!busy} onClick={propose}>🔒 Encrypt &amp; propose</button>
             </div>
           </div>
         )}
@@ -242,7 +242,7 @@ export function AdminView() {
           <h3>Emergency control</h3>
           <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>The admin can pause instantly, but only the Safe 2-of-2 can resume — a compromised admin can tighten, never loosen.</p>
           <div className="row">
-            <button className="btn" disabled={!!busy || paused} onClick={pause}>⏸ Pause all mandates</button>
+            <button className="btn" disabled={!chainOk || !!busy || paused} onClick={pause}>⏸ Pause all mandates</button>
             {paused && <span className="pill bad">PAUSED — only the Safe can resume</span>}
           </div>
         </div>
@@ -291,7 +291,7 @@ export function AdminView() {
               </div>
               <div className="sticky-decision-bar">
                 <button className="btn ghost" onClick={() => setAuditStep(0)}>Back to selection</button>
-                <button className="btn primary" disabled={!!busy} onClick={createPacket}>Create immutable packet</button>
+                <button className="btn primary" disabled={!chainOk || !!busy} onClick={createPacket}>Create immutable packet</button>
               </div>
             </div>
           )}

@@ -34,7 +34,7 @@ function ago(ts: bigint): string {
 }
 
 export function SignerView() {
-  const { account, owners, mandates, requests, paused, run, busy, refresh, toast, demoRole } = useApp();
+  const { account, owners, mandates, requests, paused, run, busy, refresh, toast, demoRole, chainOk = true } = useApp();
   const location = useLocation();
   const navigate = useNavigate();
   const route = useMemo(() => parseAppHash(`#${location.pathname}`), [location.pathname]);
@@ -256,8 +256,8 @@ export function SignerView() {
                 <SafeDecisionDock flow={decisionFlow}>
                   {isOwner ? (
                     <>
-                      <button className="btn danger" disabled={!!busy || !!decisionBusy} aria-busy={decisionBusy === 'reject'} onClick={() => void gov(`reject request #${selected.id}`, 'cancelEscalated', [selected.id])}>{decisionBusy === 'reject' ? <><span className="spin" aria-hidden="true" /> Returning funds…</> : 'Reject & return funds'}</button>
-                      <button className="btn primary" disabled={!!busy || !!decisionBusy} aria-busy={decisionBusy === 'approve'} onClick={() => void gov(`approve request #${selected.id}`, 'executeEscalated', [selected.id])}>{decisionBusy === 'approve' ? <><span className="spin" aria-hidden="true" /> Executing 2-of-2…</> : 'Approve payment'}</button>
+                      <button className="btn danger" disabled={!chainOk || !!busy || !!decisionBusy} aria-busy={decisionBusy === 'reject'} onClick={() => void gov(`reject request #${selected.id}`, 'cancelEscalated', [selected.id])}>{decisionBusy === 'reject' ? <><span className="spin" aria-hidden="true" /> Returning funds…</> : 'Reject & return funds'}</button>
+                      <button className="btn primary" disabled={!chainOk || !!busy || !!decisionBusy} aria-busy={decisionBusy === 'approve'} onClick={() => void gov(`approve request #${selected.id}`, 'executeEscalated', [selected.id])}>{decisionBusy === 'approve' ? <><span className="spin" aria-hidden="true" /> Executing 2-of-2…</> : 'Approve payment'}</button>
                     </>
                   ) : isDemoDelegate ? (
                     <>
@@ -297,8 +297,8 @@ export function SignerView() {
         <section className="surface-section governance-queue">
           <div className="section-heading"><div><h2>Governance queue</h2><p>Policy activation and emergency recovery use the same real Safe threshold.</p></div></div>
           <div className="governance-actions">
-            {drafts.map((mandate) => <div key={String(mandate.id)}><span>Activate mandate #{String(mandate.id)} · {short(mandate.delegate)}</span><button className="btn" disabled={!!busy} onClick={() => gov(`activate mandate #${mandate.id}`, 'activateMandate', [mandate.id])}>Activate 2-of-2</button></div>)}
-            {paused && <div><span>Module is paused</span><button className="btn primary" disabled={!!busy} onClick={() => gov('resume all mandates', 'unpauseAll', [])}>Resume 2-of-2</button></div>}
+            {drafts.map((mandate) => <div key={String(mandate.id)}><span>Activate mandate #{String(mandate.id)} · {short(mandate.delegate)}</span><button className="btn" disabled={!chainOk || !!busy} onClick={() => gov(`activate mandate #${mandate.id}`, 'activateMandate', [mandate.id])}>Activate 2-of-2</button></div>)}
+            {paused && <div><span>Module is paused</span><button className="btn primary" disabled={!chainOk || !!busy} onClick={() => gov('resume all mandates', 'unpauseAll', [])}>Resume 2-of-2</button></div>}
             {!drafts.length && !paused && <div className="empty-state"><b>No governance actions waiting</b><span>The module is active and no policy draft needs activation.</span></div>}
           </div>
         </section>

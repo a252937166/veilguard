@@ -232,7 +232,7 @@ const packetResultFromCheckpoint = (
 };
 
 export function DisclosureView() {
-  const { account, financeAdmin, demoRole, requests, run, startDemo, toast } = useApp();
+  const { account, financeAdmin, demoRole, requests, run, startDemo, toast, chainOk = true } = useApp();
   const [step, setStep] = useState<BuilderStep>('select');
   const [session, setSession] = useState(loadDemoSession);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -893,7 +893,7 @@ export function DisclosureView() {
                 data-guided-instruction={mode === 'guided-facilitated'
                   ? 'Click “Request facilitated packet creation”'
                   : 'Click “Create packets with Admin wallet”'}
-                disabled={busy || !selectionValid}
+                disabled={busy || !selectionValid || (mode === 'admin-wallet' && !chainOk)}
                 onClick={create}
               >{busy ? <><span className="spin" /> Creating or resuming packets…</> : mode === 'guided-facilitated' ? 'Request facilitated packet creation' : 'Create packets with Admin wallet'}</button>
             </div>

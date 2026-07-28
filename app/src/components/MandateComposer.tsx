@@ -19,7 +19,7 @@ type Props = {
 const STEPS = ['Confidential values', 'Recipients', 'Review'] as const;
 
 export function MandateComposer({ source, onCancel, onComplete }: Props) {
-  const { account, run, busy, toast } = useApp();
+  const { account, run, busy, toast, chainOk = true } = useApp();
   const [step, setStep] = useState(0);
   const [delegate, setDelegate] = useState<string>(source?.delegate ?? ROLES.delegate);
   const [recipients, setRecipients] = useState<string[]>(source?.recipients ?? []);
@@ -149,7 +149,8 @@ export function MandateComposer({ source, onCancel, onComplete }: Props) {
           <div><dt>Recipients</dt><dd>{recipients.length}</dd></div>
           <div><dt>Governance state</dt><dd>Draft until Safe 2-of-2 activation</dd></div>
         </dl>
-        <div className="sticky-actions"><button type="button" className="btn ghost" onClick={() => setStep(1)} disabled={!!phase}>Back</button><button type="button" className="btn primary" onClick={submit} disabled={!!busy || !!phase}>Encrypt and propose</button></div>
+        <div className="sticky-actions"><button type="button" className="btn ghost" onClick={() => setStep(1)} disabled={!!phase}>Back</button><button type="button" className="btn primary" onClick={submit} disabled={!chainOk || !!busy || !!phase}>Encrypt and propose</button></div>
+        {!chainOk && <p className="muted">Switch the connected wallet to Ethereum Sepolia before encrypting or signing.</p>}
       </div>}
     </section>
   );
