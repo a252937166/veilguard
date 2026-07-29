@@ -50,6 +50,7 @@ import {
 } from './lib/nox-production.mjs';
 import { requireSingleReceiptEvent } from './lib/receipt-events.mjs';
 import { createSponsoredRateLimitJournal } from './lib/sponsored-rate-limit.mjs';
+import { maybeTopUpDemoGas } from './lib/demo-gas-topup.mjs';
 
 const {
   ADMIN_KEY, SIGNER_B_KEY, MODULE, SAFE,
@@ -65,6 +66,7 @@ const {
   MAX_PER_DAY = '20',                               // global daily mandate cap
   MAX_DEMO_AUDIT_PER_DAY = '20',                    // sponsored packet gas cap
   DEMO_TREASURY_TOPUP_ENABLED = 'false',
+  DEMO_GAS_TOPUP_ENABLED = 'false',
   DEMO_TREASURY_TOPUP_USDC = '400',
   TEST_USDC,
   CONFIDENTIAL_USDC,
@@ -77,6 +79,7 @@ function strictFlag(name, value) {
 
 const enabled = strictFlag('PROVISION_ENABLED', PROVISION_ENABLED);
 const treasuryTopupEnabled = strictFlag('DEMO_TREASURY_TOPUP_ENABLED', DEMO_TREASURY_TOPUP_ENABLED);
+const demoGasTopupEnabled = strictFlag('DEMO_GAS_TOPUP_ENABLED', DEMO_GAS_TOPUP_ENABLED);
 const dayCap = Number(MAX_PER_DAY);
 const auditDayCap = Number(MAX_DEMO_AUDIT_PER_DAY);
 if (!Number.isInteger(dayCap) || dayCap < 1 || !Number.isInteger(auditDayCap) || auditDayCap < 1) {
@@ -355,7 +358,7 @@ async function getHandleClient() {
 // Anyone may submit finalize(id, proof); the on-chain proof decides the outcome,
 // so this courier can only DELAY a result, never change one. Running it here lets
 // the delegate's outcome just "appear" with no second wallet popup.
-const SWEEP_ENABLED = process.env.SWEEP_ENABLED !== 'false';
+const SWEEP_ENABLED = strictFlag('SWEEP_ENABLED', process.env.SWEEP_ENABLED ?? 'true');
 const SWEEP_MS = Number(process.env.SWEEP_MS ?? 15_000);
 const finalizingIds = new Set();
 const NOX_STATUS_URL = `${GATEWAY_URL}/v0/public/handles/status`;
@@ -565,8 +568,17 @@ async function refreshDemoMandateIfDrained() {
       try {
         // gas top-up
         const bal = await pub.getBalance({ address: delegate });
-        if (bal < GAS_FLOOR) {
-          await adminSend(delegate, GAS_TOPUP);
+        const gasReadiness = await maybeTopUpDemoGas({
+          balance: bal,
+          floor: GAS_FLOOR,
+          enabled: demoGasTopupEnabled,
+          topup: () => adminSend(delegate, GAS_TOPUP),
+        });
+        if (!gasReadiness.ready) {
+          console.log(`[demo] ${delegate} gas is below the floor; automatic top-up is disabled`);
+          continue;
+        }
+        if (gasReadiness.toppedUp) {
           console.log(`[demo] topped up ${delegate} with 0.01 ETH gas`);
         }
         // mandate freshness
@@ -757,7 +769,13 @@ async function demoReady(delegate) {
     }
   }
   const bal = await pub.getBalance({ address: delegate });
-  if (bal < GAS_FLOOR) { kickRefresh(); return { ready: false, reason: 'demo delegate is being topped up with gas — retry in ~1 min' }; }
+  if (bal < GAS_FLOOR) {
+    if (!demoGasTopupEnabled) {
+      return { ready: false, reason: 'demo delegate gas is below the required floor and automatic top-up is disabled' };
+    }
+    kickRefresh();
+    return { ready: false, reason: 'demo delegate is being topped up with gas — retry in ~1 min' };
+  }
   try {
     const budget = await delegateBudget(delegate, mandateId);
     if (budget < REFRESH_MIN_BUDGET) { kickRefresh(); return { ready: false, reason: 'demo budget is being refreshed — ready in ~2 min' }; }
@@ -1018,6 +1036,7 @@ http.createServer((req, res) => {
       },
       treasury: {
         topupEnabled: treasuryTopupEnabled,
+        gasTopupEnabled: demoGasTopupEnabled,
         policyRefreshGuarded: true,
         configuredTopupRaw: String(treasuryTopupRaw),
         requiredTopupRaw: String(minimumTreasuryTopupRaw),

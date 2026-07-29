@@ -406,7 +406,8 @@ the required persistent paths, treasury gate and RPC broadcast policy.
 
 These controls are not considered deployed merely because this checkout passes.
 After release, acceptance must re-read `/api/health` and require the structured
-`provision`, `treasury` and `rpc` sections described in the operations guide.
+`provision`, `treasury` and `rpc` sections described in the operations guide,
+including `treasury.gasTopupEnabled=false` for a fail-closed release.
 If those fields are absent, production is still running an older backend and
 self-service provisioning must not be represented as using this hardened path.
 
