@@ -614,17 +614,17 @@ async function refreshDemoMandateIfDrained() {
         } else {
           console.log(`[demo] ${delegate} has no active mandate — provisioning`);
         }
-        if (
-          !needsFresh
-          && (
-            !treasuryTopupEnabled
-            || !treasuryReadiness.isReady(delegate, id, minimumTreasuryTopupRaw)
-          )
-        ) {
+        const hasTreasuryEvidence = id !== 0n
+          && treasuryReadiness.isReady(delegate, id, minimumTreasuryTopupRaw);
+        if (!needsFresh && !hasTreasuryEvidence) {
           needsFresh = true;
           console.log(`[demo] ${delegate} mandate #${id} lacks treasury funding evidence — refreshing fail-closed`);
         }
         if (!needsFresh) continue;
+        if (!treasuryTopupEnabled) {
+          console.log(`[demo] ${delegate} needs a funded mandate refresh, but treasury top-up is disabled`);
+          continue;
+        }
         // an in-flight request occupies the slot; activation would revert — retry next cycle
         const nextR = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'nextRequestId' });
         let busySlot = false;
@@ -707,7 +707,7 @@ async function provision(address) {
 // ------- demo readiness probe -------
 // "Run scenario" must be deterministic: before running, the client asks whether
 // this delegate is actually ready (mandate, slot, cooldown, gas, budget). If it
-// is not, we kick an async refresh and tell the client why.
+// is not, we schedule only an explicitly enabled refresh and tell the client why.
 const budgetCache = new Map(); // delegate -> { at, budget }
 async function delegateBudget(delegate, mandateId) {
   const c = budgetCache.get(delegate);
@@ -726,25 +726,41 @@ function kickRefresh() {
     .catch((error) => console.log(`[demo] refresh failed: ${error?.shortMessage ?? error?.message}`));
 }
 
+function kickTreasuryRefresh() {
+  if (!treasuryTopupEnabled) return false;
+  kickRefresh();
+  return true;
+}
+
 async function demoReady(delegate) {
   if (!isDemoDelegate(delegate)) return { ready: false, reason: 'not a demo delegate' };
   const mandateId = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'activeMandateOf', args: [delegate] });
-  if (mandateId === 0n) { kickRefresh(); return { ready: false, reason: 'demo mandate is being provisioned — ready in ~2 min' }; }
-  const mandate = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getMandate', args: [mandateId] });
-  if (!sameAddressList(mandate[8], DEMO_RECIPIENT_LIST)) {
-    kickRefresh();
-    return { ready: false, reason: 'demo recipient policy is being refreshed — ready in ~2 min' };
-  }
-  if (
-    !treasuryTopupEnabled
-    || !treasuryReadiness.isReady(delegate, mandateId, minimumTreasuryTopupRaw)
-  ) {
-    kickRefresh();
+  if (mandateId === 0n) {
+    const scheduled = kickTreasuryRefresh();
     return {
       ready: false,
-      reason: treasuryTopupEnabled
+      reason: scheduled
+        ? 'demo mandate is being provisioned — ready in ~2 min'
+        : 'demo mandate is unavailable and treasury top-up is disabled',
+    };
+  }
+  const mandate = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'getMandate', args: [mandateId] });
+  if (!sameAddressList(mandate[8], DEMO_RECIPIENT_LIST)) {
+    const scheduled = kickTreasuryRefresh();
+    return {
+      ready: false,
+      reason: scheduled
+        ? 'demo recipient policy is being refreshed — ready in ~2 min'
+        : 'demo recipient policy is stale and treasury top-up is disabled',
+    };
+  }
+  if (!treasuryReadiness.isReady(delegate, mandateId, minimumTreasuryTopupRaw)) {
+    const scheduled = kickTreasuryRefresh();
+    return {
+      ready: false,
+      reason: scheduled
         ? 'demo treasury funding evidence is being refreshed — ready in ~2 min'
-        : 'demo treasury top-up is disabled — policy budget will not be refreshed without backing assets',
+        : 'demo treasury funding evidence is missing and automatic top-up is disabled',
     };
   }
   const cool = await pub.readContract({ address: MODULE, abi: MODULE_ABI, functionName: 'cooldownUntil', args: [delegate] });
@@ -778,7 +794,15 @@ async function demoReady(delegate) {
   }
   try {
     const budget = await delegateBudget(delegate, mandateId);
-    if (budget < REFRESH_MIN_BUDGET) { kickRefresh(); return { ready: false, reason: 'demo budget is being refreshed — ready in ~2 min' }; }
+    if (budget < REFRESH_MIN_BUDGET) {
+      const scheduled = kickTreasuryRefresh();
+      return {
+        ready: false,
+        reason: scheduled
+          ? 'demo budget is being refreshed — ready in ~2 min'
+          : 'demo budget is below the required floor and automatic top-up is disabled',
+      };
+    }
   } catch { /* budget probe failing is not fatal — the request itself will tell */ }
   return { ready: true };
 }
