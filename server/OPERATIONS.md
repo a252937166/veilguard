@@ -83,6 +83,13 @@ When disabled, `/api/demo-ready` reports a low-gas Delegate as unavailable and
 does not schedule an Admin transfer. This switch is independent from treasury
 asset top-up and from `SWEEP_ENABLED`.
 
+Disabling treasury top-up blocks every new funding or mandate refresh, but it
+does not invalidate an existing mandate whose exact funded mandate/top-up pair
+is already present in the readiness journal. If that record is missing or the
+mandate needs replacement, `/api/demo-ready` returns unavailable without
+scheduling a treasury refresh. Never invent a readiness entry to bypass this
+gate.
+
 ## RPC fallback and broadcast safety
 
 Configure independent providers with:

@@ -81,6 +81,34 @@ test('every new mandate is gated by treasury funding before proposal and activat
   assert.ok(provision.indexOf('await safeExec2of2') < provision.indexOf('await treasuryReadiness.record'));
 });
 
+test('disabled treasury writes preserve exact existing evidence but never schedule a missing refresh', () => {
+  const refreshStart = source.indexOf('async function refreshDemoMandateIfDrained');
+  const provisionStart = source.indexOf('async function provision');
+  const refresh = source.slice(refreshStart, provisionStart);
+  assert.match(
+    refresh,
+    /const hasTreasuryEvidence = id !== 0n\s*&& treasuryReadiness\.isReady/,
+  );
+  assert.doesNotMatch(
+    refresh,
+    /!treasuryTopupEnabled\s*\|\|\s*!treasuryReadiness\.isReady/,
+  );
+  assert.ok(
+    refresh.indexOf('if (!treasuryTopupEnabled)')
+      < refresh.indexOf('await fundDemoTreasury()'),
+  );
+
+  const readinessStart = source.indexOf('async function demoReady');
+  const readinessEnd = source.indexOf('// ------- HTTP', readinessStart);
+  const readiness = source.slice(readinessStart, readinessEnd);
+  assert.match(readiness, /if \(!treasuryReadiness\.isReady/);
+  assert.doesNotMatch(
+    readiness,
+    /!treasuryTopupEnabled\s*\|\|\s*!treasuryReadiness\.isReady/,
+  );
+  assert.match(source, /function kickTreasuryRefresh\(\) \{\s*if \(!treasuryTopupEnabled\) return false;/);
+});
+
 test('provisioner clients share the guarded fallback rather than a single raw HTTP transport', () => {
   assert.match(source, /parseRpcUrls\(\s*RPC_URL,\s*RPC_FALLBACK_URLS,/);
   assert.match(source, /createGuardedRpcFallback/);
