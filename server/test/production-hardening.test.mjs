@@ -5,6 +5,7 @@ import test from 'node:test';
 const source = await readFile(new URL('../provisioner.mjs', import.meta.url), 'utf8');
 const treasurySource = await readFile(new URL('../lib/treasury-readiness.mjs', import.meta.url), 'utf8');
 const rateSource = await readFile(new URL('../lib/sponsored-rate-limit.mjs', import.meta.url), 'utf8');
+const gasTopupSource = await readFile(new URL('../lib/demo-gas-topup.mjs', import.meta.url), 'utf8');
 const noxSource = await readFile(new URL('../lib/nox-production.mjs', import.meta.url), 'utf8');
 const keeperSource = await readFile(new URL('../../scripts/keeper.ts', import.meta.url), 'utf8');
 const rotationSource = await readFile(new URL('../rotate-admin.mjs', import.meta.url), 'utf8');
@@ -21,6 +22,43 @@ test('self-service provision is opt-in and challenge verification precedes all a
   assert.ok(verification > 0);
   assert.ok(verification < existingLookup);
   assert.ok(verification < provisioning);
+});
+
+test('native demo gas top-up is separately opt-in and low-balance readiness stays fail-closed', () => {
+  assert.match(source, /DEMO_GAS_TOPUP_ENABLED = 'false'/);
+  assert.match(
+    source,
+    /strictFlag\('DEMO_GAS_TOPUP_ENABLED', DEMO_GAS_TOPUP_ENABLED\)/,
+  );
+  assert.match(
+    source,
+    /strictFlag\('SWEEP_ENABLED', process\.env\.SWEEP_ENABLED \?\? 'true'\)/,
+  );
+  assert.match(source, /gasTopupEnabled: demoGasTopupEnabled/);
+
+  const refreshStart = source.indexOf('async function refreshDemoMandateIfDrained');
+  const provisionStart = source.indexOf('async function provision');
+  const refresh = source.slice(refreshStart, provisionStart);
+  assert.match(refresh, /maybeTopUpDemoGas\(\{/);
+  assert.match(refresh, /enabled: demoGasTopupEnabled/);
+  assert.match(refresh, /topup: \(\) => adminSend\(delegate, GAS_TOPUP\)/);
+  assert.match(gasTopupSource, /if \(!enabled\) return \{ ready: false, toppedUp: false \}/);
+
+  const readinessStart = source.indexOf('async function demoReady');
+  const readinessEnd = source.indexOf('// ------- HTTP', readinessStart);
+  const readiness = source.slice(readinessStart, readinessEnd);
+  const readinessGuard = readiness.indexOf('if (!demoGasTopupEnabled)');
+  const scheduledRefresh = readiness.indexOf('kickRefresh()', readinessGuard);
+  assert.ok(readinessGuard > 0);
+  assert.ok(scheduledRefresh > readinessGuard);
+  assert.match(
+    readiness.slice(readinessGuard, scheduledRefresh),
+    /automatic top-up is disabled/,
+  );
+  assert.doesNotMatch(
+    readiness.slice(readinessGuard, scheduledRefresh),
+    /adminSend/,
+  );
 });
 
 test('every new mandate is gated by treasury funding before proposal and activation', () => {

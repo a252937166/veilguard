@@ -6,7 +6,8 @@ configuration keeps the shared read/finalize/demo APIs available, but:
 - `POST /api/provision-challenge` and `POST /api/provision` return `503`;
 - the demo watchdog does not create or refresh a mandate whose confidential
   budget is not backed by an explicit Safe treasury top-up;
-- `/api/health` reports both controls independently.
+- the demo watchdog does not transfer Sepolia ETH to a low-balance Delegate;
+- `/api/health` reports these controls independently.
 
 ## Self-service provisioning
 
@@ -71,6 +72,17 @@ must restrict such withdrawals or add a Safe-approved disclosure/monitoring
 mechanism. The health response therefore reports
 `treasury.liveBalanceObserved=false`.
 
+Native-gas sponsorship is a separate operation and remains disabled unless it
+is enabled exactly:
+
+```text
+DEMO_GAS_TOPUP_ENABLED=true
+```
+
+When disabled, `/api/demo-ready` reports a low-gas Delegate as unavailable and
+does not schedule an Admin transfer. This switch is independent from treasury
+asset top-up and from `SWEEP_ENABLED`.
+
 ## RPC fallback and broadcast safety
 
 Configure independent providers with:
@@ -119,6 +131,7 @@ provision.required
 provision.rateLimit.persistent
 provision.rateLimit.dailyCount
 treasury.topupEnabled
+treasury.gasTopupEnabled
 treasury.policyRefreshGuarded
 treasury.recordedMandates
 treasury.liveBalanceObserved
